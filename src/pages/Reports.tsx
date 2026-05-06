@@ -10,7 +10,7 @@ import {
   lineEfficiency,
   bottleneckSmv,
 } from '../domain';
-import { buildSimConfig, useSim } from '../simulation';
+import { buildSimConfig, efficiencyFromSkillMatrix, useSim } from '../simulation';
 import { useProject } from '../store';
 
 interface DonutSlice {
@@ -79,9 +79,16 @@ export function ReportsPage() {
   });
 
   // ── Real run-driven KPIs from the sim engine ────────────────────────────
+  // Per-op efficiency derived from the project's skill matrix — when the
+  // user hand-tunes operator proficiency, the sim respects it.
+  const opEfficiency = useMemo(
+    () => efficiencyFromSkillMatrix(project.skillMatrix, yamTemplate.operations),
+    [project.skillMatrix, yamTemplate],
+  );
+  const skillEntries = Object.keys(opEfficiency).length;
   const runConfig = useMemo(
-    () => buildSimConfig({ garment: yamTemplate, operators: yamOperators }),
-    [yamTemplate, yamOperators],
+    () => buildSimConfig({ garment: yamTemplate, operators: yamOperators, opEfficiency }),
+    [yamTemplate, yamOperators, opEfficiency],
   );
   const { state: simState, step, reset: simReset } = useSim(runConfig);
 
@@ -103,7 +110,7 @@ export function ReportsPage() {
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
       <SectionHeader kicker="Reports" title="Production KPIs"
-        sub={`Snapshot from a 480-min shift run · ${yamTemplate.name} · ${yamOperators} operators · seed ${runConfig.randomSeed}`}
+        sub={`Snapshot from a 480-min shift run · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} ops respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <Button variant="secondary" size="sm" icon="↻" onClick={() => { simReset(); step(SHIFT_MIN); }}>Re-run shift</Button>

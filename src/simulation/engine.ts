@@ -30,6 +30,12 @@ export interface SimConfig {
   /** Coefficient of variation around the SMV mean (0 = deterministic). */
   smvVariance: number;
   randomSeed: number;
+  /**
+   * Optional per-operation efficiency multiplier (e.g. 0.85 for an operator
+   * running at 85 % of standard). Service time = SMV / efficiency. Missing
+   * entries default to 1.0. Sourced from the project's skill matrix.
+   */
+  opEfficiency?: Record<string, number>;
 }
 
 export interface StationView {
@@ -280,7 +286,9 @@ export class Sim {
     station.serversFree--;
     const v = this.config.smvVariance;
     const factor = v > 0 ? 1 + (this.rng() * 2 - 1) * v : 1;
-    const dur = Math.max(0.001, station.op.smv * factor);
+    const eff = this.config.opEfficiency?.[station.op.id];
+    const effective = eff && eff > 0 ? station.op.smv / eff : station.op.smv;
+    const dur = Math.max(0.001, effective * factor);
     station.totalBusyTime += dur;
     this.pq.push({
       time: this.time + dur,

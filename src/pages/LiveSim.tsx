@@ -6,7 +6,8 @@ import {
   ALL_GARMENT_TEMPLATES,
   GARMENT_TEMPLATES,
 } from '../domain';
-import { buildSimConfig, useSim, type StationView } from '../simulation';
+import { buildSimConfig, efficiencyFromSkillMatrix, useSim, type StationView } from '../simulation';
+import { useProject } from '../store';
 
 interface SimHudStatProps {
   label: string;
@@ -35,17 +36,27 @@ const SHIFT_MIN_PER_DAY = 480;
  */
 export function LiveSimPage() {
   const navigate = useNavigate();
-  const [garmentId, setGarmentId] = useState<string>('tshirt');
-  const [operators, setOperators] = useState<number>(25);
+  const project = useProject();
+  // Defaults flow from the project store so Orders → LiveSim handoff works:
+  // changes on Orders are saved to selectedGarmentId / defaultOperators and
+  // landed here on next visit.
+  const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
+  const [operators, setOperators] = useState<number>(project.defaultOperators);
 
   const garment = GARMENT_TEMPLATES[garmentId];
+
+  // Per-op efficiency derived from the project's skill matrix (live).
+  const opEfficiency = useMemo(
+    () => efficiencyFromSkillMatrix(project.skillMatrix, garment.operations),
+    [project.skillMatrix, garment],
+  );
 
   // Build the sim config. useSim re-instantiates the engine when this
   // identity changes (i.e. when the user picks a different garment / crew
   // size). The dependency array keeps the engine stable otherwise.
   const config = useMemo(
-    () => buildSimConfig({ garment, operators }),
-    [garment, operators],
+    () => buildSimConfig({ garment, operators, opEfficiency }),
+    [garment, operators, opEfficiency],
   );
 
   const { state, playing, speed, setPlaying, setSpeed, reset, step } = useSim(config);

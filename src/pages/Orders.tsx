@@ -11,6 +11,7 @@ import {
   pitchTime,
   labourRequired,
 } from '../domain';
+import { useProject } from '../store';
 
 interface OrderState {
   po: string;
@@ -31,16 +32,28 @@ interface OrderState {
  */
 export function OrdersPage() {
   const navigate = useNavigate();
+  const project = useProject();
   const [order, setOrder] = useState<OrderState>({
     po: 'PO-4422',
     client: 'Northwind Apparel Co.',
     style: 'Polo S/S Classic',
     qty: 1200,
     deadlineDays: 5,
-    garmentTemplateId: 'polo',
+    garmentTemplateId: project.selectedGarmentId,
     target: 'AQL 2.5',
   });
   const [system, setSystem] = useState<ProductionSystem>('PBS');
+
+  /**
+   * Save the order's chosen garment + computed crew to the project store,
+   * then navigate. Downstream pages (LiveSim, Reports, Resources skill tab)
+   * pick the new defaults up automatically.
+   */
+  function commit(target: '/layout' | '/sim') {
+    project.setSelectedGarment(order.garmentTemplateId);
+    project.setDefaultOperators(crewSize);
+    navigate(target);
+  }
 
   const template = GARMENT_TEMPLATES[order.garmentTemplateId];
   const recommended = recommendSystem(order.qty, order.deadlineDays);
@@ -163,9 +176,10 @@ export function OrdersPage() {
           </Card>
         </div>
 
-        <div style={{ marginTop: 18, display:'flex', justifyContent:'flex-end', gap:10 }}>
+        <div style={{ marginTop: 18, display:'flex', justifyContent:'flex-end', gap:10, flexWrap:'wrap' }}>
           <Button variant="secondary" onClick={()=>navigate('/twin')}>Save draft</Button>
-          <Button variant="primary" size="lg" onClick={()=>navigate('/layout')}>Plan line layout →</Button>
+          <Button variant="secondary" size="lg" onClick={() => commit('/layout')}>Plan line layout →</Button>
+          <Button variant="primary" size="lg" onClick={() => commit('/sim')}>Run simulation →</Button>
         </div>
       </div>
     </div>

@@ -10,6 +10,6 @@
  */
 
 export { Sim, type SimConfig, type SimState, type StationView, type HistoryPoint } from './engine';
-export { buildSimConfig, type BuildModelOptions } from './model';
+export { buildSimConfig, efficiencyFromSkillMatrix, type BuildModelOptions } from './model';
 export { useSim, type UseSimResult } from './useSim';
 export { MinHeap, mulberry32 } from './priority-queue';
