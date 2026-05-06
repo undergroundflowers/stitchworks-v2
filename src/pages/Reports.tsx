@@ -1,6 +1,6 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign } from '../components';
-import { useMemo, useState } from 'react';
+import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, type OperatorAssignment } from '../components';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   GARMENT_TEMPLATES,
@@ -10,6 +10,8 @@ import {
   lineEfficiency,
   bottleneckSmv,
 } from '../domain';
+import { buildSimConfig, useSim } from '../simulation';
+import { useProject } from '../store';
 
 interface DonutSlice {
   v: number;
@@ -21,21 +23,48 @@ interface DonutChartProps {
   slices: DonutSlice[];
 }
 
+const SHIFT_MIN = 480;
+
+/**
+ * Production KPIs page. Reads the user's selected garment + operator count
+ * from the project store, runs a full shift through the DES engine on
+ * mount, then renders KPIs from the resulting state. Yamazumi assignments
+ * are user-overridable via drag; overrides are persisted in the project
+ * store keyed by garment template id.
+ */
 export function ReportsPage() {
   const navigate = useNavigate();
+  const project = useProject();
+  const setYamazumiOverride = project.setYamazumiOverride;
+  const clearYamazumiOverride = project.clearYamazumiOverride;
   const [period, setPeriod] = useState<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>('SHIFT');
-  const [yamGarment, setYamGarment] = useState<string>('tshirt');
-  const [yamOperators, setYamOperators] = useState<number>(25);
+
+  // Yamazumi state — picks from store override if present, else LPT auto.
+  const [yamGarment, setYamGarment] = useState<string>(project.selectedGarmentId);
+  const [yamOperators, setYamOperators] = useState<number>(project.defaultOperators);
 
   const yamTemplate = GARMENT_TEMPLATES[yamGarment];
-  const yamAssignments = useMemo(
-    () => autoAssign(yamTemplate.operations, yamOperators),
-    [yamTemplate, yamOperators],
-  );
+  const storedOverride = project.yamazumiOverrides[yamGarment];
+
+  const yamAssignments: OperatorAssignment[] = useMemo(() => {
+    if (storedOverride && storedOverride.length === yamOperators) {
+      // Reconstruct OperatorAssignment from stored opIds + the template's ops.
+      const opById = new Map(yamTemplate.operations.map((o) => [o.id, o]));
+      return storedOverride.map((s) => ({
+        id: s.operatorId,
+        operations: s.opIds.map((id) => opById.get(id)).filter((o): o is NonNullable<typeof o> => !!o),
+      }));
+    }
+    return autoAssign(yamTemplate.operations, yamOperators);
+  }, [storedOverride, yamOperators, yamTemplate]);
+
+  function handleYamazumiChange(next: OperatorAssignment[]) {
+    setYamazumiOverride(yamGarment, next.map((a) => ({ operatorId: a.id, opIds: a.operations.map((o) => o.id) })));
+  }
+
   const stationSmvs = yamAssignments.map((a) =>
     a.operations.reduce((s, o) => s + o.smv, 0),
   );
-  // Pitch (target cycle time per operator) when load is perfectly balanced.
   const yamTakt = yamTemplate.totalSmv / yamOperators;
   const yamBottleneck = bottleneckSmv(
     yamAssignments.map((a) => ({ smv: a.operations.reduce((s, o) => s + o.smv, 0), id: a.id, code: '', name: '', machineCode: 'MNL', skill: 'stitching', category: 'manual' })),
@@ -49,38 +78,64 @@ export function ReportsPage() {
     workMinutes: 60 * 8,
   });
 
+  // ── Real run-driven KPIs from the sim engine ────────────────────────────
+  const runConfig = useMemo(
+    () => buildSimConfig({ garment: yamTemplate, operators: yamOperators }),
+    [yamTemplate, yamOperators],
+  );
+  const { state: simState, step, reset: simReset } = useSim(runConfig);
+
+  // Auto-run a full shift on mount or whenever config changes. step() is
+  // synchronous, fast (the queue is small), and gives us a deterministic
+  // post-shift snapshot to render KPIs against.
+  useEffect(() => {
+    simReset();
+    step(SHIFT_MIN);
+  }, [runConfig, simReset, step]);
+
+  const samConsumedMin = simState.producedPieces * yamTemplate.totalSmv;
+  const efficiency = (samConsumedMin / (yamOperators * SHIFT_MIN)) * 100;
+  const throughputPerHr = simState.history.length > 0
+    ? (simState.producedPieces / Math.max(1e-6, simState.time)) * 60
+    : 0;
+  const wipBundles = simState.totalArrivals - simState.produced;
+
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
       <SectionHeader kicker="Reports" title="Production KPIs"
-        sub="Snapshot of factory performance for the selected period."
-        right={<ToggleGroup value={period} onChange={setPeriod} options={[
-          { value:'SHIFT', label:'Shift' },
-          { value:'DAY',   label:'Day' },
-          { value:'WEEK',  label:'Week' },
-          { value:'MONTH', label:'Month' },
-        ]}/>}
+        sub={`Snapshot from a 480-min shift run · ${yamTemplate.name} · ${yamOperators} operators · seed ${runConfig.randomSeed}`}
+        right={
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+            <Button variant="secondary" size="sm" icon="↻" onClick={() => { simReset(); step(SHIFT_MIN); }}>Re-run shift</Button>
+            <ToggleGroup value={period} onChange={setPeriod} options={[
+              { value:'SHIFT', label:'Shift' },
+              { value:'DAY',   label:'Day' },
+              { value:'WEEK',  label:'Week' },
+              { value:'MONTH', label:'Month' },
+            ]}/>
+          </div>
+        }
       />
 
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
-        <Stat big label="OUTPUT"     value="1,184" unit="pcs"   color={SW_COLORS.brand}  delta={4.2}/>
-        <Stat big label="THROUGHPUT" value="184"   unit="pcs/hr" color={SW_COLORS.ok}    delta={1.8}/>
-        <Stat big label="EFFICIENCY" value="78"    unit="%"      color={SW_COLORS.fabric} delta={-1.2}/>
-        <Stat big label="DEFECT"     value="1.2"   unit="%"      color={SW_COLORS.alarm}  delta={-0.3}/>
-        <Stat big label="DOWNTIME"   value="42"    unit="min"    color={SW_COLORS.warn}/>
-        <Stat big label="COST/PC"    value="$3.84" color={SW_COLORS.thread} delta={-0.12}/>
+        <Stat big label="OUTPUT"     value={simState.producedPieces.toLocaleString()} unit="pcs"   color={SW_COLORS.brand}/>
+        <Stat big label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok}/>
+        <Stat big label="EFFICIENCY" value={efficiency.toFixed(1)}    unit="%"      color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+        <Stat big label="MEAN LEAD"  value={simState.meanLeadTime.toFixed(1)}   unit="min"      color={SW_COLORS.bobbin}/>
+        <Stat big label="WIP"        value={wipBundles}    unit="bundles"    color={SW_COLORS.warn}/>
+        <Stat big label="UTIL"       value={(simState.utilization * 100).toFixed(0)} unit="%" color={SW_COLORS.thread}/>
       </div>
 
-      {/* Yamazumi — the line-balance view, derived from the apparel domain layer */}
+      {/* Yamazumi — drag operations between operators to rebalance */}
       <Card padding={20} style={{ marginBottom:14 }}>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:10, gap: 14, flexWrap: 'wrap' }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10, gap: 14, flexWrap: 'wrap' }}>
           <div>
             <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>YAMAZUMI · LINE BALANCE</div>
             <div style={{ fontSize:12, color: SW_COLORS.muted }}>
-              Operator-by-operation SMV stack with takt-line overlay. Bars over the takt line are bottlenecks; bars below carry slack.
-              Auto-assignment uses Longest-Processing-Time (LPT) heuristic.
+              Operator-by-operation SMV stack with takt-line overlay. Drag any segment onto another operator's bar to rebalance manually. Bars over the takt line are bottlenecks.
             </div>
           </div>
-          <div style={{ display:'flex', alignItems:'center', gap: 14 }}>
+          <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
             <ToggleGroup value={yamGarment} onChange={setYamGarment} options={ALL_GARMENT_TEMPLATES.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
             <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
               <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPS</span>
@@ -88,9 +143,12 @@ export function ReportsPage() {
                 onChange={e => setYamOperators(Math.max(4, Math.min(60, parseInt(e.target.value) || 4)))}
                 style={{ width: 56, padding: '4px 8px', border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13 }}/>
             </div>
+            {storedOverride && (
+              <Button variant="ghost" size="sm" onClick={() => clearYamazumiOverride(yamGarment)}>Reset to auto</Button>
+            )}
           </div>
         </div>
-        <Yamazumi assignments={yamAssignments} taktMin={yamTakt} height={300}/>
+        <Yamazumi assignments={yamAssignments} taktMin={yamTakt} height={300} onChange={handleYamazumiChange}/>
         <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginTop: 8 }}>
           <Stat label="GARMENT SAM" value={yamTemplate.totalSmv.toFixed(2)} unit="min"/>
           <Stat label="TAKT" value={yamTakt.toFixed(3)} unit="min" color={SW_COLORS.brand}/>
@@ -99,7 +157,7 @@ export function ReportsPage() {
           <Stat label="LINE EFF" value={yamEfficiency.toFixed(1)} unit="%" color={yamEfficiency >= 80 ? SW_COLORS.ok : SW_COLORS.thread}/>
         </div>
         <div style={{ marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
-          Smoothness index {yamSmoothness.toFixed(3)} (lower = smoother) · Source bulletin: {yamTemplate.operations.length} operations from <em>{yamTemplate.name}</em> ({yamTemplate.bestFor})
+          Smoothness index {yamSmoothness.toFixed(3)} (lower = smoother) · {storedOverride ? `Manual override (${storedOverride.length} operators)` : 'LPT auto-assignment'} · Source bulletin: {yamTemplate.operations.length} operations from {yamTemplate.name}
         </div>
       </Card>
 
@@ -108,16 +166,39 @@ export function ReportsPage() {
           <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:14 }}>
             <div>
               <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>OUTPUT OVER TIME</div>
-              <div style={{ fontSize:12, color: SW_COLORS.muted }}>Pieces produced per 30-min interval · Day 14, Shift A</div>
+              <div style={{ fontSize:12, color: SW_COLORS.muted }}>Bundles produced per 5-min interval — sampled live from the engine.</div>
             </div>
             <div style={{ display:'flex', gap:14, fontSize:11, fontFamily: SW_FONTS.mono, fontWeight:700 }}>
-              <span><span style={{ color: SW_COLORS.brand }}>■</span> Actual</span>
-              <span><span style={{ color: SW_COLORS.muted }}>┄</span> Target</span>
+              <span><span style={{ color: SW_COLORS.brand }}>■</span> Cumulative produced</span>
+              <span><span style={{ color: SW_COLORS.bobbin }}>■</span> WIP</span>
             </div>
           </div>
-          <KpiLineChart/>
+          <KpiLineChart history={simState.history}/>
         </Card>
 
+        <Card padding={20}>
+          <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>BOTTLENECKS (LIVE)</div>
+          {simState.stations.length === 0 ? (
+            <div style={{ fontSize:12, color: SW_COLORS.muted }}>Sim has not run yet.</div>
+          ) : (
+            [...simState.stations]
+              .sort((a, b) => b.queueLen - a.queueLen)
+              .slice(0, 6)
+              .map((s, i) => (
+                <div key={s.opId} style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
+                  <span style={{ flex:1, fontSize:12, fontWeight:600 }}>
+                    <span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, fontSize: 10, fontWeight: 700, marginRight: 6 }}>{s.opCode}</span>
+                    {s.opName}
+                  </span>
+                  <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: s.queueLen > 5 ? SW_COLORS.alarm : SW_COLORS.muted }}>Q={s.queueLen}</span>
+                  <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: SW_COLORS.thread }}>{(s.utilization * 100).toFixed(0)}%</span>
+                </div>
+              ))
+          )}
+        </Card>
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap: 14, marginBottom:14 }}>
         <Card padding={20}>
           <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>BY SYSTEM</div>
           {[
@@ -133,23 +214,6 @@ export function ReportsPage() {
               </div>
               <Progress value={r.v} color={r.col} height={8}/>
               <div style={{ fontSize:10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop:2 }}>{r.n}</div>
-            </div>
-          ))}
-        </Card>
-      </div>
-
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap: 14, marginBottom:14 }}>
-        <Card padding={20}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>BOTTLENECKS</div>
-          {[
-            { op:'OP-04 Collar attach', loss: 28, col: SW_COLORS.alarm },
-            { op:'OP-08 Buttonhole',   loss: 14, col: SW_COLORS.thread },
-            { op:'OP-02 Cutting',      loss: 8,  col: SW_COLORS.thread },
-            { op:'OP-09 Inspect',      loss: 4,  col: SW_COLORS.bobbin },
-          ].map((r, i) => (
-            <div key={i} style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
-              <span style={{ flex:1, fontSize:12, fontWeight:600 }}>{r.op}</span>
-              <span style={{ fontFamily: SW_FONTS.mono, fontSize:12, fontWeight:700, color: r.col }}>{r.loss} pcs lost</span>
             </div>
           ))}
         </Card>
@@ -216,24 +280,63 @@ export function ReportsPage() {
   );
 }
 
-function KpiLineChart() {
-  const target = [10, 12, 15, 17, 18, 17, 16, 18, 20, 19, 18, 17, 16, 14, 13, 12];
-  const actual = [8, 11, 14, 18, 20, 16, 14, 17, 21, 18, 16, 19, 17, 15, 12, 13];
-  const max = 24, w = 600, h = 180;
-  const xs = (i: number) => i * (w/(actual.length-1));
-  const ys = (v: number) => h - (v/max)*h;
+interface KpiLineChartProps {
+  history: { time: number; produced: number; wip: number; throughputPerHr: number }[];
+}
+
+function KpiLineChart({ history }: KpiLineChartProps) {
+  const w = 600, h = 200;
+  const padL = 30, padR = 8, padT = 8, padB = 22;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+
+  if (history.length < 2) {
+    return (
+      <div style={{ height: h, display:'flex', alignItems:'center', justifyContent:'center', color: SW_COLORS.muted, fontSize: 12 }}>
+        Run a shift to see output over time.
+      </div>
+    );
+  }
+
+  const maxT = history[history.length - 1].time;
+  const maxProd = Math.max(...history.map((h) => h.produced), 1);
+  const maxWip = Math.max(...history.map((h) => h.wip), 1);
+  const xs = (t: number) => padL + (t / maxT) * innerW;
+  const yProd = (v: number) => padT + innerH - (v / maxProd) * innerH;
+  const yWip = (v: number) => padT + innerH - (v / maxWip) * innerH;
+
+  const xTicks = 5;
+  const yTicks = 4;
+
   return (
-    <svg viewBox={`0 0 ${w} ${h+30}`} style={{ width:'100%' }}>
-      {[0,6,12,18,24].map(g => (
-        <g key={g}>
-          <line x1="0" y1={ys(g)} x2={w} y2={ys(g)} stroke={SW_COLORS.line}/>
-          <text x="-4" y={ys(g)+4} textAnchor="end" fill={SW_COLORS.muted} fontSize="9" fontFamily={SW_FONTS.mono}>{g}</text>
-        </g>
-      ))}
-      <path d={target.map((v,i) => `${i?'L':'M'} ${xs(i)} ${ys(v)}`).join(' ')} fill="none" stroke={SW_COLORS.muted} strokeWidth="1.5" strokeDasharray="4 3"/>
-      <path d={actual.map((v,i) => `${i?'L':'M'} ${xs(i)} ${ys(v)}`).join(' ')} fill="none" stroke={SW_COLORS.brand} strokeWidth="2.5"/>
-      {actual.map((v,i)=> <circle key={i} cx={xs(i)} cy={ys(v)} r="3" fill={SW_COLORS.brand}/>)}
-      {actual.map((_,i) => i%2===0 && <text key={i} x={xs(i)} y={h+18} textAnchor="middle" fill={SW_COLORS.muted} fontSize="9" fontFamily={SW_FONTS.mono}>{8 + Math.floor(i/2)}:{(i%2)*30||'00'}</text>)}
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width:'100%' }}>
+      {Array.from({ length: yTicks + 1 }).map((_, i) => {
+        const v = (maxProd / yTicks) * i;
+        return (
+          <g key={i}>
+            <line x1={padL} y1={yProd(v)} x2={w - padR} y2={yProd(v)} stroke={SW_COLORS.line}/>
+            <text x={padL - 4} y={yProd(v) + 3} textAnchor="end" fill={SW_COLORS.muted} fontSize="9" fontFamily={SW_FONTS.mono}>{Math.round(v)}</text>
+          </g>
+        );
+      })}
+      {Array.from({ length: xTicks + 1 }).map((_, i) => {
+        const t = (maxT / xTicks) * i;
+        return (
+          <text key={i} x={xs(t)} y={h - 6} textAnchor="middle" fill={SW_COLORS.muted} fontSize="9" fontFamily={SW_FONTS.mono}>
+            {Math.round(t)}m
+          </text>
+        );
+      })}
+      {/* WIP area, on its own scale */}
+      <path
+        d={`M ${xs(history[0].time)} ${h - padB} ${history.map((h) => `L ${xs(h.time)} ${yWip(h.wip)}`).join(' ')} L ${xs(history[history.length - 1].time)} ${h - padB} Z`}
+        fill={`${SW_COLORS.bobbin}30`}
+      />
+      {/* Cumulative produced */}
+      <path
+        d={history.map((h, i) => `${i ? 'L' : 'M'} ${xs(h.time)} ${yProd(h.produced)}`).join(' ')}
+        fill="none" stroke={SW_COLORS.brand} strokeWidth="2.5"
+      />
     </svg>
   );
 }

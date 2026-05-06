@@ -6,7 +6,12 @@ import {
   type WorkerArchetype,
   ALL_MACHINES,
   type MachineSpec,
+  GARMENT_TEMPLATES,
+  ALL_GARMENT_TEMPLATES,
+  type Operation,
+  type SkillId,
 } from '../domain';
+import { useProject } from '../store';
 
 /**
  * Resources page — operators, machines, inventory and roster.
@@ -18,7 +23,12 @@ import {
  * those become live once the project file format and roster scheduler land.
  */
 export function ResourcesPage() {
-  const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster'>('operators');
+  const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster' | 'skills'>('operators');
+  const project = useProject();
+  const skillMatrix = project.skillMatrix;
+  const setSkill = project.setSkill;
+  const resetSkillMatrix = project.resetSkillMatrix;
+  const [skillsGarment, setSkillsGarment] = useState<string>(project.selectedGarmentId);
 
   const operators = useMemo(() => buildOperators(), []);
   const machines = useMemo(() => buildMachines(), []);
@@ -43,6 +53,7 @@ export function ResourcesPage() {
           <ToggleGroup value={tab} onChange={setTab} options={[
             { value:'operators', label:`👥 Operators · ${operators.length}` },
             { value:'machines',  label:`⚙ Machines · ${machines.length}` },
+            { value:'skills',    label:`🎯 Skill matrix` },
             { value:'inventory', label:'📦 Inventory' },
             { value:'roster',    label:'🗓 Shift roster' },
           ]}/>
@@ -199,6 +210,17 @@ export function ResourcesPage() {
           </div>
         )}
 
+        {tab==='skills' && (
+          <SkillMatrixPanel
+            operators={operators}
+            garmentId={skillsGarment}
+            setGarmentId={setSkillsGarment}
+            skillMatrix={skillMatrix}
+            setSkill={setSkill}
+            resetSkillMatrix={resetSkillMatrix}
+          />
+        )}
+
         {tab==='roster' && (
           <Card padding={20}>
             <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>WEEKLY ROSTER · DAY 14-20</div>
@@ -225,6 +247,141 @@ export function ResourcesPage() {
         )}
       </div>
     </div>
+  );
+}
+
+// ── Skill matrix ────────────────────────────────────────────────────────────
+
+interface SkillMatrixPanelProps {
+  operators: SeededOperator[];
+  garmentId: string;
+  setGarmentId: (id: string) => void;
+  skillMatrix: Record<string, Record<string, number>>;
+  setSkill: (operatorId: string, opId: string, efficiency: number) => void;
+  resetSkillMatrix: () => void;
+}
+
+/**
+ * Operator × Operation efficiency grid for one garment template.
+ *
+ * Defaults: an operator gets 1.0 efficiency on operations whose required
+ * skill is in their archetype's primarySkills, 0.7 on secondarySkills, and
+ * 0 (= cannot perform) otherwise. The user overrides any cell — overrides
+ * persist to the project store.
+ *
+ * Cell colour is a heat: green (≥0.9) → yellow (0.6–0.9) → red (<0.6) →
+ * grey (0 = ineligible). Click any cell to type a new value.
+ */
+function SkillMatrixPanel({
+  operators, garmentId, setGarmentId, skillMatrix, setSkill, resetSkillMatrix,
+}: SkillMatrixPanelProps) {
+  const garment = GARMENT_TEMPLATES[garmentId];
+  const ops = garment.operations;
+
+  function defaultEfficiency(arch: WorkerArchetype, opSkill: SkillId): number {
+    if (arch.primarySkills.includes(opSkill)) return arch.baseEfficiency;
+    if (arch.secondarySkills?.includes(opSkill)) return arch.baseEfficiency * 0.7;
+    return 0;
+  }
+
+  function effFor(op: SeededOperator, operation: Operation): number {
+    const stored = skillMatrix[op.id]?.[operation.id];
+    if (stored !== undefined) return stored;
+    return defaultEfficiency(op.archetype, operation.skill);
+  }
+
+  function cellColor(eff: number): string {
+    if (eff <= 0) return SW_COLORS.paperEdge;
+    if (eff < 0.6) return `${SW_COLORS.alarm}60`;
+    if (eff < 0.9) return `${SW_COLORS.thread}60`;
+    return `${SW_COLORS.ok}80`;
+  }
+
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap: 14 }}>
+      <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
+        <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
+          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>GARMENT</span>
+          <ToggleGroup value={garmentId} onChange={setGarmentId} options={ALL_GARMENT_TEMPLATES.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
+        </div>
+        <div style={{ flex: 1 }}/>
+        <div style={{ display:'flex', alignItems:'center', gap: 14, fontSize: 11, fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>
+          <LegendChip color={SW_COLORS.ok} label="≥90"/>
+          <LegendChip color={SW_COLORS.thread} label="60–89"/>
+          <LegendChip color={SW_COLORS.alarm} label="<60"/>
+          <LegendChip color={SW_COLORS.paperEdge} label="—"/>
+        </div>
+        <Button variant="ghost" size="sm" onClick={() => {
+          if (confirm('Reset every skill cell to the role defaults?')) resetSkillMatrix();
+        }}>Reset to defaults</Button>
+      </div>
+
+      <Card padding={0} style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
+        <table style={{ borderCollapse: 'collapse', fontFamily: SW_FONTS.body, fontSize: 11 }}>
+          <thead>
+            <tr style={{ background: SW_COLORS.paperDeep }}>
+              <th style={{ position: 'sticky', left: 0, background: SW_COLORS.paperDeep, padding: '8px 10px', textAlign: 'left', minWidth: 200, borderRight: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1px', zIndex: 1 }}>OPERATOR</th>
+              {ops.map((op) => (
+                <th key={op.id} title={`${op.code} ${op.name} · ${op.smv.toFixed(2)} min · ${op.machineCode}`}
+                  style={{ padding: '8px 4px', textAlign: 'center', minWidth: 56, fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px', borderBottom: `1px solid ${SW_COLORS.line}`, verticalAlign: 'bottom' }}>
+                  <div>{op.code ?? ''}</div>
+                  <div style={{ fontSize: 8, color: SW_COLORS.faint, marginTop: 2 }}>{op.machineCode}</div>
+                </th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {operators.map((op) => (
+              <tr key={op.id} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                <td style={{ position: 'sticky', left: 0, background: SW_COLORS.paper, padding: '6px 10px', borderRight: `1px solid ${SW_COLORS.line}`, zIndex: 1 }}>
+                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+                    <span style={{ width: 18, height: 18, borderRadius: 4, background: op.archetype.color, color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>{op.archetype.icon}</span>
+                    <div>
+                      <div style={{ fontSize: 11, fontWeight: 700 }}>{op.id} {op.name}</div>
+                      <div style={{ fontSize: 9, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>{op.archetype.label}</div>
+                    </div>
+                  </div>
+                </td>
+                {ops.map((operation) => {
+                  const eff = effFor(op, operation);
+                  return (
+                    <td key={operation.id} style={{ padding: 1, textAlign: 'center', background: cellColor(eff) }}>
+                      <input
+                        type="number" min={0} max={120} step={5} value={Math.round(eff * 100)}
+                        onChange={(e) => {
+                          const v = Math.max(0, Math.min(120, parseInt(e.target.value) || 0));
+                          setSkill(op.id, operation.id, v / 100);
+                        }}
+                        style={{
+                          width: '100%', padding: '4px 0', textAlign: 'center',
+                          background: 'transparent', border: 'none',
+                          fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 10,
+                          color: eff > 0 ? SW_COLORS.ink : SW_COLORS.faint,
+                        }}
+                        title={`${op.id} on ${operation.code}: ${(eff * 100).toFixed(0)}% efficiency`}
+                      />
+                    </td>
+                  );
+                })}
+              </tr>
+            ))}
+          </tbody>
+        </table>
+      </Card>
+
+      <div style={{ padding: 12, background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontSize: 12, color: SW_COLORS.muted, lineHeight: 1.5 }}>
+        Cells default to the operator's archetype: <strong style={{ color: SW_COLORS.ink }}>primary skills = base efficiency</strong> (≈85% for sewing operators), <strong style={{ color: SW_COLORS.ink }}>secondary = 70% of base</strong>, otherwise 0 (ineligible). Override any cell to capture per-operator know-how — values persist locally and travel with the .swproj file.
+      </div>
+    </div>
+  );
+}
+
+function LegendChip({ color, label }: { color: string; label: string }) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
+      <span style={{ width: 10, height: 10, borderRadius: 2, background: color }}/>
+      {label}
+    </span>
   );
 }
 

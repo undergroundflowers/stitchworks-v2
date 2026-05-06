@@ -1,4 +1,5 @@
-import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { useState, type DragEvent } from 'react';
+import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import type { Operation } from '../domain';
 
 export interface OperatorAssignment {
@@ -11,195 +12,343 @@ export interface OperatorAssignment {
 interface YamazumiProps {
   /** One bar per operator. */
   assignments: OperatorAssignment[];
-  /**
-   * Takt time in minutes per piece. Drawn as a horizontal reference line —
-   * if any operator's bar exceeds takt, that operator is the bottleneck.
-   */
+  /** Takt time in minutes per piece. Bar exceeding takt = bottleneck. */
   taktMin: number;
-  /** Optional fixed height; defaults to 280. */
+  /** Chart height in pixels (the bars area). */
   height?: number;
-  /** Optional width; defaults to 100% of container via SVG viewBox. */
-  width?: number;
+  /**
+   * Optional change handler. When provided, operation segments become
+   * draggable; dropping a segment on another operator's bar moves the
+   * operation between operators and emits the new assignment list.
+   */
+  onChange?: (next: OperatorAssignment[]) => void;
 }
 
 /**
- * Yamazumi chart — operator-by-operator stacked SMV bars with a takt-time
- * line drawn across. The single most-asked-for IE balancing tool: at a
- * glance you can see whose bar exceeds takt (= bottleneck) and where there's
- * idle slack (= bar is shorter than takt).
+ * Yamazumi chart — operator-by-operation stacked SMV bars with a takt-time
+ * reference line. Drag any operation segment onto another operator to
+ * rebalance manually; release outside a bar to cancel. Segment colour is
+ * the operation's category (sewing / manual / pressing / inspection / fusing).
  *
- * Each segment in a bar is one operation; the segment colour is the
- * operation's category (sewing / manual / pressing / inspection / etc.) so
- * machine-mix per operator is also visible.
+ * Pure HTML implementation (no SVG) so HTML5 drag-and-drop works reliably
+ * across browsers and the layout stays accessible.
  */
-export function Yamazumi({ assignments, taktMin, height = 280, width = 720 }: YamazumiProps) {
-  const padL = 56, padR = 24, padT = 24, padB = 56;
-  const innerW = width - padL - padR;
-  const innerH = height - padT - padB;
-
+export function Yamazumi({ assignments, taktMin, height = 300, onChange }: YamazumiProps) {
   const totals = assignments.map((a) => a.operations.reduce((s, o) => s + o.smv, 0));
   const yMax = Math.max(taktMin * 1.25, ...totals, 0.1);
-  const barW = innerW / assignments.length;
-  const barInnerW = Math.min(38, barW * 0.7);
 
-  const yScale = (v: number) => padT + innerH - (v / yMax) * innerH;
-
-  // Y-axis ticks every 0.2 min (12 sec). Adjust if scale is large.
   const tickStep = yMax > 4 ? 1 : yMax > 2 ? 0.5 : 0.2;
   const ticks: number[] = [];
-  for (let v = 0; v <= yMax; v += tickStep) ticks.push(v);
+  for (let v = 0; v <= yMax + 1e-9; v += tickStep) ticks.push(Number(v.toFixed(2)));
+
+  const [hoverOpId, setHoverOpId] = useState<string | null>(null);
+  const [dropTargetId, setDropTargetId] = useState<string | null>(null);
+
+  const draggable = !!onChange;
+
+  function onDragStart(e: DragEvent<HTMLDivElement>, fromId: string, op: Operation) {
+    e.dataTransfer.effectAllowed = 'move';
+    e.dataTransfer.setData('text/x-stitchworks-op', JSON.stringify({ fromId, opId: op.id }));
+    setHoverOpId(op.id);
+  }
+
+  function onDragEnd() {
+    setHoverOpId(null);
+    setDropTargetId(null);
+  }
+
+  function onBarDragOver(e: DragEvent<HTMLDivElement>, toId: string) {
+    if (!draggable) return;
+    e.preventDefault();
+    e.dataTransfer.dropEffect = 'move';
+    if (dropTargetId !== toId) setDropTargetId(toId);
+  }
+
+  function onBarDrop(e: DragEvent<HTMLDivElement>, toId: string) {
+    if (!draggable || !onChange) return;
+    e.preventDefault();
+    setDropTargetId(null);
+    setHoverOpId(null);
+    const raw = e.dataTransfer.getData('text/x-stitchworks-op');
+    if (!raw) return;
+    let payload: { fromId: string; opId: string };
+    try {
+      payload = JSON.parse(raw);
+    } catch {
+      return;
+    }
+    if (payload.fromId === toId) return;
+    moveOperation(payload.fromId, payload.opId, toId);
+  }
+
+  function moveOperation(fromId: string, opId: string, toId: string) {
+    if (!onChange) return;
+    const fromIdx = assignments.findIndex((a) => a.id === fromId);
+    const toIdx = assignments.findIndex((a) => a.id === toId);
+    if (fromIdx < 0 || toIdx < 0) return;
+    const op = assignments[fromIdx].operations.find((o) => o.id === opId);
+    if (!op) return;
+    const next = assignments.map((a, i) => {
+      if (i === fromIdx) {
+        return { ...a, operations: a.operations.filter((o) => o.id !== opId) };
+      }
+      if (i === toIdx) {
+        return { ...a, operations: [...a.operations, op] };
+      }
+      return a;
+    });
+    onChange(next);
+  }
 
   return (
-    <svg viewBox={`0 0 ${width} ${height}`} style={{ width: '100%', height, display: 'block' }}>
-      {/* y-axis grid + labels */}
-      {ticks.map((v, i) => (
-        <g key={i}>
-          <line
-            x1={padL}
-            y1={yScale(v)}
-            x2={width - padR}
-            y2={yScale(v)}
-            stroke={SW_COLORS.line}
-            strokeWidth={i === 0 ? 1.5 : 0.5}
-          />
-          <text
-            x={padL - 8}
-            y={yScale(v) + 3}
-            textAnchor="end"
-            fontFamily={SW_FONTS.mono}
-            fontSize={9}
-            fontWeight={700}
-            fill={SW_COLORS.muted}
-          >
-            {v.toFixed(2)}
-          </text>
-        </g>
-      ))}
-
-      {/* y-axis title */}
-      <text
-        x={12}
-        y={padT + innerH / 2}
-        textAnchor="middle"
-        transform={`rotate(-90, 12, ${padT + innerH / 2})`}
-        fontFamily={SW_FONTS.mono}
-        fontSize={10}
-        fontWeight={700}
-        fill={SW_COLORS.muted}
+    <div style={{ display: 'flex', flexDirection: 'column' }}>
+      <div
+        style={{
+          position: 'relative',
+          display: 'grid',
+          gridTemplateColumns: '52px 1fr',
+          height,
+        }}
       >
-        SMV (min)
-      </text>
+        {/* y-axis labels */}
+        <div
+          style={{
+            position: 'relative',
+            borderRight: `1px solid ${SW_COLORS.line}`,
+          }}
+        >
+          {ticks.map((v) => (
+            <div
+              key={v}
+              style={{
+                position: 'absolute',
+                right: 8,
+                bottom: `calc(${(v / yMax) * 100}% - 6px)`,
+                fontFamily: SW_FONTS.mono,
+                fontSize: 9,
+                fontWeight: 700,
+                color: SW_COLORS.muted,
+              }}
+            >
+              {v.toFixed(2)}
+            </div>
+          ))}
+          <div
+            style={{
+              position: 'absolute',
+              left: 4,
+              top: '50%',
+              transform: 'translate(-50%, -50%) rotate(-90deg)',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              fontWeight: 700,
+              color: SW_COLORS.muted,
+              whiteSpace: 'nowrap',
+            }}
+          >
+            SMV (min)
+          </div>
+        </div>
 
-      {/* Stacked bars — one per operator */}
-      {assignments.map((a, i) => {
-        const x = padL + barW * i + (barW - barInnerW) / 2;
-        let yCursor = padT + innerH;
-        return (
-          <g key={a.id}>
-            {a.operations.map((op, j) => {
-              const segH = (op.smv / yMax) * innerH;
-              yCursor -= segH;
-              const fill = colorForCategory(op.category);
+        {/* Bars area */}
+        <div style={{ position: 'relative', overflowX: 'auto' }}>
+          {/* horizontal grid lines */}
+          {ticks.map((v) => (
+            <div
+              key={v}
+              style={{
+                position: 'absolute',
+                left: 0,
+                right: 0,
+                bottom: `${(v / yMax) * 100}%`,
+                height: 1,
+                background: v === 0 ? SW_COLORS.line : `${SW_COLORS.line}80`,
+                pointerEvents: 'none',
+              }}
+            />
+          ))}
+
+          {/* takt-time line */}
+          <div
+            style={{
+              position: 'absolute',
+              left: 0,
+              right: 0,
+              bottom: `${(taktMin / yMax) * 100}%`,
+              height: 0,
+              borderTop: `1.5px dashed ${SW_COLORS.brand}`,
+              pointerEvents: 'none',
+              zIndex: 2,
+            }}
+          />
+          <div
+            style={{
+              position: 'absolute',
+              right: 6,
+              bottom: `calc(${(taktMin / yMax) * 100}% + 4px)`,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              fontWeight: 800,
+              color: SW_COLORS.brand,
+              pointerEvents: 'none',
+              zIndex: 2,
+            }}
+          >
+            TAKT {taktMin.toFixed(3)} min
+          </div>
+
+          {/* Bars row */}
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              display: 'flex',
+              alignItems: 'flex-end',
+              gap: 4,
+              padding: '0 8px',
+            }}
+          >
+            {assignments.map((a, i) => {
+              const total = totals[i];
+              const isOver = total > taktMin;
+              const isDropTarget = dropTargetId === a.id;
               return (
-                <g key={op.id}>
-                  <rect
-                    x={x}
-                    y={yCursor}
-                    width={barInnerW}
-                    height={segH}
-                    fill={fill}
-                    stroke="#fff"
-                    strokeWidth={0.6}
+                <div
+                  key={a.id}
+                  onDragOver={(e) => onBarDragOver(e, a.id)}
+                  onDragLeave={() => setDropTargetId((cur) => (cur === a.id ? null : cur))}
+                  onDrop={(e) => onBarDrop(e, a.id)}
+                  style={{
+                    flex: 1,
+                    minWidth: 36,
+                    maxWidth: 56,
+                    height: '100%',
+                    display: 'flex',
+                    flexDirection: 'column',
+                    justifyContent: 'flex-end',
+                    position: 'relative',
+                    background: isDropTarget ? `${SW_COLORS.brand}10` : 'transparent',
+                    borderRadius: SW_RADIUS.sm,
+                    transition: 'background 100ms',
+                  }}
+                >
+                  {/* Total label */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      top: `calc(${100 - (total / yMax) * 100}% - 16px)`,
+                      left: 0,
+                      right: 0,
+                      textAlign: 'center',
+                      fontFamily: SW_FONTS.mono,
+                      fontSize: 9,
+                      fontWeight: 700,
+                      color: isOver ? SW_COLORS.alarm : SW_COLORS.ink,
+                      pointerEvents: 'none',
+                    }}
                   >
-                    <title>{`${op.code ? `${op.code} ` : ''}${op.name} · ${op.smv.toFixed(2)} min · ${op.machineCode}`}</title>
-                  </rect>
-                  {/* Operation label inside segment if it fits */}
-                  {segH > 14 && j < a.operations.length && (
-                    <text
-                      x={x + barInnerW / 2}
-                      y={yCursor + segH / 2 + 3}
-                      textAnchor="middle"
-                      fontFamily={SW_FONTS.mono}
-                      fontSize={8}
-                      fontWeight={700}
-                      fill="#fff"
-                      style={{ pointerEvents: 'none' }}
-                    >
-                      {op.code ?? op.name.slice(0, 3)}
-                    </text>
-                  )}
-                </g>
+                    {total.toFixed(2)}
+                  </div>
+
+                  {/* Stack of operation segments, bottom-up */}
+                  <div
+                    style={{
+                      display: 'flex',
+                      flexDirection: 'column-reverse',
+                      height: `${(total / yMax) * 100}%`,
+                      width: '100%',
+                      borderRadius: SW_RADIUS.sm,
+                      overflow: 'hidden',
+                    }}
+                  >
+                    {a.operations.map((op) => {
+                      const segPct = (op.smv / yMax) * 100;
+                      const dragging = hoverOpId === op.id;
+                      const fill = colorForCategory(op.category);
+                      return (
+                        <div
+                          key={op.id}
+                          draggable={draggable}
+                          onDragStart={(e) => onDragStart(e, a.id, op)}
+                          onDragEnd={onDragEnd}
+                          title={`${op.code ? `${op.code} ` : ''}${op.name} · ${op.smv.toFixed(2)} min · ${op.machineCode}`}
+                          style={{
+                            height: `${(segPct / ((total / yMax) * 100)) * 100}%`,
+                            background: fill,
+                            borderTop: '1px solid #ffffff80',
+                            display: 'flex',
+                            alignItems: 'center',
+                            justifyContent: 'center',
+                            color: '#fff',
+                            fontFamily: SW_FONTS.mono,
+                            fontSize: 8,
+                            fontWeight: 700,
+                            cursor: draggable ? 'grab' : 'default',
+                            opacity: dragging ? 0.4 : 1,
+                            userSelect: 'none',
+                          }}
+                        >
+                          {op.code ?? op.name.slice(0, 4)}
+                        </div>
+                      );
+                    })}
+                  </div>
+
+                  {/* Operator id label */}
+                  <div
+                    style={{
+                      position: 'absolute',
+                      bottom: -16,
+                      left: 0,
+                      right: 0,
+                      textAlign: 'center',
+                      fontFamily: SW_FONTS.mono,
+                      fontSize: 9,
+                      fontWeight: 700,
+                      color: SW_COLORS.muted,
+                      pointerEvents: 'none',
+                    }}
+                  >
+                    {a.id}
+                  </div>
+                </div>
               );
             })}
-            {/* Operator id below bar */}
-            <text
-              x={x + barInnerW / 2}
-              y={padT + innerH + 14}
-              textAnchor="middle"
-              fontFamily={SW_FONTS.mono}
-              fontSize={9}
-              fontWeight={700}
-              fill={SW_COLORS.muted}
-            >
-              {a.id}
-            </text>
-            {/* Total at the top of the bar */}
-            <text
-              x={x + barInnerW / 2}
-              y={yScale(totals[i]) - 4}
-              textAnchor="middle"
-              fontFamily={SW_FONTS.mono}
-              fontSize={9}
-              fontWeight={700}
-              fill={totals[i] > taktMin ? SW_COLORS.alarm : SW_COLORS.ink}
-            >
-              {totals[i].toFixed(2)}
-            </text>
-          </g>
-        );
-      })}
+          </div>
+        </div>
+      </div>
 
-      {/* Takt-time reference line */}
-      <line
-        x1={padL}
-        y1={yScale(taktMin)}
-        x2={width - padR}
-        y2={yScale(taktMin)}
-        stroke={SW_COLORS.brand}
-        strokeWidth={1.5}
-        strokeDasharray="6 4"
-      />
-      <text
-        x={width - padR - 4}
-        y={yScale(taktMin) - 6}
-        textAnchor="end"
-        fontFamily={SW_FONTS.mono}
-        fontSize={10}
-        fontWeight={800}
-        fill={SW_COLORS.brand}
+      {/* Legend + drag hint */}
+      <div
+        style={{
+          marginTop: 22,
+          display: 'flex',
+          gap: 14,
+          flexWrap: 'wrap',
+          alignItems: 'center',
+        }}
       >
-        TAKT {taktMin.toFixed(2)} min
-      </text>
-
-      {/* Category legend */}
-      <g transform={`translate(${padL}, ${height - 24})`}>
-        {LEGEND.map((l, i) => (
-          <g key={l.cat} transform={`translate(${i * 90}, 0)`}>
-            <rect width={10} height={10} fill={colorForCategory(l.cat)} rx={2} />
-            <text
-              x={14}
-              y={9}
-              fontFamily={SW_FONTS.mono}
-              fontSize={9}
-              fontWeight={700}
-              fill={SW_COLORS.muted}
-            >
-              {l.label}
-            </text>
-          </g>
+        {LEGEND.map((l) => (
+          <div key={l.cat} style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <div style={{ width: 10, height: 10, background: colorForCategory(l.cat), borderRadius: 2 }} />
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted }}>{l.label}</span>
+          </div>
         ))}
-      </g>
-    </svg>
+        {draggable && (
+          <span
+            style={{
+              marginLeft: 'auto',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              fontWeight: 700,
+              color: SW_COLORS.brand,
+            }}
+          >
+            ⇅ DRAG OPERATIONS BETWEEN OPERATORS TO REBALANCE
+          </span>
+        )}
+      </div>
+    </div>
   );
 }
 
@@ -227,17 +376,16 @@ function colorForCategory(cat: Operation['category']): string {
 }
 
 /**
- * Round-robin operation assignment to N operators, optionally biased to keep
- * each operator on a single machine type. This is a stand-in for a real
- * line-balancing heuristic (RPW etc.) — good enough for visual validation.
+ * Round-robin operation assignment to N operators using LPT (Longest
+ * Processing Time): sort ops by SMV descending, then assign each to the
+ * operator with the lowest current load. Good baseline that the user can
+ * then tune via drag.
  */
 export function autoAssign(
   ops: Operation[],
   operatorCount: number,
 ): OperatorAssignment[] {
   const buckets: Operation[][] = Array.from({ length: operatorCount }, () => []);
-  // Sort operations by SMV descending, then place each onto the operator
-  // with the lowest current load. Longest-Processing-Time (LPT) heuristic.
   const sorted = [...ops].sort((a, b) => b.smv - a.smv);
   const loads = new Array(operatorCount).fill(0);
   for (const op of sorted) {
