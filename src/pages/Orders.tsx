@@ -2,30 +2,69 @@ import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Card, Button, Stat, SectionHeader } from '../components';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import {
+  ALL_GARMENT_TEMPLATES,
+  GARMENT_TEMPLATES,
+  ALL_PRODUCTION_SYSTEMS,
+  PRODUCTION_SYSTEMS,
+  type ProductionSystem,
+  pitchTime,
+  labourRequired,
+} from '../domain';
 
 interface OrderState {
   po: string;
   client: string;
   style: string;
   qty: number;
-  deadline: number;
-  sam: number;
+  deadlineDays: number;
+  garmentTemplateId: string;
   target: string;
 }
 
+/**
+ * Order setup — the user enters PO/client/style/qty/deadline, picks a
+ * garment template (T-shirt / Polo / Shirt / Trouser / Sweatshirt, all
+ * sourced from the apparel domain layer with literature-backed SMVs), and
+ * picks a production system. Stitchworks computes pitch time, theoretical
+ * crew size and recommends the system that best fits qty × deadline.
+ */
 export function OrdersPage() {
   const navigate = useNavigate();
   const [order, setOrder] = useState<OrderState>({
-    po: 'PO-4422', client: 'Northwind Apparel Co.', style: 'Polo S/S Classic',
-    qty: 1200, deadline: 5, sam: 18.4, target: 'AQL 2.5'
+    po: 'PO-4422',
+    client: 'Northwind Apparel Co.',
+    style: 'Polo S/S Classic',
+    qty: 1200,
+    deadlineDays: 5,
+    garmentTemplateId: 'polo',
+    target: 'AQL 2.5',
   });
-  const [system, setSystem] = useState<string>('PBS');
+  const [system, setSystem] = useState<ProductionSystem>('PBS');
+
+  const template = GARMENT_TEMPLATES[order.garmentTemplateId];
+  const recommended = recommendSystem(order.qty, order.deadlineDays);
+
+  // Pitch time + crew size based on the chosen template's SAM and an
+  // 8-hour shift target = qty / deadline_days / 8 = pcs/hour demand.
+  const demandPerHour = order.qty / Math.max(1, order.deadlineDays) / 8;
+  const crewSize = Math.ceil(
+    labourRequired({
+      sam: template.totalSmv,
+      demandPerHour,
+      attendancePct: 90,
+      utilisationPct: 80,
+      bsiPct: 95,
+    }),
+  );
+  const pitchSec = pitchTime({ sam: template.totalSmv, operators: crewSize });
+  const cycleDays = Math.ceil((order.qty * template.totalSmv) / (60 * 8 * crewSize));
 
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', padding: 32, background: SW_COLORS.paperDeep }}>
       <div style={{ maxWidth: 1180, margin:'0 auto' }}>
         <SectionHeader kicker="Plan a job" title="New production order"
-          sub="Enter order specs. We'll suggest the line, system and crew based on what's free."
+          sub="Enter order specs. We'll suggest the line, system and crew based on the garment template's SAM."
           right={<Button variant="dark" onClick={()=>navigate('/twin')}>Cancel</Button>}
         />
 
@@ -49,18 +88,37 @@ export function OrdersPage() {
               </div>
               <div>
                 <div style={{ fontSize:11, fontWeight:700, color: SW_COLORS.muted, marginBottom:4 }}>Deadline (days)</div>
-                <input type="number" value={order.deadline} onChange={e=>setOrder({...order, deadline:+e.target.value})}
+                <input type="number" value={order.deadlineDays} onChange={e=>setOrder({...order, deadlineDays:+e.target.value})}
                   style={{ width:'100%', padding:'10px 12px', borderRadius: SW_RADIUS.sm, border:`1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize:14, fontWeight:700 }}/>
               </div>
             </div>
 
             <div style={{ marginTop: 14 }}>
               <div style={{ fontSize:11, fontWeight:700, color: SW_COLORS.muted, marginBottom:6 }}>Garment template (preset operations)</div>
-              <div style={{ display:'grid', gridTemplateColumns:'repeat(4,1fr)', gap:8 }}>
-                {['T-shirt','Polo','Shirt','Trouser'].map(g => (
-                  <div key={g} style={{ padding:'10px 8px', textAlign:'center', borderRadius: SW_RADIUS.sm, border:`1.5px solid ${g==='Polo'?SW_COLORS.brand:SW_COLORS.line}`, background: g==='Polo'?SW_COLORS.brandLite:SW_COLORS.paper, fontSize:12, fontWeight:700, cursor:'pointer' }}>{g}</div>
-                ))}
+              <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(140px, 1fr))', gap:8 }}>
+                {ALL_GARMENT_TEMPLATES.map(g => {
+                  const active = g.id === order.garmentTemplateId;
+                  return (
+                    <div key={g.id} onClick={() => setOrder({ ...order, garmentTemplateId: g.id })}
+                      style={{
+                        padding:'10px 8px', textAlign:'center', borderRadius: SW_RADIUS.sm,
+                        border:`1.5px solid ${active?SW_COLORS.brand:SW_COLORS.line}`,
+                        background: active?SW_COLORS.brandLite:SW_COLORS.paper,
+                        fontSize:12, fontWeight:700, cursor:'pointer',
+                      }}>
+                      <div>{g.name}</div>
+                      <div style={{ fontSize:10, fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, fontWeight:600, marginTop:3 }}>
+                        {g.totalSmv.toFixed(2)} min · {g.operations.length} ops
+                      </div>
+                    </div>
+                  );
+                })}
               </div>
+              {template && (
+                <div style={{ marginTop: 10, padding: 10, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.5 }}>
+                  <strong style={{ color: SW_COLORS.ink }}>{template.name}</strong> — {template.description} <em>Best for: {template.bestFor}</em>
+                </div>
+              )}
             </div>
           </Card>
 
@@ -68,30 +126,39 @@ export function OrdersPage() {
             <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>SYSTEM RECOMMENDATION</div>
             <div style={{ background: SW_COLORS.brandLite, padding:14, borderRadius: SW_RADIUS.sm, marginBottom:14, border: `1px solid ${SW_COLORS.brand}40` }}>
               <div style={{ fontSize:11, color: SW_COLORS.brandDeep, fontWeight:700, fontFamily: SW_FONTS.mono, letterSpacing:'1px', marginBottom:4 }}>RECOMMENDED FOR THIS ORDER</div>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize:18, fontWeight:900, color: SW_COLORS.ink }}>Progressive Bundle System (PBS)</div>
-              <div style={{ fontSize:12, color: SW_COLORS.ink, opacity:0.8, marginTop:4 }}>1200 polos × 5 days fits PBS sweet spot. Predictable, low setup cost.</div>
+              <div style={{ fontFamily: SW_FONTS.display, fontSize:18, fontWeight:900, color: SW_COLORS.ink }}>
+                {PRODUCTION_SYSTEMS[recommended].label}
+              </div>
+              <div style={{ fontSize:12, color: SW_COLORS.ink, opacity:0.8, marginTop:4 }}>
+                {PRODUCTION_SYSTEMS[recommended].bestFor}
+              </div>
             </div>
 
-            <div style={{ display:'grid', gridTemplateColumns:'repeat(2,1fr)', gap:6 }}>
-              {['Make-Through','PBS','UPS','Modular','Straight','Synchro','Clump','Bundle','Unit Handle'].map(s => {
-                const active = system === s;
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(3,1fr)', gap:6 }}>
+              {ALL_PRODUCTION_SYSTEMS.map(s => {
+                const active = system === s.id;
                 return (
-                  <div key={s} onClick={()=>setSystem(s)} style={{
+                  <div key={s.id} onClick={()=>setSystem(s.id)} title={s.description} style={{
                     padding:'8px 10px', textAlign:'center',
                     borderRadius: SW_RADIUS.sm,
                     border:`1.5px solid ${active?SW_COLORS.ink:SW_COLORS.line}`,
                     background: active?SW_COLORS.ink:SW_COLORS.paper,
                     color: active?SW_COLORS.paper:SW_COLORS.ink,
                     fontSize:11, fontWeight:700, cursor:'pointer',
-                  }}>{s}</div>
+                  }}>{s.short}</div>
                 );
               })}
             </div>
 
-            <div style={{ marginTop:18, display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap:8 }}>
-              <Stat label="EST. SAM" value={order.sam} unit="min"/>
-              <Stat label="EST. CYCLE" value={`${Math.round((order.qty * order.sam)/(60*8*15))}d`} color={SW_COLORS.brand}/>
-              <Stat label="CREW NEEDED" value={Math.ceil(order.sam/2)} unit="ops"/>
+            <div style={{ marginTop:16, padding:10, background:SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, fontSize:11, color: SW_COLORS.muted, lineHeight:1.5 }}>
+              <strong style={{ color: SW_COLORS.ink }}>{PRODUCTION_SYSTEMS[system].label}</strong> — bundle size {PRODUCTION_SYSTEMS[system].typicalBatchSize}, typical line ~{PRODUCTION_SYSTEMS[system].typicalLineSize} ops, ~{PRODUCTION_SYSTEMS[system].typicalWipPieces} pcs WIP. {PRODUCTION_SYSTEMS[system].description}
+            </div>
+
+            <div style={{ marginTop:18, display:'grid', gridTemplateColumns:'1fr 1fr 1fr 1fr', gap:8 }}>
+              <Stat label="GARMENT SAM" value={template.totalSmv.toFixed(2)} unit="min"/>
+              <Stat label="PITCH TIME" value={pitchSec.toFixed(1)} unit="sec" color={SW_COLORS.brand}/>
+              <Stat label="EST. CYCLE" value={`${cycleDays}d`} color={SW_COLORS.thread}/>
+              <Stat label="CREW NEEDED" value={crewSize} unit="ops" color={SW_COLORS.ok}/>
             </div>
           </Card>
         </div>
@@ -103,4 +170,22 @@ export function OrdersPage() {
       </div>
     </div>
   );
+}
+
+/**
+ * Heuristic system recommendation — matches the literature's rules of thumb:
+ *   - very small batch / sample volume → make-through
+ *   - tight deadline + small qty → modular (one-piece flow, low WIP)
+ *   - mid-volume mixed → modular or UPS
+ *   - high-volume basics → PBS
+ *   - massive piece-rate runs → unit-handle
+ */
+function recommendSystem(qty: number, days: number): ProductionSystem {
+  const dailyDemand = qty / Math.max(1, days);
+  if (qty <= 50) return 'make_through';
+  if (dailyDemand < 100) return 'modular';
+  if (dailyDemand < 400) return 'modular';
+  if (dailyDemand < 1500) return 'PBS';
+  if (dailyDemand < 3000) return 'UPS';
+  return 'unit_handle';
 }

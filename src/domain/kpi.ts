@@ -127,3 +127,86 @@ export function compositeLayoutScore(opts: {
     0.15 * (1 - opts.normWip)
   );
 }
+
+/**
+ * Smoothness Index = √(Σ(CT − ti)²) / (CT × N)
+ * Variance of station loads. Lower = smoother. Per Koc & Eryürük 2025 eq. 10.
+ * RPW heuristic typically achieves SI in the 0.15–0.25 range on realistic
+ * apparel bulletins.
+ */
+export function smoothnessIndex(stationSmvs: number[], cycleTime: number): number {
+  const n = stationSmvs.length;
+  if (n === 0 || cycleTime <= 0) return 0;
+  const sumSq = stationSmvs.reduce((s, t) => s + (cycleTime - t) ** 2, 0);
+  return Math.sqrt(sumSq) / (cycleTime * n);
+}
+
+/**
+ * Pitch time (seconds per operator per piece) = SAM_garment × 60 / N_operators.
+ * The pitch is the per-operator share of the total work content if perfectly
+ * balanced. Per Line Balancing textbook p. 9.
+ */
+export function pitchTime(opts: { sam: number; operators: number }): number {
+  return opts.operators > 0 ? (opts.sam * 60) / opts.operators : 0;
+}
+
+/**
+ * Operator BSI / performance rating % = (production_time × 100) / actual_working_time
+ * 100 BSI = on-standard. New operators commonly run 60–75 BSI; senior 100+.
+ * Per Koc & Eryürük 2025 eq. 1.
+ */
+export function bsiPercent(opts: { producedPieces: number; sam: number; workMinutes: number }): number {
+  const earned = opts.producedPieces * opts.sam;
+  return opts.workMinutes > 0 ? (earned / opts.workMinutes) * 100 : 0;
+}
+
+/**
+ * Labour requirement (planning) =
+ *   (Total_SAM / 60) × demandPerHour × (100/attendance%) × (100/utilisation%) × (100/BSI%)
+ *
+ * The textbook formula for staffing to a hourly demand. Worked example from
+ * Line Balancing p. 22: 480 pcs/hr × 8.41 SAM/60 × 100/90 × 100/80 × 100/95
+ * gives the headcount the line should plan for.
+ */
+export function labourRequired(opts: {
+  sam: number;
+  demandPerHour: number;
+  attendancePct: number;
+  utilisationPct: number;
+  bsiPct: number;
+}): number {
+  return (
+    (opts.sam / 60) *
+    opts.demandPerHour *
+    (100 / opts.attendancePct) *
+    (100 / opts.utilisationPct) *
+    (100 / opts.bsiPct)
+  );
+}
+
+/**
+ * Floater pool size = total_operators × absentee% × (avg_BSI / floater_BSI)
+ * Floaters are utility operators (~60 BSI across all ops) used to cover
+ * absenteeism. Per Line Balancing textbook p. 24.
+ *
+ * Example: 25 operators, 8% absentee, avg BSI 90, floater BSI 60
+ *  → 25 × 0.08 × (90/60) = 3 floaters needed.
+ */
+export function floatersRequired(opts: {
+  totalOperators: number;
+  absenteePct: number;
+  avgBsi: number;
+  floaterBsi?: number;
+}): number {
+  const floaterBsi = opts.floaterBsi ?? 60;
+  if (floaterBsi <= 0) return 0;
+  return opts.totalOperators * (opts.absenteePct / 100) * (opts.avgBsi / floaterBsi);
+}
+
+/**
+ * First-pass yield = (produced - rejected) / produced.
+ * What fraction of pieces went through inspection without needing rework.
+ */
+export function firstPassYield(opts: { produced: number; rejected: number }): number {
+  return opts.produced > 0 ? (opts.produced - opts.rejected) / opts.produced : 1;
+}

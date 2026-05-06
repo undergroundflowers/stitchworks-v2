@@ -1,7 +1,15 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup } from '../components';
-import { useState } from 'react';
+import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign } from '../components';
+import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
+import {
+  GARMENT_TEMPLATES,
+  ALL_GARMENT_TEMPLATES,
+  smoothnessIndex,
+  balanceLoss,
+  lineEfficiency,
+  bottleneckSmv,
+} from '../domain';
 
 interface DonutSlice {
   v: number;
@@ -16,6 +24,30 @@ interface DonutChartProps {
 export function ReportsPage() {
   const navigate = useNavigate();
   const [period, setPeriod] = useState<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>('SHIFT');
+  const [yamGarment, setYamGarment] = useState<string>('tshirt');
+  const [yamOperators, setYamOperators] = useState<number>(25);
+
+  const yamTemplate = GARMENT_TEMPLATES[yamGarment];
+  const yamAssignments = useMemo(
+    () => autoAssign(yamTemplate.operations, yamOperators),
+    [yamTemplate, yamOperators],
+  );
+  const stationSmvs = yamAssignments.map((a) =>
+    a.operations.reduce((s, o) => s + o.smv, 0),
+  );
+  // Pitch (target cycle time per operator) when load is perfectly balanced.
+  const yamTakt = yamTemplate.totalSmv / yamOperators;
+  const yamBottleneck = bottleneckSmv(
+    yamAssignments.map((a) => ({ smv: a.operations.reduce((s, o) => s + o.smv, 0), id: a.id, code: '', name: '', machineCode: 'MNL', skill: 'stitching', category: 'manual' })),
+  );
+  const yamBalance = balanceLoss(stationSmvs);
+  const yamSmoothness = smoothnessIndex(stationSmvs, yamBottleneck);
+  const yamEfficiency = lineEfficiency({
+    producedPieces: Math.round((60 / yamBottleneck) * 8),
+    sam: yamTemplate.totalSmv,
+    operators: yamOperators,
+    workMinutes: 60 * 8,
+  });
 
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
@@ -37,6 +69,39 @@ export function ReportsPage() {
         <Stat big label="DOWNTIME"   value="42"    unit="min"    color={SW_COLORS.warn}/>
         <Stat big label="COST/PC"    value="$3.84" color={SW_COLORS.thread} delta={-0.12}/>
       </div>
+
+      {/* Yamazumi — the line-balance view, derived from the apparel domain layer */}
+      <Card padding={20} style={{ marginBottom:14 }}>
+        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:10, gap: 14, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>YAMAZUMI · LINE BALANCE</div>
+            <div style={{ fontSize:12, color: SW_COLORS.muted }}>
+              Operator-by-operation SMV stack with takt-line overlay. Bars over the takt line are bottlenecks; bars below carry slack.
+              Auto-assignment uses Longest-Processing-Time (LPT) heuristic.
+            </div>
+          </div>
+          <div style={{ display:'flex', alignItems:'center', gap: 14 }}>
+            <ToggleGroup value={yamGarment} onChange={setYamGarment} options={ALL_GARMENT_TEMPLATES.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
+            <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
+              <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPS</span>
+              <input type="number" min={4} max={60} value={yamOperators}
+                onChange={e => setYamOperators(Math.max(4, Math.min(60, parseInt(e.target.value) || 4)))}
+                style={{ width: 56, padding: '4px 8px', border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13 }}/>
+            </div>
+          </div>
+        </div>
+        <Yamazumi assignments={yamAssignments} taktMin={yamTakt} height={300}/>
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginTop: 8 }}>
+          <Stat label="GARMENT SAM" value={yamTemplate.totalSmv.toFixed(2)} unit="min"/>
+          <Stat label="TAKT" value={yamTakt.toFixed(3)} unit="min" color={SW_COLORS.brand}/>
+          <Stat label="BOTTLENECK" value={yamBottleneck.toFixed(3)} unit="min" color={SW_COLORS.alarm}/>
+          <Stat label="BALANCE LOSS" value={yamBalance.toFixed(1)} unit="%" color={yamBalance > 25 ? SW_COLORS.alarm : SW_COLORS.thread}/>
+          <Stat label="LINE EFF" value={yamEfficiency.toFixed(1)} unit="%" color={yamEfficiency >= 80 ? SW_COLORS.ok : SW_COLORS.thread}/>
+        </div>
+        <div style={{ marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
+          Smoothness index {yamSmoothness.toFixed(3)} (lower = smoother) · Source bulletin: {yamTemplate.operations.length} operations from <em>{yamTemplate.name}</em> ({yamTemplate.bestFor})
+        </div>
+      </Card>
 
       <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:14, marginBottom:14 }}>
         <Card padding={20}>

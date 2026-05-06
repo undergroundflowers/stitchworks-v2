@@ -1,42 +1,38 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup } from '../components';
 import { Fragment, useState, useMemo } from 'react';
+import {
+  ALL_WORKER_ARCHETYPES,
+  type WorkerArchetype,
+  ALL_MACHINES,
+  type MachineSpec,
+} from '../domain';
 
+/**
+ * Resources page — operators, machines, inventory and roster.
+ *
+ * Operators and machines are now derived from the apparel domain layer
+ * (WORKER_ARCHETYPES + MACHINE_CATALOG) instead of hardcoded mock arrays.
+ * Names and instance counts are seeded deterministically so the table is
+ * stable across renders. Inventory and roster remain demo data for now;
+ * those become live once the project file format and roster scheduler land.
+ */
 export function ResourcesPage() {
   const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster'>('operators');
 
-  const operators = useMemo(() => [...Array(28)].map((_, i) => {
-    const skills = ['Stitching','Overlock','Buttonhole','Pressing','Inspect','Cutting','Pack'];
-    return {
-      id: `OPR-${(i+1).toString().padStart(2,'0')}`,
-      name: ['Aanya','Rohan','Mei','Kofi','Lara','Yui','Tariq','Sara','Rafa','Nina','Diego','Eun','Jamal','Priya','Ola','Ravi','Lin','Pavel','Kemi','Iris','Boun','Asha','Nova','Tomi','Hina','Beto','Hai','Anya'][i],
-      skill: skills[i%skills.length],
-      eff: 60 + Math.floor(Math.random()*40),
-      sam: (1.4 + Math.random()*1.3).toFixed(2),
-      shift: ['A','B','C'][i%3],
-      status: i%9===0?'SICK':(i%7===0?'TRAINING':'ACTIVE'),
-      wage: 12 + (i%5)*1.5,
-    };
-  }), []);
+  const operators = useMemo(() => buildOperators(), []);
+  const machines = useMemo(() => buildMachines(), []);
 
-  const machines = useMemo(() => [...Array(34)].map((_, i) => {
-    const types = ['Single Needle','Overlock','Flat Lock','Buttonhole','Bartack','Cutter','Press','Embroidery'];
-    return {
-      id: `M-${(i+1).toString().padStart(2,'0')}`,
-      type: types[i%types.length],
-      brand: ['Juki','Brother','Pegasus','Yamato','Singer'][i%5],
-      hours: Math.floor(Math.random()*8000),
-      health: 30 + Math.floor(Math.random()*70),
-      status: i%11===0?'DOWN':(i%6===0?'SERVICE':'OK'),
-      line: `L${1+(i%4)}`,
-    };
-  }), []);
+  const activeCount = operators.filter((o) => o.status === 'ACTIVE').length;
+  const sickCount = operators.filter((o) => o.status === 'SICK').length;
+  const trainingCount = operators.filter((o) => o.status === 'TRAINING').length;
+  const avgEff = Math.round(operators.reduce((s, o) => s + o.eff, 0) / operators.length);
 
   return (
     <div style={{ width:'100%', height:'100%', display:'flex', flexDirection:'column', background: SW_COLORS.paperDeep }}>
       <div style={{ padding:'18px 24px', background: SW_COLORS.paper, borderBottom: `1px solid ${SW_COLORS.line}` }}>
         <SectionHeader kicker="Resources" title="People, machines & inventory"
-          sub="Manage your factory's workforce and equipment."
+          sub="Manage your factory's workforce and equipment. Operators and machines are seeded from the apparel domain catalog."
           right={
             <div style={{ display:'flex', gap:8 }}>
               <Button variant="secondary" size="sm" icon="↑">Import</Button>
@@ -45,8 +41,8 @@ export function ResourcesPage() {
           }/>
         <div style={{ marginTop: 8 }}>
           <ToggleGroup value={tab} onChange={setTab} options={[
-            { value:'operators', label:'👥 Operators · 28' },
-            { value:'machines',  label:'⚙ Machines · 34' },
+            { value:'operators', label:`👥 Operators · ${operators.length}` },
+            { value:'machines',  label:`⚙ Machines · ${machines.length}` },
             { value:'inventory', label:'📦 Inventory' },
             { value:'roster',    label:'🗓 Shift roster' },
           ]}/>
@@ -60,7 +56,7 @@ export function ResourcesPage() {
               <table style={{ width:'100%', borderCollapse:'collapse', fontFamily: SW_FONTS.body }}>
                 <thead>
                   <tr style={{ background: SW_COLORS.paperDeep, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                    {['ID','Name','Primary skill','Eff %','SAM','Shift','Wage/hr','Status'].map(h => (
+                    {['ID','Name','Role','Eff %','SAM','Shift','Wage/hr','Status'].map(h => (
                       <th key={h} style={{ padding:'10px 12px', textAlign:'left', fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, letterSpacing:'1px' }}>{h}</th>
                     ))}
                   </tr>
@@ -75,7 +71,12 @@ export function ResourcesPage() {
                           <span style={{ fontWeight:700 }}>{o.name}</span>
                         </div>
                       </td>
-                      <td style={{ padding:'10px 12px' }}>{o.skill}</td>
+                      <td style={{ padding:'10px 12px' }}>
+                        <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                          <span style={{ width:18, height:18, borderRadius:4, background: o.archetype.color, color:'#fff', display:'inline-flex', alignItems:'center', justifyContent:'center', fontSize:11 }}>{o.archetype.icon}</span>
+                          {o.archetype.label}
+                        </span>
+                      </td>
                       <td style={{ padding:'10px 12px' }}>
                         <div style={{ display:'flex', alignItems:'center', gap:6 }}>
                           <span style={{ fontFamily: SW_FONTS.mono, fontWeight:700, width:30, color: o.eff>=80?SW_COLORS.ok:o.eff>=65?SW_COLORS.thread:SW_COLORS.alarm }}>{o.eff}%</span>
@@ -84,7 +85,7 @@ export function ResourcesPage() {
                       </td>
                       <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontWeight:700 }}>{o.sam}</td>
                       <td style={{ padding:'10px 12px' }}><Tag soft color={o.shift==='A'?SW_COLORS.brand:o.shift==='B'?SW_COLORS.bobbin:SW_COLORS.fabric}>{o.shift}</Tag></td>
-                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontWeight:700, color: SW_COLORS.thread }}>${o.wage}</td>
+                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontWeight:700, color: SW_COLORS.thread }}>${o.wage.toFixed(0)}</td>
                       <td style={{ padding:'10px 12px' }}>
                         <Tag soft color={o.status==='ACTIVE'?SW_COLORS.ok:o.status==='SICK'?SW_COLORS.alarm:SW_COLORS.thread} dot>{o.status}</Tag>
                       </td>
@@ -98,22 +99,26 @@ export function ResourcesPage() {
               <Card padding={16} style={{ marginBottom:14 }}>
                 <div style={{ fontFamily: SW_FONTS.display, fontSize:13, fontWeight:900, marginBottom:10 }}>WORKFORCE</div>
                 <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
-                  <Stat label="ACTIVE" value="24" color={SW_COLORS.ok}/>
-                  <Stat label="SICK" value="2" color={SW_COLORS.alarm}/>
-                  <Stat label="TRAINING" value="2" color={SW_COLORS.thread}/>
-                  <Stat label="AVG EFF" value="79" unit="%"/>
+                  <Stat label="ACTIVE" value={activeCount} color={SW_COLORS.ok}/>
+                  <Stat label="SICK" value={sickCount} color={SW_COLORS.alarm}/>
+                  <Stat label="TRAINING" value={trainingCount} color={SW_COLORS.thread}/>
+                  <Stat label="AVG EFF" value={avgEff} unit="%"/>
                 </div>
               </Card>
               <Card padding={16}>
-                <div style={{ fontFamily: SW_FONTS.display, fontSize:13, fontWeight:900, marginBottom:10 }}>SKILL COVERAGE</div>
-                {['Stitching','Overlock','Buttonhole','Pressing','Inspect'].map(sk => {
-                  const c = operators.filter(o => o.skill===sk).length;
+                <div style={{ fontFamily: SW_FONTS.display, fontSize:13, fontWeight:900, marginBottom:10 }}>ROLE COVERAGE</div>
+                {ALL_WORKER_ARCHETYPES.filter((a) => operators.some((o) => o.archetype.role === a.role)).map((a) => {
+                  const c = operators.filter((o) => o.archetype.role === a.role).length;
                   return (
-                    <div key={sk} style={{ marginBottom:8 }}>
+                    <div key={a.role} style={{ marginBottom:8 }}>
                       <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, fontWeight:600, marginBottom:3 }}>
-                        <span>{sk}</span><span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>{c}</span>
+                        <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
+                          <span style={{ color: a.color, fontSize:13 }}>{a.icon}</span>
+                          {a.label}
+                        </span>
+                        <span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>{c}</span>
                       </div>
-                      <Progress value={c} max={8} color={SW_COLORS.brand} height={5}/>
+                      <Progress value={c} max={8} color={a.color} height={5}/>
                     </div>
                   );
                 })}
@@ -128,9 +133,11 @@ export function ResourcesPage() {
               <Card key={m.id} padding={14}>
                 <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10 }}>
                   <div>
-                    <div style={{ fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted }}>{m.id} · {m.line}</div>
-                    <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginTop:2 }}>{m.type}</div>
-                    <div style={{ fontSize:11, color: SW_COLORS.muted }}>{m.brand}</div>
+                    <div style={{ fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted }}>{m.id} · {m.line} · {m.spec.code}</div>
+                    <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginTop:2, color: m.spec.color }}>
+                      <span style={{ marginRight:6 }}>{m.spec.icon}</span>{m.spec.shortName}
+                    </div>
+                    <div style={{ fontSize:11, color: SW_COLORS.muted }}>{m.brand} · {m.spec.label}</div>
                   </div>
                   <Tag color={m.status==='OK'?SW_COLORS.ok:m.status==='DOWN'?SW_COLORS.alarm:SW_COLORS.thread} soft dot>{m.status}</Tag>
                 </div>
@@ -140,8 +147,9 @@ export function ResourcesPage() {
                   </div>
                   <Progress value={m.health} color={m.health>=70?SW_COLORS.ok:m.health>=40?SW_COLORS.thread:SW_COLORS.alarm} height={6}/>
                 </div>
-                <div style={{ fontSize:11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
-                  {m.hours.toLocaleString()} run hrs
+                <div style={{ display:'flex', justifyContent:'space-between', fontSize:11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
+                  <span>{m.hours.toLocaleString()} run hrs</span>
+                  <span>${m.spec.costUsd.toLocaleString()}</span>
                 </div>
               </Card>
             ))}
@@ -218,4 +226,104 @@ export function ResourcesPage() {
       </div>
     </div>
   );
+}
+
+// ── Demo seeding helpers — deterministic so the table is stable per session ──
+
+interface SeededOperator {
+  id: string;
+  name: string;
+  archetype: WorkerArchetype;
+  eff: number;
+  sam: string;
+  shift: 'A' | 'B' | 'C';
+  status: 'ACTIVE' | 'SICK' | 'TRAINING';
+  wage: number;
+}
+
+const NAMES = ['Aanya','Rohan','Mei','Kofi','Lara','Yui','Tariq','Sara','Rafa','Nina','Diego','Eun','Jamal','Priya','Ola','Ravi','Lin','Pavel','Kemi','Iris','Boun','Asha','Nova','Tomi','Hina','Beto','Hai','Anya','Karim','Joon'];
+
+/**
+ * Distribute operators across worker archetypes proportional to each
+ * archetype's typical headcount on a 100-operator finishing-room. Counts
+ * sum to ~30 to keep the table readable.
+ */
+const ROLE_DISTRIBUTION: Partial<Record<WorkerArchetype['role'], number>> = {
+  sew_op: 14, helper: 3, cutter: 2, spreader: 1, bundler: 2,
+  qc_inline: 2, qc_final: 1, presser: 2, packer: 2, material_handler: 2,
+  mechanic: 1, supervisor: 1,
+};
+
+function buildOperators(): SeededOperator[] {
+  const out: SeededOperator[] = [];
+  let n = 1;
+  for (const archetype of ALL_WORKER_ARCHETYPES) {
+    const count = ROLE_DISTRIBUTION[archetype.role] ?? 0;
+    for (let i = 0; i < count; i++) {
+      const idx = (n - 1) % NAMES.length;
+      // Deterministic eff/wage variations seeded by id.
+      const eff = Math.round(archetype.baseEfficiency * 100 + ((n * 17) % 25) - 12);
+      const wage = archetype.baseCostHr + ((n * 7) % 5) * 0.5;
+      const status: SeededOperator['status'] =
+        n % 9 === 0 ? 'SICK' : n % 7 === 0 ? 'TRAINING' : 'ACTIVE';
+      out.push({
+        id: `OPR-${n.toString().padStart(2, '0')}`,
+        name: NAMES[idx],
+        archetype,
+        eff: Math.max(40, Math.min(99, eff)),
+        sam: (1.4 + ((n * 13) % 17) * 0.08).toFixed(2),
+        shift: (['A', 'B', 'C'] as const)[n % 3],
+        status,
+        wage,
+      });
+      n++;
+    }
+  }
+  return out;
+}
+
+interface SeededMachine {
+  id: string;
+  spec: MachineSpec;
+  brand: string;
+  hours: number;
+  health: number;
+  status: 'OK' | 'DOWN' | 'SERVICE';
+  line: string;
+}
+
+/**
+ * Headcount per machine type for a balanced sewing line. Proportions match
+ * the Brandix-era SMV sheet (4× 4OL, 10× SNL, 1× FB, 1× BS, 4× FL, 1× BH).
+ */
+const MACHINE_DISTRIBUTION: Partial<Record<MachineSpec['code'], number>> = {
+  SNL: 10, '4OL': 4, FL: 4, FB: 1, KS: 1, BH: 1, BS: 1, BT: 1,
+  CUT: 2, SPR: 1, FUSE: 1, PRESS: 3, EMB: 1, INSP: 2,
+};
+
+function buildMachines(): SeededMachine[] {
+  const out: SeededMachine[] = [];
+  let n = 1;
+  for (const spec of ALL_MACHINES) {
+    if (spec.isManual) continue;
+    const count = MACHINE_DISTRIBUTION[spec.code] ?? 0;
+    for (let i = 0; i < count; i++) {
+      const brand = (spec.brands ?? ['Generic'])[i % (spec.brands?.length ?? 1)];
+      const hours = 200 + ((n * 113) % 7800);
+      const health = 30 + ((n * 41) % 70);
+      const status: SeededMachine['status'] =
+        n % 11 === 0 ? 'DOWN' : n % 6 === 0 ? 'SERVICE' : 'OK';
+      out.push({
+        id: `M-${n.toString().padStart(2, '0')}`,
+        spec,
+        brand,
+        hours,
+        health,
+        status,
+        line: `L${1 + (n % 4)}`,
+      });
+      n++;
+    }
+  }
+  return out;
 }
