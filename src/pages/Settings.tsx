@@ -7,7 +7,7 @@ import { ALL_GARMENT_TEMPLATES } from '../domain';
 
 export function SettingsPage() {
   const navigate = useNavigate();
-  const project = useProject();
+  const project = useProject((s) => s);
   const [importMsg, setImportMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   // Local UI state for the simulation sliders — these are presentational

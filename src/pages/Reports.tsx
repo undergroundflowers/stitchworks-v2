@@ -32,7 +32,7 @@ const SHIFT_MIN = 480;
  */
 export function ReportsPage() {
   const navigate = useNavigate();
-  const project = useProject();
+  const project = useProject((s) => s);
   const garments = useGarments();
   const setYamazumiOverride = project.setYamazumiOverride;
   const clearYamazumiOverride = project.clearYamazumiOverride;

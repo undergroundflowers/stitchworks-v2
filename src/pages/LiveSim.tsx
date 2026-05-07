@@ -32,7 +32,7 @@ const SHIFT_MIN_PER_DAY = 480;
  */
 export function LiveSimPage() {
   const navigate = useNavigate();
-  const project = useProject();
+  const project = useProject((s) => s);
   // Defaults flow from the project store so Orders → LiveSim handoff works:
   // changes on Orders are saved to selectedGarmentId / defaultOperators and
   // landed here on next visit.

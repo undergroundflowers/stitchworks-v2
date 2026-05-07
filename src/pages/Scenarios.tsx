@@ -20,7 +20,7 @@ type Mode = 'list' | 'compare';
  */
 export function ScenariosPage() {
   const navigate = useNavigate();
-  const project = useProject();
+  const project = useProject((s) => s);
   const garments = useGarments();
   const scenarios = project.scenarios;
 

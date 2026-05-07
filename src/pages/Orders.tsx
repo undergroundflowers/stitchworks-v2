@@ -30,7 +30,7 @@ interface OrderState {
  */
 export function OrdersPage() {
   const navigate = useNavigate();
-  const project = useProject();
+  const project = useProject((s) => s);
   const garments = useGarments();
   const [order, setOrder] = useState<OrderState>({
     po: 'PO-4422',

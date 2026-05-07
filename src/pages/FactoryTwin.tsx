@@ -29,7 +29,7 @@ const SHIFT_MIN = 480;
  */
 export function FactoryTwinPage() {
   const navigate = useNavigate();
-  const project = useProject();
+  const project = useProject((s) => s);
   const garments = useGarments();
   const factory = project.factory;
 
