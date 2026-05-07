@@ -18,6 +18,9 @@ import { ResourcesPage } from './pages/Resources';
 import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { Onboarding } from './pages/Onboarding';
+import { IsoBuilderPage } from './pages/IsoBuilder';
+import { DeptInteriorPage } from './pages/DeptInterior';
+import { WorkstationDetailPage } from './pages/WorkstationDetail';
 
 /**
  * App shell: top bar + route outlet, vibe-driven theming, the floating
@@ -101,6 +104,11 @@ export default function App() {
           <Route path="/resources" element={<ResourcesPage />} />
           <Route path="/kpi" element={<ReportsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
+          {/* New in v2 design import — currently stubbed pending deep port */}
+          <Route path="/iso" element={<IsoBuilderPage />} />
+          <Route path="/iso/dept/:deptId" element={<IsoBuilderPage />} />
+          <Route path="/dept/:deptId" element={<DeptInteriorPage />} />
+          <Route path="/workstation/:deptId/:wsId" element={<WorkstationDetailPage />} />
         </Routes>
       </div>
 
