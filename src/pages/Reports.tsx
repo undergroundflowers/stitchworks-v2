@@ -8,7 +8,7 @@ import {
   lineEfficiency,
   bottleneckSmv,
 } from '../domain';
-import { buildSimConfig, efficiencyFromSkillMatrix, useSim } from '../simulation';
+import { buildSimConfig, efficiencyFromSkillMatrix, runReplications, type AggregateKpis } from '../simulation';
 import { useProject, useGarments } from '../store';
 
 interface DonutSlice {
@@ -85,51 +85,71 @@ export function ReportsPage() {
     [project.skillMatrix, yamTemplate],
   );
   const skillEntries = Object.keys(opEfficiency).length;
+  const [runs, setRuns] = useState<number>(1);
   const runConfig = useMemo(
     () => buildSimConfig({ garment: yamTemplate, operators: yamOperators, opEfficiency }),
     [yamTemplate, yamOperators, opEfficiency],
   );
-  const { state: simState, step, reset: simReset } = useSim(runConfig);
+  const [agg, setAgg] = useState<AggregateKpis>(() =>
+    runReplications({ config: runConfig, replications: runs, simMinutes: SHIFT_MIN }),
+  );
 
-  // Auto-run a full shift on mount or whenever config changes. step() is
-  // synchronous, fast (the queue is small), and gives us a deterministic
-  // post-shift snapshot to render KPIs against.
+  // Re-run when config or replication count changes. Synchronous —
+  // typically <100ms even at runs=10.
   useEffect(() => {
-    simReset();
-    step(SHIFT_MIN);
-  }, [runConfig, simReset, step]);
+    setAgg(runReplications({ config: runConfig, replications: runs, simMinutes: SHIFT_MIN }));
+  }, [runConfig, runs]);
 
-  const samConsumedMin = simState.producedPieces * yamTemplate.totalSmv;
-  const efficiency = (samConsumedMin / (yamOperators * SHIFT_MIN)) * 100;
-  const throughputPerHr = simState.history.length > 0
-    ? (simState.producedPieces / Math.max(1e-6, simState.time)) * 60
-    : 0;
-  const wipBundles = simState.totalArrivals - simState.produced;
+  const efficiency = agg.efficiencyPct.mean;
+  const throughputPerHr = agg.throughputPerHr.mean;
+  const producedPieces = agg.producedPieces.mean;
+  const meanLeadTime = agg.meanLeadTime.mean;
+  const utilization = agg.utilization.mean;
+  const wipBundles = agg.wipBundles.mean;
 
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
       <SectionHeader kicker="Reports" title="Production KPIs"
-        sub={`Snapshot from a 480-min shift run · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} ops respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}`}
+        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} ops respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
         right={
-          <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-            <Button variant="secondary" size="sm" icon="↻" onClick={() => { simReset(); step(SHIFT_MIN); }}>Re-run shift</Button>
+          <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
+            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
+              <span style={{ fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, letterSpacing:'0.5px' }}>RUNS</span>
+              <ToggleGroup value={String(runs)} onChange={(v) => setRuns(parseInt(v))} options={[
+                { value: '1',  label: '1' },
+                { value: '3',  label: '3' },
+                { value: '5',  label: '5' },
+                { value: '10', label: '10' },
+              ]}/>
+            </div>
+            <Button variant="secondary" size="sm" icon="↻" onClick={() => setAgg(runReplications({ config: runConfig, replications: runs, simMinutes: SHIFT_MIN }))}>
+              Re-run
+            </Button>
             <Button variant="primary" size="sm" icon="✦"
               onClick={() => {
-                const defaultName = `${yamTemplate.name} · ${yamOperators} ops · ${new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+                const defaultName = `${yamTemplate.name} · ${yamOperators} ops · ${runs > 1 ? `${runs}× ` : ''}${new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
                 const name = prompt('Save as scenario — name?', defaultName);
                 if (!name) return;
-                const bottleneck = simState.stations[simState.bottleneckOpIndex];
                 project.saveScenario({
                   name,
                   kpis: {
-                    producedPieces: simState.producedPieces,
-                    throughputPerHr: throughputPerHr,
-                    efficiencyPct: efficiency,
-                    meanLeadTime: simState.meanLeadTime,
-                    utilization: simState.utilization,
-                    wipBundles,
-                    bottleneckOpName: bottleneck?.opName ?? '—',
-                    bottleneckQueue: bottleneck?.queueLen ?? 0,
+                    producedPieces: agg.producedPieces.mean,
+                    throughputPerHr: agg.throughputPerHr.mean,
+                    efficiencyPct: agg.efficiencyPct.mean,
+                    meanLeadTime: agg.meanLeadTime.mean,
+                    utilization: agg.utilization.mean,
+                    wipBundles: agg.wipBundles.mean,
+                    bottleneckOpName: agg.bottleneckOpName,
+                    bottleneckQueue: agg.bottleneckQueue,
+                    replicationCount: agg.n,
+                    std: agg.n > 1 ? {
+                      producedPieces: agg.producedPieces.std,
+                      throughputPerHr: agg.throughputPerHr.std,
+                      efficiencyPct: agg.efficiencyPct.std,
+                      meanLeadTime: agg.meanLeadTime.std,
+                      utilization: agg.utilization.std,
+                      wipBundles: agg.wipBundles.std,
+                    } : undefined,
                   },
                 });
                 navigate('/scenarios');
@@ -148,12 +168,12 @@ export function ReportsPage() {
       />
 
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
-        <Stat big label="OUTPUT"     value={simState.producedPieces.toLocaleString()} unit="pcs"   color={SW_COLORS.brand}/>
-        <Stat big label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok}/>
-        <Stat big label="EFFICIENCY" value={efficiency.toFixed(1)}    unit="%"      color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
-        <Stat big label="MEAN LEAD"  value={simState.meanLeadTime.toFixed(1)}   unit="min"      color={SW_COLORS.bobbin}/>
-        <Stat big label="WIP"        value={wipBundles}    unit="bundles"    color={SW_COLORS.warn}/>
-        <Stat big label="UTIL"       value={(simState.utilization * 100).toFixed(0)} unit="%" color={SW_COLORS.thread}/>
+        <KpiTile label="OUTPUT"     mean={producedPieces} std={runs > 1 ? agg.producedPieces.std : 0} unit="pcs" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.brand}/>
+        <KpiTile label="THROUGHPUT" mean={throughputPerHr} std={runs > 1 ? agg.throughputPerHr.std : 0} unit="pcs/hr" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.ok}/>
+        <KpiTile label="EFFICIENCY" mean={efficiency} std={runs > 1 ? agg.efficiencyPct.std : 0} unit="%" formatter={(v) => v.toFixed(1)} color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+        <KpiTile label="MEAN LEAD"  mean={meanLeadTime} std={runs > 1 ? agg.meanLeadTime.std : 0} unit="min" formatter={(v) => v.toFixed(1)} color={SW_COLORS.bobbin}/>
+        <KpiTile label="WIP"        mean={wipBundles} std={runs > 1 ? agg.wipBundles.std : 0} unit="bundles" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.warn}/>
+        <KpiTile label="UTIL"       mean={utilization * 100} std={runs > 1 ? agg.utilization.std * 100 : 0} unit="%" formatter={(v) => v.toFixed(0)} color={SW_COLORS.thread}/>
       </div>
 
       {/* Yamazumi — drag operations between operators to rebalance */}
@@ -203,15 +223,15 @@ export function ReportsPage() {
               <span><span style={{ color: SW_COLORS.bobbin }}>■</span> WIP</span>
             </div>
           </div>
-          <KpiLineChart history={simState.history}/>
+          <KpiLineChart history={agg.firstHistory}/>
         </Card>
 
         <Card padding={20}>
           <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>BOTTLENECKS (LIVE)</div>
-          {simState.stations.length === 0 ? (
+          {agg.firstStations.length === 0 ? (
             <div style={{ fontSize:12, color: SW_COLORS.muted }}>Sim has not run yet.</div>
           ) : (
-            [...simState.stations]
+            [...agg.firstStations]
               .sort((a, b) => b.queueLen - a.queueLen)
               .slice(0, 6)
               .map((s, i) => (
@@ -307,6 +327,37 @@ export function ReportsPage() {
         <Button variant="dark" icon="✓" onClick={() => navigate('/twin')}>Back to twin</Button>
       </div>
     </div>
+  );
+}
+
+interface KpiTileProps {
+  label: string;
+  mean: number;
+  std: number;
+  unit: string;
+  formatter: (value: number) => string;
+  color: string;
+}
+
+/** Stat tile that gracefully shows ± std when std > 0. */
+function KpiTile({ label, mean, std, unit, formatter, color }: KpiTileProps) {
+  return (
+    <Stat
+      big
+      label={label}
+      value={
+        <>
+          {formatter(mean)}
+          {std > 0 && (
+            <span style={{ fontSize: 12, fontWeight: 700, color: SW_COLORS.muted, marginLeft: 4, fontFamily: SW_FONTS.mono }}>
+              ±{formatter(std)}
+            </span>
+          )}
+        </>
+      }
+      unit={unit}
+      color={color}
+    />
   );
 }
 

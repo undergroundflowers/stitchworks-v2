@@ -13,3 +13,4 @@ export { Sim, type SimConfig, type SimState, type StationView, type HistoryPoint
 export { buildSimConfig, efficiencyFromSkillMatrix, type BuildModelOptions } from './model';
 export { useSim, type UseSimResult } from './useSim';
 export { MinHeap, mulberry32 } from './priority-queue';
+export { runReplications, type ReplicationResult, type AggregateKpis } from './replications';

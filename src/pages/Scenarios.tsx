@@ -214,22 +214,26 @@ interface CompareViewProps {
 
 interface KpiRow {
   key: keyof ScenarioKpis | 'wip' | 'lead';
+  /** Field key on `ScenarioKpis['std']` (when defined). */
+  stdKey: keyof NonNullable<ScenarioKpis['std']>;
   label: string;
   unit: string;
   /** True when higher is better, false when lower is better. */
   higherIsBetter: boolean;
   format: (v: number) => string;
   read: (k: ScenarioKpis) => number;
+  /** Whether the value is stored as a fraction (0..1) and should be ×100 for display. */
+  fraction?: boolean;
   color: string;
 }
 
 const KPI_ROWS: KpiRow[] = [
-  { key: 'producedPieces',  label: 'OUTPUT',       unit: 'pcs',     higherIsBetter: true,  format: (v) => Math.round(v).toLocaleString(),       read: (k) => k.producedPieces,    color: SW_COLORS.brand },
-  { key: 'throughputPerHr', label: 'THROUGHPUT',   unit: 'pcs/hr',  higherIsBetter: true,  format: (v) => Math.round(v).toLocaleString(),       read: (k) => k.throughputPerHr,   color: SW_COLORS.ok    },
-  { key: 'efficiencyPct',   label: 'EFFICIENCY',   unit: '%',       higherIsBetter: true,  format: (v) => v.toFixed(1),                          read: (k) => k.efficiencyPct,     color: SW_COLORS.fabric },
-  { key: 'utilization',     label: 'UTILISATION',  unit: '%',       higherIsBetter: true,  format: (v) => (v * 100).toFixed(0),                  read: (k) => k.utilization,       color: SW_COLORS.thread },
-  { key: 'lead',            label: 'MEAN LEAD',    unit: 'min',     higherIsBetter: false, format: (v) => v.toFixed(1),                          read: (k) => k.meanLeadTime,      color: SW_COLORS.bobbin },
-  { key: 'wip',             label: 'WIP',          unit: 'bundles', higherIsBetter: false, format: (v) => v.toLocaleString(),                    read: (k) => k.wipBundles,        color: SW_COLORS.warn  },
+  { key: 'producedPieces',  stdKey: 'producedPieces',  label: 'OUTPUT',       unit: 'pcs',     higherIsBetter: true,  format: (v) => Math.round(v).toLocaleString(), read: (k) => k.producedPieces,  color: SW_COLORS.brand },
+  { key: 'throughputPerHr', stdKey: 'throughputPerHr', label: 'THROUGHPUT',   unit: 'pcs/hr',  higherIsBetter: true,  format: (v) => Math.round(v).toLocaleString(), read: (k) => k.throughputPerHr, color: SW_COLORS.ok },
+  { key: 'efficiencyPct',   stdKey: 'efficiencyPct',   label: 'EFFICIENCY',   unit: '%',       higherIsBetter: true,  format: (v) => v.toFixed(1),                    read: (k) => k.efficiencyPct,   color: SW_COLORS.fabric },
+  { key: 'utilization',     stdKey: 'utilization',     label: 'UTILISATION',  unit: '%',       higherIsBetter: true,  format: (v) => (v * 100).toFixed(0),            read: (k) => k.utilization, fraction: true, color: SW_COLORS.thread },
+  { key: 'lead',            stdKey: 'meanLeadTime',    label: 'MEAN LEAD',    unit: 'min',     higherIsBetter: false, format: (v) => v.toFixed(1),                    read: (k) => k.meanLeadTime,    color: SW_COLORS.bobbin },
+  { key: 'wip',             stdKey: 'wipBundles',      label: 'WIP',          unit: 'bundles', higherIsBetter: false, format: (v) => Math.round(v).toLocaleString(),  read: (k) => k.wipBundles,      color: SW_COLORS.warn },
 ];
 
 function CompareView({ scenarios, garments, onClearSelection, onPickMore }: CompareViewProps) {
@@ -253,9 +257,10 @@ function CompareView({ scenarios, garments, onClearSelection, onPickMore }: Comp
         <div style={{ flex: 1 }}>
           <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900 }}>Side-by-side comparison</div>
           <div style={{ fontSize: 12, color: SW_COLORS.muted }}>
-            Best value on each row is highlighted. Higher-is-better rows: Output · Throughput · Efficiency · Utilisation. Lower-is-better: Lead time · WIP.
+            Best value on each row is highlighted. Higher-is-better rows: Output · Throughput · Efficiency · Utilisation. Lower-is-better: Lead time · WIP. <strong>±</strong> values are 1σ across the run replications.
           </div>
         </div>
+        <Button variant="secondary" size="sm" icon="↓" onClick={() => exportComparisonCsv(scenarios, garments)}>Export CSV</Button>
         <Button variant="ghost" size="sm" onClick={onClearSelection}>Clear selection</Button>
       </div>
 
@@ -286,6 +291,10 @@ function CompareView({ scenarios, garments, onClearSelection, onPickMore }: Comp
               {values.map((v, i) => {
                 const isBest = v === best;
                 const w = peak > 0 ? Math.max(0.04, v / peak) * 100 : 0;
+                const stdRaw = scenarios[i].kpis.std?.[row.stdKey];
+                const stdShown = stdRaw !== undefined && stdRaw > 0
+                  ? row.fraction ? stdRaw * 100 : stdRaw
+                  : 0;
                 return (
                   <div key={scenarios[i].id} style={{ background: SW_COLORS.paper, border: `1px solid ${isBest ? row.color : SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, padding: '8px 10px', position: 'relative', overflow: 'hidden' }}>
                     <div style={{ position: 'absolute', left: 0, bottom: 0, width: `${w}%`, height: 4, background: isBest ? row.color : `${row.color}40` }}/>
@@ -293,6 +302,9 @@ function CompareView({ scenarios, garments, onClearSelection, onPickMore }: Comp
                       <span style={{ fontFamily: SW_FONTS.display, fontSize: 18, fontWeight: 900, color: isBest ? row.color : SW_COLORS.ink }}>
                         {row.format(v)}
                       </span>
+                      {stdShown > 0 && (
+                        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted }}>±{row.format(stdShown)}</span>
+                      )}
                       <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted }}>{row.unit}</span>
                       {isBest && (
                         <span style={{ marginLeft: 'auto', fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 800, color: row.color, letterSpacing: '0.5px' }}>BEST</span>
@@ -318,4 +330,56 @@ function CompareView({ scenarios, garments, onClearSelection, onPickMore }: Comp
 /** Tiny helper so we can stamp KPI rows into the parent grid without an extra wrapper. */
 function FragmentRow({ children }: { children: React.ReactNode }) {
   return <>{children}</>;
+}
+
+/** Build + download a CSV with one row per scenario × KPI. */
+function exportComparisonCsv(scenarios: Scenario[], garments: EffectiveGarments): void {
+  const cols = ['Scenario', 'Garment', 'Operators', 'Replications',
+    'Output mean', 'Output std',
+    'Throughput mean', 'Throughput std',
+    'Efficiency % mean', 'Efficiency % std',
+    'Utilisation mean', 'Utilisation std',
+    'Mean lead mean', 'Mean lead std',
+    'WIP mean', 'WIP std',
+    'Bottleneck', 'Bottleneck Q', 'Saved at'];
+  const lines = [cols.map(csvCell).join(',')];
+  for (const s of scenarios) {
+    const garment = garments.byId[s.config.garmentTemplateId];
+    const std = s.kpis.std;
+    lines.push([
+      s.name,
+      garment?.name ?? s.config.garmentTemplateId,
+      s.config.operators,
+      s.kpis.replicationCount ?? 1,
+      s.kpis.producedPieces.toFixed(1),
+      std?.producedPieces?.toFixed(1) ?? '',
+      s.kpis.throughputPerHr.toFixed(1),
+      std?.throughputPerHr?.toFixed(1) ?? '',
+      s.kpis.efficiencyPct.toFixed(2),
+      std?.efficiencyPct?.toFixed(2) ?? '',
+      s.kpis.utilization.toFixed(3),
+      std?.utilization?.toFixed(3) ?? '',
+      s.kpis.meanLeadTime.toFixed(2),
+      std?.meanLeadTime?.toFixed(2) ?? '',
+      s.kpis.wipBundles.toFixed(0),
+      std?.wipBundles?.toFixed(0) ?? '',
+      s.kpis.bottleneckOpName,
+      s.kpis.bottleneckQueue,
+      s.createdAt,
+    ].map(csvCell).join(','));
+  }
+  const blob = new Blob([lines.join('\n')], { type: 'text/csv;charset=utf-8' });
+  const url = URL.createObjectURL(blob);
+  const a = document.createElement('a');
+  a.href = url;
+  a.download = `stitchworks-scenarios-${new Date().toISOString().slice(0, 10)}.csv`;
+  document.body.appendChild(a);
+  a.click();
+  a.remove();
+  URL.revokeObjectURL(url);
+}
+
+function csvCell(v: unknown): string {
+  const s = String(v ?? '');
+  return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
 }

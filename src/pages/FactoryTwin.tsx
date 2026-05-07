@@ -322,6 +322,56 @@ function TreeNode({ label, sub, indent = 0, expanded, children, onClick, active,
   );
 }
 
+// ── Animated flow banner ────────────────────────────────────────────────────
+
+/**
+ * SVG strip showing material moving across the factory: fabric receiving →
+ * cutting → sewing → finishing → dispatch. Decorative; the real per-line
+ * KPIs are below it. Five colour-coded dots travel along the same path,
+ * staggered, so there's always something moving.
+ */
+function FlowAnimation() {
+  const stages = [
+    { label: 'FABRIC',    color: SW_COLORS.fabric },
+    { label: 'CUTTING',   color: SW_COLORS.press },
+    { label: 'SEWING',    color: SW_COLORS.brand },
+    { label: 'FINISHING', color: SW_COLORS.thread },
+    { label: 'DISPATCH',  color: SW_COLORS.ship },
+  ];
+  const W = 1000;
+  const H = 64;
+  const padX = 40;
+  const innerW = W - padX * 2;
+  const stageX = (i: number) => padX + (innerW * i) / (stages.length - 1);
+  const y = H / 2;
+
+  return (
+    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: H, display: 'block' }}>
+      {/* path */}
+      <line x1={padX} y1={y} x2={W - padX} y2={y} stroke={SW_COLORS.line} strokeWidth={2}/>
+      {/* stage markers */}
+      {stages.map((s, i) => (
+        <g key={s.label} transform={`translate(${stageX(i)}, ${y})`}>
+          <circle r={9} fill="#fff" stroke={s.color} strokeWidth={2}/>
+          <circle r={4} fill={s.color}/>
+          <text x={0} y={26} textAnchor="middle" fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700}>{s.label}</text>
+        </g>
+      ))}
+      {/* travelling bundle dots */}
+      {[0, 1, 2, 3, 4].map((i) => (
+        <circle key={i} r={4} fill={stages[i % stages.length].color}>
+          <animateMotion
+            dur={`${6 + i * 0.6}s`}
+            begin={`${i * 1.0}s`}
+            repeatCount="indefinite"
+            path={`M ${padX} ${y} L ${W - padX} ${y}`}
+          />
+        </circle>
+      ))}
+    </svg>
+  );
+}
+
 // ── Factory view (zoom = factory) ───────────────────────────────────────────
 
 interface FactoryViewProps {
@@ -332,8 +382,20 @@ interface FactoryViewProps {
 }
 
 function FactoryView({ factory, garments, onPickLine, onRunLine }: FactoryViewProps) {
+  // Animated flow banner — visualises material moving across floors as a
+  // continuous pipeline: cutting → sewing → finishing → dispatch.
+  const flow = (
+    <div style={{ marginBottom: 18, padding: '12px 16px', background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.md, overflow: 'hidden' }}>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 6 }}>
+        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1px' }}>FACTORY FLOW</div>
+        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>fabric in → garments out</div>
+      </div>
+      <FlowAnimation/>
+    </div>
+  );
   return (
     <div style={{ padding: 24, display:'flex', flexDirection:'column', gap: 18 }}>
+      {flow}
       {factory.floors.map((floor) => {
         const lines = factory.lines.filter((l) => l.floorId === floor.id);
         return (

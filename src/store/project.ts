@@ -82,6 +82,17 @@ export interface ScenarioKpis {
   wipBundles: number;
   bottleneckOpName: string;
   bottleneckQueue: number;
+  /** Number of replications behind these means. 1 = single-seed run. */
+  replicationCount?: number;
+  /** Per-KPI standard deviation across replications, when available. */
+  std?: {
+    producedPieces: number;
+    throughputPerHr: number;
+    efficiencyPct: number;
+    meanLeadTime: number;
+    utilization: number;
+    wipBundles: number;
+  };
 }
 
 export interface Scenario {
