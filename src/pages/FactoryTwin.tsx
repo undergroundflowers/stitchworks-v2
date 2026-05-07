@@ -1,48 +1,155 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Button, Stat, SectionHeader, ToggleGroup } from '../components';
-import { useState } from 'react';
+import { Button, Stat, SectionHeader, ToggleGroup, Tag } from '../components';
+import { useState, useMemo, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import type { ReactNode } from 'react';
+import {
+  GARMENT_TEMPLATES,
+  ALL_GARMENT_TEMPLATES,
+  ALL_PRODUCTION_SYSTEMS,
+  PRODUCTION_SYSTEMS,
+  type ProductionSystem,
+} from '../domain';
+import { buildSimConfig, efficiencyFromSkillMatrix, Sim } from '../simulation';
+import { useProject, type Line, type Floor } from '../store';
 
-interface TwinTreeNodeProps {
-  label: string;
-  sub?: string;
-  indent?: number;
-  expanded?: boolean;
-  children?: ReactNode;
-  onClick?: () => void;
-  active?: boolean;
-}
+type Zoom = 'factory' | 'floor' | 'line';
 
+const SHIFT_MIN = 480;
+
+/**
+ * Factory Twin — three zoom levels backed by the project's multi-line
+ * factory structure (project.factory.floors + project.factory.lines).
+ *
+ *   Factory zoom: every floor + every line, with a rollup KPI strip (sum
+ *     of throughput, weighted mean efficiency, total operators).
+ *   Floor zoom: the lines on one floor, side-by-side cards.
+ *   Line zoom: one line's config + its last cached KPI snapshot. Edit
+ *     garment / operator count / production system in place; press
+ *     "Run line" to fast-forward a 480-min sim and cache fresh KPIs.
+ *
+ * Lines and floors are real CRUD: add, rename, delete from the tree.
+ */
 export function FactoryTwinPage() {
   const navigate = useNavigate();
-  const [zoom, setZoom] = useState<string>('factory');
-  const [selFloor, setSelFloor] = useState<number>(1);
-  const [selLine, setSelLine] = useState<string>('L1');
+  const project = useProject();
+  const factory = project.factory;
+
+  const [zoom, setZoom] = useState<Zoom>('factory');
+  const [selFloorId, setSelFloorId] = useState<string>(factory.floors[0]?.id ?? '');
+  const [selLineId, setSelLineId] = useState<string>(factory.lines[0]?.id ?? '');
+
+  const selFloor = factory.floors.find((f) => f.id === selFloorId);
+  const selLine = factory.lines.find((l) => l.id === selLineId);
+
+  // ── Rollup KPIs across the whole factory ──────────────────────────────
+  const rollup = useMemo(() => {
+    const lines = factory.lines;
+    const linesWithKpis = lines.filter((l) => !!l.lastKpis);
+    const totalOperators = lines.reduce((s, l) => s + l.operators, 0);
+    const totalProduced = linesWithKpis.reduce((s, l) => s + (l.lastKpis?.producedPieces ?? 0), 0);
+    const totalThroughput = linesWithKpis.reduce((s, l) => s + (l.lastKpis?.throughputPerHr ?? 0), 0);
+    const weightedEff = (() => {
+      if (linesWithKpis.length === 0) return 0;
+      const w = linesWithKpis.reduce((s, l) => s + l.operators, 0);
+      const num = linesWithKpis.reduce((s, l) => s + l.operators * (l.lastKpis?.efficiencyPct ?? 0), 0);
+      return w > 0 ? num / w : 0;
+    })();
+    return {
+      lines: lines.length,
+      floors: factory.floors.length,
+      operators: totalOperators,
+      throughput: totalThroughput,
+      produced: totalProduced,
+      efficiency: weightedEff,
+      ranLines: linesWithKpis.length,
+    };
+  }, [factory]);
+
+  // ── Run a line synchronously: build config, fast-forward 480 min ──────
+  function runLine(line: Line) {
+    const garment = GARMENT_TEMPLATES[line.garmentTemplateId];
+    if (!garment) return;
+    const opEfficiency = efficiencyFromSkillMatrix(project.skillMatrix, garment.operations);
+    const config = buildSimConfig({ garment, operators: line.operators, opEfficiency });
+    const sim = new Sim(config);
+    sim.runUntil(SHIFT_MIN);
+    const snapshot = sim.snapshot();
+    const bottleneck = snapshot.stations[snapshot.bottleneckOpIndex];
+    const samConsumedMin = snapshot.producedPieces * garment.totalSmv;
+    const efficiencyPct = (samConsumedMin / (line.operators * SHIFT_MIN)) * 100;
+    const throughputPerHr = (snapshot.producedPieces / Math.max(1e-6, snapshot.time)) * 60;
+    project.setLineKpis(line.id, {
+      producedPieces: snapshot.producedPieces,
+      throughputPerHr,
+      efficiencyPct,
+      meanLeadTime: snapshot.meanLeadTime,
+      utilization: snapshot.utilization,
+      wipBundles: snapshot.totalArrivals - snapshot.produced,
+      bottleneckOpName: bottleneck?.opName ?? '—',
+      bottleneckQueue: bottleneck?.queueLen ?? 0,
+    });
+  }
+
+  function runAllLines() {
+    factory.lines.forEach(runLine);
+  }
 
   return (
-    <div style={{ width:'100%', height:'100%', display:'grid', gridTemplateColumns: '300px 1fr 320px', background: SW_COLORS.paperDeep }}>
-      {/* LEFT — tree + filters */}
+    <div style={{ width:'100%', height:'100%', display:'grid', gridTemplateColumns: '300px 1fr 340px', background: SW_COLORS.paperDeep }}>
+      {/* LEFT — tree */}
       <div style={{ borderRight: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paper, overflow: 'auto', padding: 16 }}>
-        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1.5px', marginBottom: 8 }}>FACTORY TREE</div>
-        <TwinTreeNode label="STITCHWORKS DEMO" sub="3 floors · 8 lines" expanded onClick={()=>{setZoom('factory');}} active={zoom==='factory'}>
-          {[1,2,3].map(f => (
-            <TwinTreeNode key={f} indent={1} label={`Floor ${f} · ${['Sewing','Cutting','Finishing'][f-1]}`} sub={`${f===1?4:f===2?2:2} lines`} expanded={selFloor===f}
-              onClick={()=>{ setZoom('floor'); setSelFloor(f); }} active={zoom==='floor' && selFloor===f}>
-              {(f===1?['L1','L2','L3','L4']:f===2?['L5','L6']:['L7','L8']).map(l => (
-                <TwinTreeNode key={l} indent={2} label={`Line ${l}`} sub={`${Math.floor(8+Math.random()*10)} ops · ${['PBS','UPS','Modular','Make-Through','Straight','Synchro','Clump','Bundle'][Math.floor(Math.random()*8)]}`}
-                  onClick={()=>{ setZoom('line'); setSelFloor(f); setSelLine(l); }} active={zoom==='line' && selLine===l}/>
-              ))}
-            </TwinTreeNode>
-          ))}
-        </TwinTreeNode>
+        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 8 }}>
+          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1.5px' }}>FACTORY TREE</div>
+          <Button variant="ghost" size="sm" onClick={runAllLines} icon="▶">Run all</Button>
+        </div>
+
+        <TreeNode
+          label={project.meta.name || 'STITCHWORKS DEMO'}
+          sub={`${factory.floors.length} floors · ${factory.lines.length} lines`}
+          expanded
+          active={zoom === 'factory'}
+          onClick={() => setZoom('factory')}
+        >
+          {factory.floors.map((f) => {
+            const floorLines = factory.lines.filter((l) => l.floorId === f.id);
+            return (
+              <TreeNode key={f.id} indent={1}
+                label={f.name}
+                sub={`${floorLines.length} line${floorLines.length === 1 ? '' : 's'}`}
+                expanded={selFloorId === f.id}
+                onClick={() => { setZoom('floor'); setSelFloorId(f.id); }}
+                active={zoom === 'floor' && selFloorId === f.id}
+                actions={
+                  <button
+                    onClick={(e) => { e.stopPropagation(); promptAddLine(project, f.id, () => { /* refresh-via-store */ }); }}
+                    style={{ background:'transparent', border:'none', color: SW_COLORS.muted, cursor:'pointer', fontSize: 14, fontWeight: 800, padding: 0 }}
+                    title="Add line to this floor"
+                  >+</button>
+                }
+              >
+                {floorLines.map((l) => {
+                  const garment = GARMENT_TEMPLATES[l.garmentTemplateId];
+                  return (
+                    <TreeNode key={l.id} indent={2}
+                      label={l.name}
+                      sub={`${garment?.name.replace(/\s*\(.*\)/, '') ?? l.garmentTemplateId} · ${l.operators} ops · ${PRODUCTION_SYSTEMS[l.productionSystem as ProductionSystem]?.short ?? l.productionSystem}`}
+                      onClick={() => { setZoom('line'); setSelFloorId(f.id); setSelLineId(l.id); }}
+                      active={zoom === 'line' && selLineId === l.id}
+                      hasKpis={!!l.lastKpis}
+                    />
+                  );
+                })}
+              </TreeNode>
+            );
+          })}
+        </TreeNode>
 
         <div style={{ marginTop: 24, fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1.5px', marginBottom: 8 }}>OVERLAYS</div>
         {[
-          { id:'heat', label:'Bottleneck heat', color: SW_COLORS.alarm, on: true },
-          { id:'wip',  label:'WIP density',     color: SW_COLORS.thread, on: true },
-          { id:'op',   label:'Operator utilization', color: SW_COLORS.bobbin, on: false },
-          { id:'qual', label:'Defect zones',    color: SW_COLORS.press, on: false },
+          { id:'heat', label:'Bottleneck heat',       color: SW_COLORS.alarm,  on: true  },
+          { id:'wip',  label:'WIP density',           color: SW_COLORS.thread, on: true  },
+          { id:'op',   label:'Operator utilization',  color: SW_COLORS.bobbin, on: false },
+          { id:'qual', label:'Defect zones',          color: SW_COLORS.press,  on: false },
         ].map(ov => (
           <label key={ov.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 0', cursor:'pointer', fontSize:12, fontWeight:600, color: SW_COLORS.ink }}>
             <input type="checkbox" defaultChecked={ov.on} style={{ accentColor: ov.color }}/>
@@ -65,209 +172,380 @@ export function FactoryTwinPage() {
             { value:'line',    label:'═ Line' },
           ]}/>
           <div style={{ fontSize:12, color: SW_COLORS.muted }}>
-            {zoom==='factory' && 'All floors at a glance'}
-            {zoom==='floor' && `Floor ${selFloor} — ${['Sewing','Cutting','Finishing'][selFloor-1]}`}
-            {zoom==='line' && `Line ${selLine} — close-up of stations`}
+            {zoom === 'factory' && `Whole factory · ${rollup.lines} lines · ${rollup.operators} operators`}
+            {zoom === 'floor' && (selFloor ? `${selFloor.name} — ${selFloor.description}` : '—')}
+            {zoom === 'line' && (selLine ? `${selLine.name} — close-up` : '—')}
           </div>
           <div style={{ flex:1 }}/>
           <Button variant="secondary" size="sm" icon="↻">Reset view</Button>
-          <Button variant="dark" size="sm" icon="▶" onClick={()=>navigate('/floor')}>Open in sim</Button>
+          <Button variant="dark" size="sm" icon="▶" onClick={()=>navigate('/sim')}>Open in sim</Button>
         </div>
 
-        <div style={{ flex:1, position:'relative', background: `
+        <div style={{ flex:1, overflow:'auto', background: `
           linear-gradient(${SW_COLORS.paperEdge}30 1px, transparent 1px),
           linear-gradient(90deg, ${SW_COLORS.paperEdge}30 1px, transparent 1px),
           ${SW_COLORS.paperDeep}
         `, backgroundSize:'24px 24px' }}>
-          {zoom==='factory' && <TwinFactoryView/>}
-          {zoom==='floor'   && <TwinFloorView floor={selFloor}/>}
-          {zoom==='line'    && <TwinLineView line={selLine}/>}
+          {zoom === 'factory' && (
+            <FactoryView factory={factory} onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); setSelFloorId(l.floorId); }} onRunLine={runLine}/>
+          )}
+          {zoom === 'floor' && selFloor && (
+            <FloorView floor={selFloor} lines={factory.lines.filter((l) => l.floorId === selFloor.id)}
+              onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); }}
+              onRunLine={runLine}
+            />
+          )}
+          {zoom === 'line' && selLine && (
+            <LineView line={selLine}
+              onUpdate={(patch) => project.updateLine(selLine.id, patch)}
+              onRun={() => runLine(selLine)}
+              onDelete={() => {
+                if (confirm(`Delete ${selLine.name}? This cannot be undone.`)) {
+                  project.removeLine(selLine.id);
+                  setZoom('floor');
+                }
+              }}
+            />
+          )}
+          {(zoom === 'floor' && !selFloor) || (zoom === 'line' && !selLine) ? (
+            <div style={{ padding: 32, color: SW_COLORS.muted, fontSize: 13 }}>
+              Pick a {zoom} from the tree on the left.
+            </div>
+          ) : null}
         </div>
       </div>
 
       {/* RIGHT — context inspector */}
       <div style={{ borderLeft: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paper, overflow:'auto', padding:16 }}>
-        <SectionHeader kicker="Inspector" title={zoom==='factory'?'STITCHWORKS DEMO':zoom==='floor'?`Floor ${selFloor}`:`Line ${selLine}`}/>
-        <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 8, marginBottom: 14 }}>
-          <Stat label="EFFICIENCY" value="78" unit="%" color={SW_COLORS.ok}/>
-          <Stat label="OUTPUT/HR" value="184" unit="pcs" color={SW_COLORS.brand}/>
-          <Stat label="WIP" value="412" unit="bundles" color={SW_COLORS.thread}/>
-          <Stat label="DEFECT" value="1.2" unit="%" color={SW_COLORS.alarm}/>
-        </div>
+        <SectionHeader
+          kicker="Inspector"
+          title={
+            zoom === 'factory' ? (project.meta.name || 'STITCHWORKS DEMO')
+            : zoom === 'floor' ? (selFloor?.name ?? 'Floor')
+            : (selLine?.name ?? 'Line')
+          }
+        />
 
-        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1.2px', marginBottom: 6 }}>LIVE FEED</div>
-        <div style={{ fontSize:11, fontFamily: SW_FONTS.mono, lineHeight:1.7 }}>
-          {[
-            { t:'14:02:18', tag:'BOTTLENECK', col: SW_COLORS.alarm, msg:'OP-08 collar attach (Q=42 bundles)' },
-            { t:'14:01:55', tag:'OUTPUT',     col: SW_COLORS.ok,    msg:'+3 pcs from L1 (PBS)' },
-            { t:'14:01:40', tag:'IDLE',       col: SW_COLORS.warn,  msg:'OPR-12 idle 90s on OP-04' },
-            { t:'14:01:18', tag:'OUTPUT',     col: SW_COLORS.ok,    msg:'+2 pcs from L3 (Modular)' },
-            { t:'14:01:02', tag:'DEFECT',     col: SW_COLORS.press, msg:'L1 OP-06 reject — broken stitch' },
-            { t:'14:00:30', tag:'M-DOWN',     col: SW_COLORS.alarm, msg:'SM-11 bobbin jam (-3min)' },
-          ].map((e,i) => (
-            <div key={i} style={{ display:'flex', gap:8, padding:'4px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
-              <span style={{ color: SW_COLORS.muted }}>{e.t}</span>
-              <span style={{ color: e.col, fontWeight: 700, width: 78 }}>{e.tag}</span>
-              <span style={{ flex:1, color: SW_COLORS.ink }}>{e.msg}</span>
+        {zoom === 'factory' && (
+          <>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 8, marginBottom: 14 }}>
+              <Stat label="LINES"      value={rollup.lines}                                 color={SW_COLORS.brand}/>
+              <Stat label="OPERATORS"  value={rollup.operators}                              color={SW_COLORS.bobbin}/>
+              <Stat label="PRODUCED"   value={rollup.produced.toLocaleString()} unit="pcs"  color={SW_COLORS.ok}/>
+              <Stat label="THRU/HR"    value={Math.round(rollup.throughput)}    unit="pcs"   color={SW_COLORS.thread}/>
+              <Stat label="EFF"        value={rollup.efficiency.toFixed(1)}      unit="%"     color={rollup.efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+              <Stat label="RAN"        value={`${rollup.ranLines}/${rollup.lines}`}                                color={SW_COLORS.muted}/>
             </div>
-          ))}
-        </div>
+            <div style={{ fontSize: 12, color: SW_COLORS.muted, lineHeight: 1.5, padding: 10, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm }}>
+              {rollup.ranLines === 0
+                ? 'No lines have run yet. Click "Run all" in the tree to populate KPIs across the factory.'
+                : `${rollup.ranLines} of ${rollup.lines} lines have cached KPIs. Throughput is summed; efficiency is operator-weighted.`}
+            </div>
+          </>
+        )}
 
-        <div style={{ marginTop: 18, display:'flex', gap:6 }}>
-          <Button variant="primary" full size="sm" onClick={()=>navigate('/floor')}>▶ Run sim</Button>
-          <Button variant="secondary" full size="sm" onClick={()=>navigate('/layout')}>▦ Edit layout</Button>
-        </div>
+        {zoom === 'floor' && selFloor && (
+          <>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 8, marginBottom: 14 }}>
+              <Stat label="LINES"      value={factory.lines.filter((l) => l.floorId === selFloor.id).length} color={SW_COLORS.brand}/>
+              <Stat label="OPERATORS"  value={factory.lines.filter((l) => l.floorId === selFloor.id).reduce((s, l) => s + l.operators, 0)} color={SW_COLORS.bobbin}/>
+            </div>
+            <input
+              defaultValue={selFloor.name}
+              onBlur={(e) => project.renameFloor(selFloor.id, e.target.value)}
+              style={{ width:'100%', padding:'8px 10px', fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, marginBottom: 8 }}
+            />
+            <Button variant="ghost" size="sm" onClick={() => {
+              if (confirm(`Delete ${selFloor.name} and all its lines?`)) {
+                project.removeFloor(selFloor.id);
+                setZoom('factory');
+              }
+            }}>Delete floor</Button>
+          </>
+        )}
+
+        {zoom === 'line' && selLine && (
+          <LineInspector
+            line={selLine}
+            onUpdate={(patch) => project.updateLine(selLine.id, patch)}
+            onRun={() => runLine(selLine)}
+            onOpenSim={() => {
+              project.setSelectedGarment(selLine.garmentTemplateId);
+              project.setDefaultOperators(selLine.operators);
+              navigate('/sim');
+            }}
+          />
+        )}
       </div>
     </div>
   );
 }
 
-function TwinTreeNode({ label, sub, indent=0, expanded, children, onClick, active }: TwinTreeNodeProps) {
+// ── Tree node ────────────────────────────────────────────────────────────────
+
+interface TreeNodeProps {
+  label: string;
+  sub?: string;
+  indent?: number;
+  expanded?: boolean;
+  children?: ReactNode;
+  onClick?: () => void;
+  active?: boolean;
+  /** Show a small green dot if cached KPIs exist on this leaf. */
+  hasKpis?: boolean;
+  actions?: ReactNode;
+}
+
+function TreeNode({ label, sub, indent = 0, expanded, children, onClick, active, hasKpis, actions }: TreeNodeProps) {
   return (
     <div>
       <div onClick={onClick} style={{
         display:'flex', alignItems:'center', gap:8,
         padding:'6px 8px', borderRadius: SW_RADIUS.sm,
-        marginLeft: indent*14,
+        marginLeft: indent * 14,
         background: active ? SW_COLORS.brandLite : 'transparent',
-        cursor:'pointer',
+        cursor: 'pointer',
         borderLeft: active ? `3px solid ${SW_COLORS.brand}` : '3px solid transparent',
       }}>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize:9, color: SW_COLORS.muted }}>{children?'▾':'·'}</span>
-        <div style={{ flex:1 }}>
-          <div style={{ fontSize:12, fontWeight:700, color: SW_COLORS.ink }}>{label}</div>
-          {sub && <div style={{ fontSize:10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>{sub}</div>}
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>{children ? '▾' : '·'}</span>
+        <div style={{ flex: 1, minWidth: 0 }}>
+          <div style={{ fontFamily: SW_FONTS.body, fontWeight: 700, fontSize: 12, color: SW_COLORS.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
+          {sub && <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600 }}>{sub}</div>}
         </div>
+        {hasKpis && <span style={{ width: 6, height: 6, borderRadius: '50%', background: SW_COLORS.ok }} title="Cached KPIs"/>}
+        {actions}
       </div>
       {expanded && children}
     </div>
   );
 }
 
-// Factory level — 3 floors as iso blocks
-function TwinFactoryView() {
+// ── Factory view (zoom = factory) ───────────────────────────────────────────
+
+interface FactoryViewProps {
+  factory: { floors: Floor[]; lines: Line[] };
+  onPickLine: (l: Line) => void;
+  onRunLine: (l: Line) => void;
+}
+
+function FactoryView({ factory, onPickLine, onRunLine }: FactoryViewProps) {
   return (
-    <svg viewBox="0 0 800 500" style={{ width:'100%', height:'100%', display:'block' }}>
-      {[
-        { id:1, x: 120, y: 180, label:'FLOOR 1 · SEWING',     eff: 78, color: SW_COLORS.brand },
-        { id:2, x: 380, y: 220, label:'FLOOR 2 · CUTTING',    eff: 88, color: SW_COLORS.fabric },
-        { id:3, x: 540, y: 80,  label:'FLOOR 3 · FINISHING',  eff: 64, color: SW_COLORS.bobbin },
-      ].map(f => (
-        <g key={f.id} transform={`translate(${f.x},${f.y})`}>
-          {/* iso block */}
-          <polygon points="0,40 90,0 180,40 90,80" fill={f.color} stroke="#000" strokeOpacity="0.18"/>
-          <polygon points="0,40 90,80 90,140 0,100" fill={f.color} fillOpacity="0.7" stroke="#000" strokeOpacity="0.18"/>
-          <polygon points="180,40 90,80 90,140 180,100" fill={f.color} fillOpacity="0.55" stroke="#000" strokeOpacity="0.18"/>
-          {/* heat dots */}
-          {[...Array(8)].map((_,i)=>{
-            const cx = 14 + (i%4)*22;
-            const cy = 38 + Math.floor(i/4)*14;
-            const hot = Math.random()>0.6;
-            return <circle key={i} cx={cx + (i%4)*8} cy={cy} r="3" fill={hot?'#fff':'#ffffff70'}/>;
-          })}
-          <text x="90" y="20" textAnchor="middle" fill={SW_COLORS.ink} fontFamily={SW_FONTS.display} fontSize="11" fontWeight="900">{f.label}</text>
-          <text x="90" y="160" textAnchor="middle" fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize="10" fontWeight="700">EFF {f.eff}%</text>
-        </g>
-      ))}
-      {/* connecting paths */}
-      <path d="M 230 240 Q 320 280 470 280" fill="none" stroke={SW_COLORS.line} strokeWidth="2" strokeDasharray="4 4"/>
-      <path d="M 470 240 Q 540 200 600 160" fill="none" stroke={SW_COLORS.line} strokeWidth="2" strokeDasharray="4 4"/>
-      {/* moving piece */}
-      <circle r="5" fill={SW_COLORS.thread}>
-        <animateMotion dur="6s" repeatCount="indefinite" path="M 230 240 Q 320 280 470 280 Q 540 200 600 160"/>
-      </circle>
-    </svg>
+    <div style={{ padding: 24, display:'flex', flexDirection:'column', gap: 18 }}>
+      {factory.floors.map((floor) => {
+        const lines = factory.lines.filter((l) => l.floorId === floor.id);
+        return (
+          <div key={floor.id}>
+            <div style={{ display:'flex', alignItems:'baseline', gap: 12, marginBottom: 8 }}>
+              <span style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: SW_COLORS.ink }}>{floor.name}</span>
+              <span style={{ fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>{floor.description}</span>
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
+              {lines.map((l) => <LineCard key={l.id} line={l} onPick={() => onPickLine(l)} onRun={() => onRunLine(l)}/>)}
+              {lines.length === 0 && (
+                <div style={{ padding: 14, fontSize: 12, color: SW_COLORS.muted, fontStyle: 'italic', border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm }}>
+                  No lines on this floor. Click + on the tree to add one.
+                </div>
+              )}
+            </div>
+          </div>
+        );
+      })}
+    </div>
   );
 }
 
-interface TwinFloorViewProps { floor: number; }
+// ── Floor view ──────────────────────────────────────────────────────────────
 
-// Floor level — top-down lines
-function TwinFloorView({ floor }: TwinFloorViewProps) {
-  const lineCount = floor===1?4:floor===2?2:2;
+interface FloorViewProps {
+  floor: Floor;
+  lines: Line[];
+  onPickLine: (l: Line) => void;
+  onRunLine: (l: Line) => void;
+}
+
+function FloorView({ floor, lines, onPickLine, onRunLine }: FloorViewProps) {
   return (
-    <svg viewBox="0 0 800 500" style={{ width:'100%', height:'100%', display:'block' }}>
-      <rect x="40" y="40" width="720" height="420" fill={SW_COLORS.paper} stroke={SW_COLORS.line} strokeWidth="1"/>
-      <text x="50" y="34" fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize="10" fontWeight="700">FLOOR {floor} · TOP-DOWN · 60ft × 35ft</text>
-
-      {[...Array(lineCount)].map((_,i)=>{
-        const y = 80 + i * (380/lineCount);
-        const stations = 8 + Math.floor(Math.random()*4);
-        return (
-          <g key={i}>
-            <text x="60" y={y+5} fill={SW_COLORS.ink} fontFamily={SW_FONTS.display} fontSize="11" fontWeight="900">L{i+1+(floor===2?4:floor===3?6:0)}</text>
-            <line x1="100" y1={y} x2="740" y2={y} stroke={SW_COLORS.line} strokeWidth="1" strokeDasharray="3 3"/>
-            {[...Array(stations)].map((_,s)=>{
-              const x = 110 + s*(620/stations);
-              const wip = Math.floor(Math.random()*40);
-              const hot = wip>30;
-              return (
-                <g key={s} transform={`translate(${x},${y})`}>
-                  <rect x="-12" y="-14" width="24" height="28" rx="3" fill={hot?SW_COLORS.alarm:SW_COLORS.brand} fillOpacity={hot?0.95:0.85}/>
-                  <text x="0" y="3" textAnchor="middle" fill="#fff" fontFamily={SW_FONTS.mono} fontSize="9" fontWeight="700">{s+1}</text>
-                  {hot && <circle cx="14" cy="-12" r="4" fill={SW_COLORS.alarm}><animate attributeName="opacity" values="1;0.3;1" dur="1.2s" repeatCount="indefinite"/></circle>}
-                  {/* wip stack */}
-                  {[...Array(Math.min(5, Math.ceil(wip/8)))].map((_,k)=>(
-                    <rect key={k} x="-10" y={20+k*3} width="20" height="2" fill={SW_COLORS.thread}/>
-                  ))}
-                </g>
-              );
-            })}
-            {/* moving piece */}
-            <circle r="4" fill={SW_COLORS.bobbin}>
-              <animateMotion dur={`${4+i*0.5}s`} repeatCount="indefinite" path={`M 110 ${y} L 730 ${y}`}/>
-            </circle>
-          </g>
-        );
-      })}
-    </svg>
+    <div style={{ padding: 24 }}>
+      <div style={{ display:'flex', alignItems:'baseline', gap: 12, marginBottom: 14 }}>
+        <span style={{ fontFamily: SW_FONTS.display, fontSize: 22, fontWeight: 900, color: SW_COLORS.ink }}>{floor.name}</span>
+        <span style={{ fontSize: 12, color: SW_COLORS.muted }}>{floor.description}</span>
+      </div>
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
+        {lines.map((l) => <LineCard key={l.id} line={l} expand onPick={() => onPickLine(l)} onRun={() => onRunLine(l)}/>)}
+      </div>
+    </div>
   );
 }
 
-interface TwinLineViewProps { line: string; }
+// ── Line card ───────────────────────────────────────────────────────────────
 
-// Line level — operator workstations
-function TwinLineView({ line }: TwinLineViewProps) {
-  const stations = ['Spread','Cut','Stitch shoulders','Attach collar','Attach sleeves','Side seam','Hem','Buttonhole','Inspect','Pack'];
+interface LineCardProps {
+  line: Line;
+  expand?: boolean;
+  onPick: () => void;
+  onRun: () => void;
+}
+
+function LineCard({ line, expand, onPick, onRun }: LineCardProps) {
+  const garment = GARMENT_TEMPLATES[line.garmentTemplateId];
+  const k = line.lastKpis;
   return (
-    <svg viewBox="0 0 1000 500" style={{ width:'100%', height:'100%', display:'block' }}>
-      <text x="40" y="32" fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize="10" fontWeight="700">LINE {line} · STATION-LEVEL · LIVE</text>
-      {/* conveyor */}
-      <rect x="40" y="240" width="920" height="20" fill={SW_COLORS.paperEdge} stroke={SW_COLORS.line}/>
-      {[...Array(40)].map((_,i)=>(
-        <line key={i} x1={40+i*23} y1="240" x2={40+i*23} y2="260" stroke={SW_COLORS.line}/>
-      ))}
-      {stations.map((s,i)=>{
-        const x = 80 + i * 92;
-        const hot = i===3;
-        const idle = i===6;
-        return (
-          <g key={i} transform={`translate(${x}, 0)`}>
-            {/* station box */}
-            <rect x="-32" y="120" width="64" height="80" rx="6" fill={hot?`${SW_COLORS.alarm}20`:idle?`${SW_COLORS.warn}20`:SW_COLORS.paper} stroke={hot?SW_COLORS.alarm:idle?SW_COLORS.warn:SW_COLORS.line} strokeWidth="1.5"/>
-            <text x="0" y="138" textAnchor="middle" fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize="8" fontWeight="700">OP-{(i+1).toString().padStart(2,'0')}</text>
-            <text x="0" y="155" textAnchor="middle" fill={SW_COLORS.ink} fontFamily={SW_FONTS.body} fontSize="10" fontWeight="700">{s}</text>
-            {/* operator avatar */}
-            <circle cx="0" cy="180" r="10" fill={hot?SW_COLORS.alarm:idle?SW_COLORS.warn:SW_COLORS.bobbin}/>
-            <text x="0" y="184" textAnchor="middle" fill="#fff" fontFamily={SW_FONTS.display} fontSize="9" fontWeight="900">{i+1}</text>
-            {/* WIP queue */}
-            <g transform="translate(-30, 280)">
-              {[...Array(Math.floor(2+Math.random()*(hot?12:4)))].map((_,k)=>(
-                <rect key={k} x={k*5} y={-k*0.5} width="6" height="8" fill={SW_COLORS.thread} opacity={1-k*0.05}/>
-              ))}
-            </g>
-            {/* status dot */}
-            {hot && <circle cx="22" cy="128" r="5" fill={SW_COLORS.alarm}><animate attributeName="r" values="5;7;5" dur="0.8s" repeatCount="indefinite"/></circle>}
-            {idle && <circle cx="22" cy="128" r="5" fill={SW_COLORS.warn}/>}
-          </g>
-        );
-      })}
-      {/* moving bundles on conveyor */}
-      {[0,1,2].map(i => (
-        <circle key={i} r="5" fill={SW_COLORS.fabric}>
-          <animateMotion dur={`${10+i*2}s`} begin={`${i*2}s`} repeatCount="indefinite" path="M 60 250 L 940 250"/>
-        </circle>
-      ))}
-    </svg>
+    <div
+      onClick={onPick}
+      style={{
+        background: SW_COLORS.paper,
+        border: `1px solid ${SW_COLORS.line}`,
+        borderRadius: SW_RADIUS.md,
+        padding: expand ? 16 : 12,
+        cursor: 'pointer',
+        position: 'relative',
+        overflow: 'hidden',
+      }}
+    >
+      <div style={{ position:'absolute', top: 0, left: 0, right: 0, height: 3, background: k ? `linear-gradient(90deg, ${SW_COLORS.brand}, ${SW_COLORS.thread})` : SW_COLORS.line }}/>
+      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginTop: 4 }}>
+        <div style={{ fontFamily: SW_FONTS.display, fontSize: expand ? 16 : 14, fontWeight: 900, color: SW_COLORS.ink }}>{line.name}</div>
+        <Tag soft color={SW_COLORS.bobbin}>{line.productionSystem}</Tag>
+      </div>
+      <div style={{ fontSize: 11, color: SW_COLORS.muted, marginTop: 2 }}>
+        {garment?.name.replace(/\s*\(.*\)/, '') ?? line.garmentTemplateId} · {line.operators} ops
+      </div>
+
+      {k ? (
+        <div style={{ marginTop: 10, display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap: 6 }}>
+          <Stat label="OUT"  value={k.producedPieces.toLocaleString()}                          color={SW_COLORS.brand}/>
+          <Stat label="THRU" value={Math.round(k.throughputPerHr)}                              color={SW_COLORS.ok}/>
+          <Stat label="EFF"  value={`${k.efficiencyPct.toFixed(0)}`} unit="%" color={k.efficiencyPct >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+        </div>
+      ) : (
+        <div style={{ marginTop: 10, fontSize: 11, color: SW_COLORS.muted, fontStyle:'italic' }}>
+          Not run yet — click Run line.
+        </div>
+      )}
+
+      <div style={{ marginTop: 12, display:'flex', gap: 6 }}>
+        <Button variant="primary" size="sm" onClick={(e?: React.MouseEvent) => { e?.stopPropagation(); onRun(); }}>▶ Run line</Button>
+        {k && (
+          <span style={{ fontSize: 10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, alignSelf:'center' }}>
+            Bottleneck: {k.bottleneckOpName} (Q={k.bottleneckQueue})
+          </span>
+        )}
+      </div>
+    </div>
   );
+}
+
+// ── Line view (zoom = line) — large canvas card ─────────────────────────────
+
+interface LineViewProps {
+  line: Line;
+  onUpdate: (patch: Partial<Line>) => void;
+  onRun: () => void;
+  onDelete: () => void;
+}
+
+function LineView({ line, onUpdate, onRun, onDelete }: LineViewProps) {
+  const garment = GARMENT_TEMPLATES[line.garmentTemplateId];
+  const k = line.lastKpis;
+  return (
+    <div style={{ padding: 24, display:'flex', flexDirection:'column', gap: 18 }}>
+      <div style={{ display:'flex', alignItems:'center', gap: 12, flexWrap: 'wrap' }}>
+        <input
+          defaultValue={line.name}
+          onBlur={(e) => onUpdate({ name: e.target.value })}
+          style={{ fontFamily: SW_FONTS.display, fontSize: 22, fontWeight: 900, color: SW_COLORS.ink, background:'transparent', border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, padding: '4px 8px' }}
+        />
+        <Tag soft color={SW_COLORS.bobbin}>{line.productionSystem}</Tag>
+        <div style={{ fontSize: 12, color: SW_COLORS.muted }}>
+          {garment?.name ?? line.garmentTemplateId} · SAM {garment?.totalSmv.toFixed(2) ?? '—'} min · {line.operators} operators
+        </div>
+        <div style={{ flex: 1 }}/>
+        <Button variant="primary" size="sm" onClick={onRun}>▶ Run line (480 min)</Button>
+        <Button variant="ghost" size="sm" onClick={onDelete}>Delete line</Button>
+      </div>
+
+      <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10 }}>
+        {k ? (
+          <>
+            <Stat big label="OUTPUT"     value={k.producedPieces.toLocaleString()} unit="pcs"   color={SW_COLORS.brand}/>
+            <Stat big label="THROUGHPUT" value={Math.round(k.throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok}/>
+            <Stat big label="EFFICIENCY" value={k.efficiencyPct.toFixed(1)}    unit="%"     color={k.efficiencyPct >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+            <Stat big label="MEAN LEAD"  value={k.meanLeadTime.toFixed(1)}     unit="min"   color={SW_COLORS.bobbin}/>
+            <Stat big label="WIP"        value={k.wipBundles.toLocaleString()} unit="bundles" color={SW_COLORS.warn}/>
+            <Stat big label="UTIL"       value={(k.utilization * 100).toFixed(0)} unit="%"  color={SW_COLORS.thread}/>
+          </>
+        ) : (
+          <div style={{ gridColumn:'1 / -1', padding: 18, fontSize: 13, color: SW_COLORS.muted, background: SW_COLORS.paper, border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.md }}>
+            No KPIs yet for this line. Press <strong>Run line</strong> to fast-forward a 480-minute shift through the engine.
+          </div>
+        )}
+      </div>
+    </div>
+  );
+}
+
+// ── Right-pane line inspector — edit garment / operators / system ───────────
+
+interface LineInspectorProps {
+  line: Line;
+  onUpdate: (patch: Partial<Line>) => void;
+  onRun: () => void;
+  onOpenSim: () => void;
+}
+
+function LineInspector({ line, onUpdate, onRun, onOpenSim }: LineInspectorProps) {
+  return (
+    <div style={{ display:'flex', flexDirection:'column', gap: 12 }}>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Garment</div>
+        <select value={line.garmentTemplateId} onChange={(e) => onUpdate({ garmentTemplateId: e.target.value })}
+          style={{ width:'100%', padding:'8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 600, background: SW_COLORS.paper }}
+        >
+          {ALL_GARMENT_TEMPLATES.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+        </select>
+      </div>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Operators</div>
+        <input type="number" min={4} max={120} value={line.operators}
+          onChange={(e) => onUpdate({ operators: Math.max(4, Math.min(120, parseInt(e.target.value) || 4)) })}
+          style={{ width:'100%', padding:'8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 14 }}
+        />
+      </div>
+      <div>
+        <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Production system</div>
+        <select value={line.productionSystem} onChange={(e) => onUpdate({ productionSystem: e.target.value })}
+          style={{ width:'100%', padding:'8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 600, background: SW_COLORS.paper }}
+        >
+          {ALL_PRODUCTION_SYSTEMS.map((s) => <option key={s.id} value={s.id}>{s.label}</option>)}
+        </select>
+      </div>
+
+      <div style={{ display:'flex', gap: 6, marginTop: 4 }}>
+        <Button variant="primary" full size="sm" onClick={onRun}>▶ Run line</Button>
+        <Button variant="secondary" full size="sm" onClick={onOpenSim}>Open in sim</Button>
+      </div>
+
+      {line.lastKpis && (
+        <div style={{ marginTop: 6, padding: 10, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.5 }}>
+          Last run {line.lastRunAt ? new Date(line.lastRunAt).toLocaleString() : '—'}<br/>
+          Bottleneck: <strong style={{ color: SW_COLORS.alarm }}>{line.lastKpis.bottleneckOpName}</strong> (Q={line.lastKpis.bottleneckQueue})<br/>
+          Util {(line.lastKpis.utilization * 100).toFixed(0)}% · Mean lead {line.lastKpis.meanLeadTime.toFixed(1)} min
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Misc helpers ────────────────────────────────────────────────────────────
+
+function promptAddLine(project: ReturnType<typeof useProject.getState>, floorId: string, _refresh: () => void) {
+  const name = prompt('Line name?', `Line ${project.factory.lines.length + 1}`);
+  if (!name) return;
+  project.addLine({
+    name,
+    floorId,
+    garmentTemplateId: project.selectedGarmentId,
+    operators: project.defaultOperators,
+    productionSystem: 'PBS',
+  });
 }

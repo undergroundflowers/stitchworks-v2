@@ -9,4 +9,7 @@ export {
   type YamazumiAssignment,
   type Scenario,
   type ScenarioKpis,
+  type Floor,
+  type Line,
+  type FactoryStructure,
 } from './project';

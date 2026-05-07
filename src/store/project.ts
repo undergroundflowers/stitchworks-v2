@@ -32,6 +32,43 @@ export interface YamazumiAssignment {
 }
 
 /**
+ * A floor inside the factory. Floors group lines (e.g. one floor for
+ * Sewing, one for Cutting, one for Finishing). Used by the Factory Twin
+ * to render the tree + zoom levels.
+ */
+export interface Floor {
+  id: string;
+  name: string;
+  description: string;
+  /** Token colour key used by the tree + heat overlay. */
+  color: string;
+}
+
+/**
+ * One production line inside one floor. Each line has its own garment,
+ * crew size and production system, so a factory can run multiple
+ * heterogeneous lines in parallel. KPIs are cached from the most-recent
+ * sim run on this line (computed by the Factory Twin's "Run line" action).
+ */
+export interface Line {
+  id: string;
+  name: string;
+  floorId: string;
+  garmentTemplateId: string;
+  operators: number;
+  /** PBS / modular / UPS / etc. Drives operator distribution + WIP. */
+  productionSystem: string;
+  lastKpis?: ScenarioKpis;
+  /** Wall-clock when lastKpis was captured. */
+  lastRunAt?: string;
+}
+
+export interface FactoryStructure {
+  floors: Floor[];
+  lines: Line[];
+}
+
+/**
  * A saved factory configuration + the KPI snapshot from the run that
  * captured it. Compared side-by-side on the Scenarios page.
  */
@@ -84,6 +121,9 @@ export interface ProjectState {
 
   scenarios: Scenario[];
 
+  /** Multi-line factory structure consumed by the Factory Twin. */
+  factory: FactoryStructure;
+
   // ── Mutators ─────────────────────────────────────────────────────────────
   rename: (name: string) => void;
   setSelectedGarment: (id: string) => void;
@@ -107,6 +147,22 @@ export interface ProjectState {
    */
   loadScenario: (id: string) => void;
 
+  // ── Factory CRUD ─────────────────────────────────────────────────────────
+  /** Add a floor to the factory. Returns the created floor's id. */
+  addFloor: (input: Omit<Floor, 'id'>) => string;
+  /** Remove a floor + every line on it. */
+  removeFloor: (id: string) => void;
+  /** Rename a floor. */
+  renameFloor: (id: string, name: string) => void;
+  /** Add a new line to a floor. Returns the created line's id. */
+  addLine: (input: Omit<Line, 'id' | 'lastKpis' | 'lastRunAt'>) => string;
+  /** Remove a line. */
+  removeLine: (id: string) => void;
+  /** Update fields on a line (partial). */
+  updateLine: (id: string, patch: Partial<Omit<Line, 'id' | 'floorId'>>) => void;
+  /** Cache a fresh KPI snapshot on a line (called by Twin's Run-line). */
+  setLineKpis: (id: string, kpis: ScenarioKpis) => void;
+
   // ── Project actions ──────────────────────────────────────────────────────
   /** Wipe everything back to defaults. Caller should confirm first. */
   resetProject: () => void;
@@ -123,6 +179,31 @@ function defaultMeta(): ProjectMeta {
     factory: 'Brandix Unit-3',
     createdAt: now,
     modifiedAt: now,
+  };
+}
+
+/**
+ * Default factory: 3 floors (Sewing / Cutting / Finishing) with a sensible
+ * spread of lines. Matches the layout the Factory Twin originally rendered
+ * with mock data, but every value here flows into the real model.
+ */
+function defaultFactory(): FactoryStructure {
+  return {
+    floors: [
+      { id: 'F1', name: 'Floor 1 · Sewing',    description: 'Knit garment sewing — 4 lines',  color: 'brand'  },
+      { id: 'F2', name: 'Floor 2 · Cutting',   description: 'Spreading + cutting — 2 lines',  color: 'fabric' },
+      { id: 'F3', name: 'Floor 3 · Finishing', description: 'Press + pack — 2 lines',         color: 'thread' },
+    ],
+    lines: [
+      { id: 'L1', name: 'Line 1', floorId: 'F1', garmentTemplateId: 'tshirt',     operators: 25, productionSystem: 'PBS' },
+      { id: 'L2', name: 'Line 2', floorId: 'F1', garmentTemplateId: 'polo',       operators: 28, productionSystem: 'PBS' },
+      { id: 'L3', name: 'Line 3', floorId: 'F1', garmentTemplateId: 'shirt',      operators: 22, productionSystem: 'modular' },
+      { id: 'L4', name: 'Line 4', floorId: 'F1', garmentTemplateId: 'sweatshirt', operators: 24, productionSystem: 'PBS' },
+      { id: 'L5', name: 'Cut A',  floorId: 'F2', garmentTemplateId: 'tshirt',     operators: 6,  productionSystem: 'straight' },
+      { id: 'L6', name: 'Cut B',  floorId: 'F2', garmentTemplateId: 'shirt',      operators: 8,  productionSystem: 'straight' },
+      { id: 'L7', name: 'Finish A', floorId: 'F3', garmentTemplateId: 'tshirt',   operators: 10, productionSystem: 'straight' },
+      { id: 'L8', name: 'Finish B', floorId: 'F3', garmentTemplateId: 'shirt',    operators: 8,  productionSystem: 'straight' },
+    ],
   };
 }
 
@@ -143,6 +224,13 @@ const defaults: Omit<
   | 'deleteScenario'
   | 'renameScenario'
   | 'loadScenario'
+  | 'addFloor'
+  | 'removeFloor'
+  | 'renameFloor'
+  | 'addLine'
+  | 'removeLine'
+  | 'updateLine'
+  | 'setLineKpis'
 > = {
   schemaVersion: PROJECT_SCHEMA_VERSION,
   meta: defaultMeta(),
@@ -152,6 +240,7 @@ const defaults: Omit<
   yamazumiOverrides: {},
   skillMatrix: {},
   scenarios: [],
+  factory: defaultFactory(),
 };
 
 function touch<T extends ProjectState>(s: T): T {
@@ -255,6 +344,79 @@ export const useProject = create<ProjectState>()(
           });
         }),
 
+      addFloor: (input) => {
+        const id = `F${Date.now().toString(36)}`;
+        set((s) =>
+          touch({ ...s, factory: { ...s.factory, floors: [...s.factory.floors, { id, ...input }] } }),
+        );
+        return id;
+      },
+
+      removeFloor: (id) =>
+        set((s) =>
+          touch({
+            ...s,
+            factory: {
+              floors: s.factory.floors.filter((f) => f.id !== id),
+              lines: s.factory.lines.filter((l) => l.floorId !== id),
+            },
+          }),
+        ),
+
+      renameFloor: (id, name) =>
+        set((s) =>
+          touch({
+            ...s,
+            factory: {
+              ...s.factory,
+              floors: s.factory.floors.map((f) => (f.id === id ? { ...f, name } : f)),
+            },
+          }),
+        ),
+
+      addLine: (input) => {
+        const id = `L${Date.now().toString(36)}`;
+        set((s) =>
+          touch({
+            ...s,
+            factory: { ...s.factory, lines: [...s.factory.lines, { id, ...input }] },
+          }),
+        );
+        return id;
+      },
+
+      removeLine: (id) =>
+        set((s) =>
+          touch({
+            ...s,
+            factory: { ...s.factory, lines: s.factory.lines.filter((l) => l.id !== id) },
+          }),
+        ),
+
+      updateLine: (id, patch) =>
+        set((s) =>
+          touch({
+            ...s,
+            factory: {
+              ...s.factory,
+              lines: s.factory.lines.map((l) => (l.id === id ? { ...l, ...patch } : l)),
+            },
+          }),
+        ),
+
+      setLineKpis: (id, kpis) =>
+        set((s) =>
+          touch({
+            ...s,
+            factory: {
+              ...s.factory,
+              lines: s.factory.lines.map((l) =>
+                l.id === id ? { ...l, lastKpis: kpis, lastRunAt: new Date().toISOString() } : l,
+              ),
+            },
+          }),
+        ),
+
       resetProject: () =>
         set(() => ({
           ...defaults,
@@ -271,6 +433,13 @@ export const useProject = create<ProjectState>()(
           deleteScenario: get().deleteScenario,
           renameScenario: get().renameScenario,
           loadScenario: get().loadScenario,
+          addFloor: get().addFloor,
+          removeFloor: get().removeFloor,
+          renameFloor: get().renameFloor,
+          addLine: get().addLine,
+          removeLine: get().removeLine,
+          updateLine: get().updateLine,
+          setLineKpis: get().setLineKpis,
           resetProject: get().resetProject,
           loadProject: get().loadProject,
           exportProject: get().exportProject,
@@ -295,6 +464,7 @@ export const useProject = create<ProjectState>()(
           yamazumiOverrides: s.yamazumiOverrides ?? {},
           skillMatrix: s.skillMatrix ?? {},
           scenarios: s.scenarios ?? [],
+          factory: s.factory ?? defaultFactory(),
         }));
         return { ok: true };
       },
@@ -310,6 +480,7 @@ export const useProject = create<ProjectState>()(
           yamazumiOverrides: s.yamazumiOverrides,
           skillMatrix: s.skillMatrix,
           scenarios: s.scenarios,
+          factory: s.factory,
         } as ProjectState;
       },
     }),
@@ -327,6 +498,7 @@ export const useProject = create<ProjectState>()(
         yamazumiOverrides: state.yamazumiOverrides,
         skillMatrix: state.skillMatrix,
         scenarios: state.scenarios,
+        factory: state.factory,
       }),
     },
   ),
