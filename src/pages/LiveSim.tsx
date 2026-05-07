@@ -1297,6 +1297,7 @@ interface LSVIsoViewProps {
   t: number;
   zoom: number;
   pan: { x: number; y: number };
+  setPan: (updater: (p: { x: number; y: number }) => { x: number; y: number }) => void;
   setSelected: (s: Selected | null) => void;
   selected: Selected | null;
   hotIds: Set<string>;
@@ -1311,10 +1312,56 @@ function LSVIsoView({
   t,
   zoom,
   pan,
+  setPan,
   setSelected,
   selected,
   hotIds,
 }: LSVIsoViewProps) {
+  // Pan-by-drag — pointerdown starts a drag session, pointermove updates pan
+  // from the start offset, pointerup ends it. We track if the drag actually
+  // moved so a clean click on the background still clears the selection.
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    startPan: { x: number; y: number };
+    moved: boolean;
+  } | null>(null);
+  const [isDragging, setIsDragging] = useState(false);
+
+  function onPointerDown(e: React.PointerEvent<SVGSVGElement>) {
+    // only left-button drags
+    if (e.button !== 0) return;
+    dragRef.current = {
+      startX: e.clientX,
+      startY: e.clientY,
+      startPan: { x: pan.x, y: pan.y },
+      moved: false,
+    };
+    e.currentTarget.setPointerCapture(e.pointerId);
+    setIsDragging(true);
+  }
+  function onPointerMove(e: React.PointerEvent<SVGSVGElement>) {
+    const d = dragRef.current;
+    if (!d) return;
+    const dx = e.clientX - d.startX;
+    const dy = e.clientY - d.startY;
+    if (!d.moved && Math.abs(dx) + Math.abs(dy) < 3) return;
+    d.moved = true;
+    // Convert screen-pixel deltas into the SVG's coordinate system using the
+    // same viewBox-to-pixel ratio used to render the SVG.
+    const rect = e.currentTarget.getBoundingClientRect();
+    const scaleX = 1700 / rect.width;
+    const scaleY = 900 / rect.height;
+    setPan(() => ({ x: d.startPan.x + dx * scaleX, y: d.startPan.y + dy * scaleY }));
+  }
+  function onPointerUp(e: React.PointerEvent<SVGSVGElement>) {
+    const d = dragRef.current;
+    dragRef.current = null;
+    setIsDragging(false);
+    e.currentTarget.releasePointerCapture(e.pointerId);
+    // Suppress the click-to-clear if the user actually dragged.
+    if (d?.moved) e.stopPropagation();
+  }
   // Sort entities by depth (y + x for iso painters) for back-to-front rendering
   const renderItems = useMemo(() => {
     const items: Array<
@@ -1338,8 +1385,27 @@ function LSVIsoView({
   return (
     <svg
       viewBox={`0 0 ${vbW} ${vbH}`}
-      style={{ width: '100%', height: '100%', display: 'block', cursor: 'default' }}
-      onClick={() => setSelected(null)}
+      style={{
+        width: '100%',
+        height: '100%',
+        display: 'block',
+        cursor: isDragging ? 'grabbing' : 'grab',
+        touchAction: 'none',
+      }}
+      onClick={(e) => {
+        // Don't clear selection if this click was the end of a drag.
+        if (dragRef.current?.moved) return;
+        // Same guard for the no-longer-current-but-just-finished drag (set
+        // to null in pointerup before this fires in some browsers).
+        const target = e.target as Element;
+        if (target.tagName === 'rect' || target.tagName === 'svg') {
+          setSelected(null);
+        }
+      }}
+      onPointerDown={onPointerDown}
+      onPointerMove={onPointerMove}
+      onPointerUp={onPointerUp}
+      onPointerCancel={onPointerUp}
     >
       <defs>
         <pattern id="lsv-grid" width={40} height={40} patternUnits="userSpaceOnUse">
@@ -2726,6 +2792,7 @@ export function LiveSimPage() {
               t={t}
               zoom={zoom}
               pan={pan}
+              setPan={setPan}
               setSelected={setSelected}
               selected={selected}
               hotIds={hotIds}
