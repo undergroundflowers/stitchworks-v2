@@ -114,6 +114,30 @@ export function ReportsPage() {
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
             <Button variant="secondary" size="sm" icon="↻" onClick={() => { simReset(); step(SHIFT_MIN); }}>Re-run shift</Button>
+            <Button variant="primary" size="sm" icon="✦"
+              onClick={() => {
+                const defaultName = `${yamTemplate.name} · ${yamOperators} ops · ${new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+                const name = prompt('Save as scenario — name?', defaultName);
+                if (!name) return;
+                const bottleneck = simState.stations[simState.bottleneckOpIndex];
+                project.saveScenario({
+                  name,
+                  kpis: {
+                    producedPieces: simState.producedPieces,
+                    throughputPerHr: throughputPerHr,
+                    efficiencyPct: efficiency,
+                    meanLeadTime: simState.meanLeadTime,
+                    utilization: simState.utilization,
+                    wipBundles,
+                    bottleneckOpName: bottleneck?.opName ?? '—',
+                    bottleneckQueue: bottleneck?.queueLen ?? 0,
+                  },
+                });
+                navigate('/scenarios');
+              }}
+            >
+              Save scenario
+            </Button>
             <ToggleGroup value={period} onChange={setPeriod} options={[
               { value:'SHIFT', label:'Shift' },
               { value:'DAY',   label:'Day' },

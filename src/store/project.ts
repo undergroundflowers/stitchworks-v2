@@ -31,6 +31,38 @@ export interface YamazumiAssignment {
   opIds: string[];
 }
 
+/**
+ * A saved factory configuration + the KPI snapshot from the run that
+ * captured it. Compared side-by-side on the Scenarios page.
+ */
+export interface ScenarioKpis {
+  producedPieces: number;
+  throughputPerHr: number;
+  efficiencyPct: number;
+  meanLeadTime: number;
+  utilization: number;
+  wipBundles: number;
+  bottleneckOpName: string;
+  bottleneckQueue: number;
+}
+
+export interface Scenario {
+  id: string;
+  name: string;
+  notes?: string;
+  createdAt: string;
+  /** What was being modelled. */
+  config: {
+    garmentTemplateId: string;
+    operators: number;
+    /** Sparse overrides at save time — recreate the run if needed. */
+    skillMatrix: SkillMatrix;
+    yamazumiOverride?: YamazumiAssignment[];
+  };
+  /** Results from the run that produced this snapshot. */
+  kpis: ScenarioKpis;
+}
+
 export interface ProjectState {
   schemaVersion: typeof PROJECT_SCHEMA_VERSION;
   meta: ProjectMeta;
@@ -50,6 +82,8 @@ export interface ProjectState {
 
   skillMatrix: SkillMatrix;
 
+  scenarios: Scenario[];
+
   // ── Mutators ─────────────────────────────────────────────────────────────
   rename: (name: string) => void;
   setSelectedGarment: (id: string) => void;
@@ -59,6 +93,19 @@ export interface ProjectState {
   clearYamazumiOverride: (garmentId: string) => void;
   setSkill: (operatorId: string, opId: string, efficiency: number) => void;
   resetSkillMatrix: () => void;
+
+  /** Save a scenario from the current state + a freshly-captured KPI run. */
+  saveScenario: (input: { name: string; notes?: string; kpis: ScenarioKpis }) => Scenario;
+  /** Remove a scenario by id. */
+  deleteScenario: (id: string) => void;
+  /** Rename a scenario in place. */
+  renameScenario: (id: string, name: string) => void;
+  /**
+   * Restore a scenario's config into the live project (garment, operators,
+   * skill matrix, yamazumi override). The scenario itself is not deleted —
+   * loading is non-destructive to the saved row.
+   */
+  loadScenario: (id: string) => void;
 
   // ── Project actions ──────────────────────────────────────────────────────
   /** Wipe everything back to defaults. Caller should confirm first. */
@@ -92,6 +139,10 @@ const defaults: Omit<
   | 'resetProject'
   | 'loadProject'
   | 'exportProject'
+  | 'saveScenario'
+  | 'deleteScenario'
+  | 'renameScenario'
+  | 'loadScenario'
 > = {
   schemaVersion: PROJECT_SCHEMA_VERSION,
   meta: defaultMeta(),
@@ -100,6 +151,7 @@ const defaults: Omit<
   operatorNames: {},
   yamazumiOverrides: {},
   skillMatrix: {},
+  scenarios: [],
 };
 
 function touch<T extends ProjectState>(s: T): T {
@@ -151,6 +203,58 @@ export const useProject = create<ProjectState>()(
 
       resetSkillMatrix: () => set((s) => touch({ ...s, skillMatrix: {} })),
 
+      saveScenario: (input) => {
+        const cur = get();
+        const id = `scn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const scenario: Scenario = {
+          id,
+          name: input.name || `Scenario ${cur.scenarios.length + 1}`,
+          notes: input.notes,
+          createdAt: new Date().toISOString(),
+          config: {
+            garmentTemplateId: cur.selectedGarmentId,
+            operators: cur.defaultOperators,
+            skillMatrix: JSON.parse(JSON.stringify(cur.skillMatrix)) as SkillMatrix,
+            yamazumiOverride: cur.yamazumiOverrides[cur.selectedGarmentId]
+              ? JSON.parse(JSON.stringify(cur.yamazumiOverrides[cur.selectedGarmentId])) as YamazumiAssignment[]
+              : undefined,
+          },
+          kpis: input.kpis,
+        };
+        set((s) => touch({ ...s, scenarios: [scenario, ...s.scenarios] }));
+        return scenario;
+      },
+
+      deleteScenario: (id) =>
+        set((s) => touch({ ...s, scenarios: s.scenarios.filter((x) => x.id !== id) })),
+
+      renameScenario: (id, name) =>
+        set((s) =>
+          touch({
+            ...s,
+            scenarios: s.scenarios.map((x) => (x.id === id ? { ...x, name } : x)),
+          }),
+        ),
+
+      loadScenario: (id) =>
+        set((s) => {
+          const scenario = s.scenarios.find((x) => x.id === id);
+          if (!scenario) return s;
+          const yamOverrides = { ...s.yamazumiOverrides };
+          if (scenario.config.yamazumiOverride) {
+            yamOverrides[scenario.config.garmentTemplateId] = scenario.config.yamazumiOverride;
+          } else {
+            delete yamOverrides[scenario.config.garmentTemplateId];
+          }
+          return touch({
+            ...s,
+            selectedGarmentId: scenario.config.garmentTemplateId,
+            defaultOperators: scenario.config.operators,
+            skillMatrix: JSON.parse(JSON.stringify(scenario.config.skillMatrix)) as SkillMatrix,
+            yamazumiOverrides: yamOverrides,
+          });
+        }),
+
       resetProject: () =>
         set(() => ({
           ...defaults,
@@ -163,6 +267,10 @@ export const useProject = create<ProjectState>()(
           clearYamazumiOverride: get().clearYamazumiOverride,
           setSkill: get().setSkill,
           resetSkillMatrix: get().resetSkillMatrix,
+          saveScenario: get().saveScenario,
+          deleteScenario: get().deleteScenario,
+          renameScenario: get().renameScenario,
+          loadScenario: get().loadScenario,
           resetProject: get().resetProject,
           loadProject: get().loadProject,
           exportProject: get().exportProject,
@@ -186,6 +294,7 @@ export const useProject = create<ProjectState>()(
           operatorNames: s.operatorNames ?? {},
           yamazumiOverrides: s.yamazumiOverrides ?? {},
           skillMatrix: s.skillMatrix ?? {},
+          scenarios: s.scenarios ?? [],
         }));
         return { ok: true };
       },
@@ -200,6 +309,7 @@ export const useProject = create<ProjectState>()(
           operatorNames: s.operatorNames,
           yamazumiOverrides: s.yamazumiOverrides,
           skillMatrix: s.skillMatrix,
+          scenarios: s.scenarios,
         } as ProjectState;
       },
     }),
@@ -216,6 +326,7 @@ export const useProject = create<ProjectState>()(
         operatorNames: state.operatorNames,
         yamazumiOverrides: state.yamazumiOverrides,
         skillMatrix: state.skillMatrix,
+        scenarios: state.scenarios,
       }),
     },
   ),

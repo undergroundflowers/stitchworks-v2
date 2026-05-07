@@ -7,4 +7,6 @@ export {
   type ProjectMeta,
   type SkillMatrix,
   type YamazumiAssignment,
+  type Scenario,
+  type ScenarioKpis,
 } from './project';
