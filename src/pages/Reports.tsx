@@ -3,15 +3,13 @@ import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, aut
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  GARMENT_TEMPLATES,
-  ALL_GARMENT_TEMPLATES,
   smoothnessIndex,
   balanceLoss,
   lineEfficiency,
   bottleneckSmv,
 } from '../domain';
 import { buildSimConfig, efficiencyFromSkillMatrix, useSim } from '../simulation';
-import { useProject } from '../store';
+import { useProject, useGarments } from '../store';
 
 interface DonutSlice {
   v: number;
@@ -35,6 +33,7 @@ const SHIFT_MIN = 480;
 export function ReportsPage() {
   const navigate = useNavigate();
   const project = useProject();
+  const garments = useGarments();
   const setYamazumiOverride = project.setYamazumiOverride;
   const clearYamazumiOverride = project.clearYamazumiOverride;
   const [period, setPeriod] = useState<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>('SHIFT');
@@ -43,7 +42,7 @@ export function ReportsPage() {
   const [yamGarment, setYamGarment] = useState<string>(project.selectedGarmentId);
   const [yamOperators, setYamOperators] = useState<number>(project.defaultOperators);
 
-  const yamTemplate = GARMENT_TEMPLATES[yamGarment];
+  const yamTemplate = garments.byId[yamGarment] ?? garments.all[0];
   const storedOverride = project.yamazumiOverrides[yamGarment];
 
   const yamAssignments: OperatorAssignment[] = useMemo(() => {
@@ -167,7 +166,7 @@ export function ReportsPage() {
             </div>
           </div>
           <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
-            <ToggleGroup value={yamGarment} onChange={setYamGarment} options={ALL_GARMENT_TEMPLATES.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
+            <ToggleGroup value={yamGarment} onChange={setYamGarment} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
             <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
               <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPS</span>
               <input type="number" min={4} max={60} value={yamOperators}

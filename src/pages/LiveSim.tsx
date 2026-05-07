@@ -2,12 +2,8 @@ import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Button, ToggleGroup } from '../components';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  ALL_GARMENT_TEMPLATES,
-  GARMENT_TEMPLATES,
-} from '../domain';
 import { buildSimConfig, efficiencyFromSkillMatrix, useSim, type StationView } from '../simulation';
-import { useProject } from '../store';
+import { useProject, useGarments } from '../store';
 
 interface SimHudStatProps {
   label: string;
@@ -40,10 +36,11 @@ export function LiveSimPage() {
   // Defaults flow from the project store so Orders → LiveSim handoff works:
   // changes on Orders are saved to selectedGarmentId / defaultOperators and
   // landed here on next visit.
+  const garments = useGarments();
   const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
   const [operators, setOperators] = useState<number>(project.defaultOperators);
 
-  const garment = GARMENT_TEMPLATES[garmentId];
+  const garment = garments.byId[garmentId] ?? garments.all[0];
 
   // Per-op efficiency derived from the project's skill matrix (live).
   const opEfficiency = useMemo(
@@ -87,7 +84,7 @@ export function LiveSimPage() {
         <div style={{ width:1, height:20, background:'#ffffff20' }}/>
         <div style={{ display:'flex', alignItems:'center', gap:10, fontFamily: SW_FONTS.body, fontSize: 11 }}>
           <span style={{ color:'#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>GARMENT</span>
-          <ToggleGroup value={garmentId} onChange={setGarmentId} options={ALL_GARMENT_TEMPLATES.map(g => ({
+          <ToggleGroup value={garmentId} onChange={setGarmentId} options={garments.all.map(g => ({
             value: g.id,
             label: g.name.replace(/\s*\(.*\)/, ''),
           }))}/>

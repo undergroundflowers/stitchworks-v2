@@ -3,15 +3,13 @@ import { Card, Button, Stat, SectionHeader } from '../components';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  ALL_GARMENT_TEMPLATES,
-  GARMENT_TEMPLATES,
   ALL_PRODUCTION_SYSTEMS,
   PRODUCTION_SYSTEMS,
   type ProductionSystem,
   pitchTime,
   labourRequired,
 } from '../domain';
-import { useProject } from '../store';
+import { useProject, useGarments } from '../store';
 
 interface OrderState {
   po: string;
@@ -33,6 +31,7 @@ interface OrderState {
 export function OrdersPage() {
   const navigate = useNavigate();
   const project = useProject();
+  const garments = useGarments();
   const [order, setOrder] = useState<OrderState>({
     po: 'PO-4422',
     client: 'Northwind Apparel Co.',
@@ -55,7 +54,7 @@ export function OrdersPage() {
     navigate(target);
   }
 
-  const template = GARMENT_TEMPLATES[order.garmentTemplateId];
+  const template = garments.byId[order.garmentTemplateId];
   const recommended = recommendSystem(order.qty, order.deadlineDays);
 
   // Pitch time + crew size based on the chosen template's SAM and an
@@ -109,7 +108,7 @@ export function OrdersPage() {
             <div style={{ marginTop: 14 }}>
               <div style={{ fontSize:11, fontWeight:700, color: SW_COLORS.muted, marginBottom:6 }}>Garment template (preset operations)</div>
               <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(140px, 1fr))', gap:8 }}>
-                {ALL_GARMENT_TEMPLATES.map(g => {
+                {garments.all.map(g => {
                   const active = g.id === order.garmentTemplateId;
                   return (
                     <div key={g.id} onClick={() => setOrder({ ...order, garmentTemplateId: g.id })}

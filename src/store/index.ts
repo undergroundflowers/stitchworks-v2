@@ -13,3 +13,4 @@ export {
   type Line,
   type FactoryStructure,
 } from './project';
+export { useGarments, effectiveGarments, type EffectiveGarments } from './garments';

@@ -2,8 +2,7 @@ import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat } from '../components';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useProject, type Scenario, type ScenarioKpis } from '../store';
-import { GARMENT_TEMPLATES } from '../domain';
+import { useProject, useGarments, type Scenario, type ScenarioKpis, type EffectiveGarments } from '../store';
 
 type Mode = 'list' | 'compare';
 
@@ -22,6 +21,7 @@ type Mode = 'list' | 'compare';
 export function ScenariosPage() {
   const navigate = useNavigate();
   const project = useProject();
+  const garments = useGarments();
   const scenarios = project.scenarios;
 
   const [mode, setMode] = useState<Mode>('list');
@@ -103,7 +103,7 @@ export function ScenariosPage() {
         {scenarios.length > 0 && mode === 'list' && (
           <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(320px, 1fr))', gap: 14, marginTop: 6 }}>
             {scenarios.map((s) => {
-              const garment = GARMENT_TEMPLATES[s.config.garmentTemplateId];
+              const garment = garments.byId[s.config.garmentTemplateId];
               const garmentName = garment?.name ?? s.config.garmentTemplateId;
               const isSelected = selectedIds.includes(s.id);
               const isRenaming = renamingId === s.id;
@@ -195,6 +195,7 @@ export function ScenariosPage() {
         {scenarios.length > 0 && mode === 'compare' && (
           <CompareView
             scenarios={selected}
+            garments={garments}
             onClearSelection={() => setSelectedIds([])}
             onPickMore={() => setMode('list')}
           />
@@ -206,6 +207,7 @@ export function ScenariosPage() {
 
 interface CompareViewProps {
   scenarios: Scenario[];
+  garments: EffectiveGarments;
   onClearSelection: () => void;
   onPickMore: () => void;
 }
@@ -230,7 +232,7 @@ const KPI_ROWS: KpiRow[] = [
   { key: 'wip',             label: 'WIP',          unit: 'bundles', higherIsBetter: false, format: (v) => v.toLocaleString(),                    read: (k) => k.wipBundles,        color: SW_COLORS.warn  },
 ];
 
-function CompareView({ scenarios, onClearSelection, onPickMore }: CompareViewProps) {
+function CompareView({ scenarios, garments, onClearSelection, onPickMore }: CompareViewProps) {
   if (scenarios.length < 2) {
     return (
       <Card padding={28} style={{ textAlign: 'center', marginTop: 16 }}>
@@ -260,7 +262,7 @@ function CompareView({ scenarios, onClearSelection, onPickMore }: CompareViewPro
       <div style={{ display: 'grid', gridTemplateColumns: `160px repeat(${scenarios.length}, 1fr)`, gap: 10, alignItems: 'stretch' }}>
         <div/>
         {scenarios.map((s) => {
-          const garment = GARMENT_TEMPLATES[s.config.garmentTemplateId];
+          const garment = garments.byId[s.config.garmentTemplateId];
           return (
             <div key={s.id} style={{ background: SW_COLORS.paperDeep, padding: '10px 12px', borderRadius: SW_RADIUS.sm }}>
               <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, color: SW_COLORS.ink }}>{s.name}</div>

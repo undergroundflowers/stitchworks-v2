@@ -3,14 +3,12 @@ import { Button, Stat, SectionHeader, ToggleGroup, Tag } from '../components';
 import { useState, useMemo, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
-  GARMENT_TEMPLATES,
-  ALL_GARMENT_TEMPLATES,
   ALL_PRODUCTION_SYSTEMS,
   PRODUCTION_SYSTEMS,
   type ProductionSystem,
 } from '../domain';
 import { buildSimConfig, efficiencyFromSkillMatrix, Sim } from '../simulation';
-import { useProject, type Line, type Floor } from '../store';
+import { useProject, useGarments, type Line, type Floor, type EffectiveGarments } from '../store';
 
 type Zoom = 'factory' | 'floor' | 'line';
 
@@ -32,6 +30,7 @@ const SHIFT_MIN = 480;
 export function FactoryTwinPage() {
   const navigate = useNavigate();
   const project = useProject();
+  const garments = useGarments();
   const factory = project.factory;
 
   const [zoom, setZoom] = useState<Zoom>('factory');
@@ -67,7 +66,7 @@ export function FactoryTwinPage() {
 
   // ── Run a line synchronously: build config, fast-forward 480 min ──────
   function runLine(line: Line) {
-    const garment = GARMENT_TEMPLATES[line.garmentTemplateId];
+    const garment = garments.byId[line.garmentTemplateId];
     if (!garment) return;
     const opEfficiency = efficiencyFromSkillMatrix(project.skillMatrix, garment.operations);
     const config = buildSimConfig({ garment, operators: line.operators, opEfficiency });
@@ -128,7 +127,7 @@ export function FactoryTwinPage() {
                 }
               >
                 {floorLines.map((l) => {
-                  const garment = GARMENT_TEMPLATES[l.garmentTemplateId];
+                  const garment = garments.byId[l.garmentTemplateId];
                   return (
                     <TreeNode key={l.id} indent={2}
                       label={l.name}
@@ -187,16 +186,18 @@ export function FactoryTwinPage() {
           ${SW_COLORS.paperDeep}
         `, backgroundSize:'24px 24px' }}>
           {zoom === 'factory' && (
-            <FactoryView factory={factory} onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); setSelFloorId(l.floorId); }} onRunLine={runLine}/>
+            <FactoryView factory={factory} garments={garments}
+              onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); setSelFloorId(l.floorId); }}
+              onRunLine={runLine}/>
           )}
           {zoom === 'floor' && selFloor && (
-            <FloorView floor={selFloor} lines={factory.lines.filter((l) => l.floorId === selFloor.id)}
+            <FloorView floor={selFloor} garments={garments} lines={factory.lines.filter((l) => l.floorId === selFloor.id)}
               onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); }}
               onRunLine={runLine}
             />
           )}
           {zoom === 'line' && selLine && (
-            <LineView line={selLine}
+            <LineView line={selLine} garments={garments}
               onUpdate={(patch) => project.updateLine(selLine.id, patch)}
               onRun={() => runLine(selLine)}
               onDelete={() => {
@@ -267,6 +268,7 @@ export function FactoryTwinPage() {
         {zoom === 'line' && selLine && (
           <LineInspector
             line={selLine}
+            garments={garments}
             onUpdate={(patch) => project.updateLine(selLine.id, patch)}
             onRun={() => runLine(selLine)}
             onOpenSim={() => {
@@ -324,11 +326,12 @@ function TreeNode({ label, sub, indent = 0, expanded, children, onClick, active,
 
 interface FactoryViewProps {
   factory: { floors: Floor[]; lines: Line[] };
+  garments: EffectiveGarments;
   onPickLine: (l: Line) => void;
   onRunLine: (l: Line) => void;
 }
 
-function FactoryView({ factory, onPickLine, onRunLine }: FactoryViewProps) {
+function FactoryView({ factory, garments, onPickLine, onRunLine }: FactoryViewProps) {
   return (
     <div style={{ padding: 24, display:'flex', flexDirection:'column', gap: 18 }}>
       {factory.floors.map((floor) => {
@@ -340,7 +343,7 @@ function FactoryView({ factory, onPickLine, onRunLine }: FactoryViewProps) {
               <span style={{ fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>{floor.description}</span>
             </div>
             <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(220px, 1fr))', gap: 10 }}>
-              {lines.map((l) => <LineCard key={l.id} line={l} onPick={() => onPickLine(l)} onRun={() => onRunLine(l)}/>)}
+              {lines.map((l) => <LineCard key={l.id} line={l} garments={garments} onPick={() => onPickLine(l)} onRun={() => onRunLine(l)}/>)}
               {lines.length === 0 && (
                 <div style={{ padding: 14, fontSize: 12, color: SW_COLORS.muted, fontStyle: 'italic', border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm }}>
                   No lines on this floor. Click + on the tree to add one.
@@ -359,11 +362,12 @@ function FactoryView({ factory, onPickLine, onRunLine }: FactoryViewProps) {
 interface FloorViewProps {
   floor: Floor;
   lines: Line[];
+  garments: EffectiveGarments;
   onPickLine: (l: Line) => void;
   onRunLine: (l: Line) => void;
 }
 
-function FloorView({ floor, lines, onPickLine, onRunLine }: FloorViewProps) {
+function FloorView({ floor, lines, garments, onPickLine, onRunLine }: FloorViewProps) {
   return (
     <div style={{ padding: 24 }}>
       <div style={{ display:'flex', alignItems:'baseline', gap: 12, marginBottom: 14 }}>
@@ -371,7 +375,7 @@ function FloorView({ floor, lines, onPickLine, onRunLine }: FloorViewProps) {
         <span style={{ fontSize: 12, color: SW_COLORS.muted }}>{floor.description}</span>
       </div>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(280px, 1fr))', gap: 12 }}>
-        {lines.map((l) => <LineCard key={l.id} line={l} expand onPick={() => onPickLine(l)} onRun={() => onRunLine(l)}/>)}
+        {lines.map((l) => <LineCard key={l.id} line={l} garments={garments} expand onPick={() => onPickLine(l)} onRun={() => onRunLine(l)}/>)}
       </div>
     </div>
   );
@@ -381,13 +385,14 @@ function FloorView({ floor, lines, onPickLine, onRunLine }: FloorViewProps) {
 
 interface LineCardProps {
   line: Line;
+  garments: EffectiveGarments;
   expand?: boolean;
   onPick: () => void;
   onRun: () => void;
 }
 
-function LineCard({ line, expand, onPick, onRun }: LineCardProps) {
-  const garment = GARMENT_TEMPLATES[line.garmentTemplateId];
+function LineCard({ line, garments, expand, onPick, onRun }: LineCardProps) {
+  const garment = garments.byId[line.garmentTemplateId];
   const k = line.lastKpis;
   return (
     <div
@@ -439,13 +444,14 @@ function LineCard({ line, expand, onPick, onRun }: LineCardProps) {
 
 interface LineViewProps {
   line: Line;
+  garments: EffectiveGarments;
   onUpdate: (patch: Partial<Line>) => void;
   onRun: () => void;
   onDelete: () => void;
 }
 
-function LineView({ line, onUpdate, onRun, onDelete }: LineViewProps) {
-  const garment = GARMENT_TEMPLATES[line.garmentTemplateId];
+function LineView({ line, garments, onUpdate, onRun, onDelete }: LineViewProps) {
+  const garment = garments.byId[line.garmentTemplateId];
   const k = line.lastKpis;
   return (
     <div style={{ padding: 24, display:'flex', flexDirection:'column', gap: 18 }}>
@@ -488,12 +494,13 @@ function LineView({ line, onUpdate, onRun, onDelete }: LineViewProps) {
 
 interface LineInspectorProps {
   line: Line;
+  garments: EffectiveGarments;
   onUpdate: (patch: Partial<Line>) => void;
   onRun: () => void;
   onOpenSim: () => void;
 }
 
-function LineInspector({ line, onUpdate, onRun, onOpenSim }: LineInspectorProps) {
+function LineInspector({ line, garments, onUpdate, onRun, onOpenSim }: LineInspectorProps) {
   return (
     <div style={{ display:'flex', flexDirection:'column', gap: 12 }}>
       <div>
@@ -501,8 +508,11 @@ function LineInspector({ line, onUpdate, onRun, onOpenSim }: LineInspectorProps)
         <select value={line.garmentTemplateId} onChange={(e) => onUpdate({ garmentTemplateId: e.target.value })}
           style={{ width:'100%', padding:'8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 600, background: SW_COLORS.paper }}
         >
-          {ALL_GARMENT_TEMPLATES.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
+          {garments.all.map((g) => <option key={g.id} value={g.id}>{g.name}</option>)}
         </select>
+      </div>
+      <div style={{ fontSize: 10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop: -8 }}>
+        SAM: {garments.byId[line.garmentTemplateId]?.totalSmv.toFixed(2) ?? '—'} min · {garments.byId[line.garmentTemplateId]?.operations.length ?? 0} operations
       </div>
       <div>
         <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Operators</div>

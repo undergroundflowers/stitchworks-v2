@@ -6,12 +6,14 @@ import {
   type WorkerArchetype,
   ALL_MACHINES,
   type MachineSpec,
-  GARMENT_TEMPLATES,
-  ALL_GARMENT_TEMPLATES,
+  type MachineCode,
   type Operation,
+  type OperationCategory,
   type SkillId,
+  type GarmentTemplate,
+  GARMENT_TEMPLATES,
 } from '../domain';
-import { useProject } from '../store';
+import { useProject, useGarments, type EffectiveGarments } from '../store';
 
 /**
  * Resources page — operators, machines, inventory and roster.
@@ -23,8 +25,9 @@ import { useProject } from '../store';
  * those become live once the project file format and roster scheduler land.
  */
 export function ResourcesPage() {
-  const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster' | 'skills'>('operators');
+  const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster' | 'skills' | 'operations'>('operators');
   const project = useProject();
+  const garments = useGarments();
   const skillMatrix = project.skillMatrix;
   const setSkill = project.setSkill;
   const resetSkillMatrix = project.resetSkillMatrix;
@@ -51,11 +54,12 @@ export function ResourcesPage() {
           }/>
         <div style={{ marginTop: 8 }}>
           <ToggleGroup value={tab} onChange={setTab} options={[
-            { value:'operators', label:`👥 Operators · ${operators.length}` },
-            { value:'machines',  label:`⚙ Machines · ${machines.length}` },
-            { value:'skills',    label:`🎯 Skill matrix` },
-            { value:'inventory', label:'📦 Inventory' },
-            { value:'roster',    label:'🗓 Shift roster' },
+            { value:'operators',  label:`👥 Operators · ${operators.length}` },
+            { value:'machines',   label:`⚙ Machines · ${machines.length}` },
+            { value:'operations', label:`🪡 Operations · ${garments.all.length} garments` },
+            { value:'skills',     label:`🎯 Skill matrix` },
+            { value:'inventory',  label:'📦 Inventory' },
+            { value:'roster',     label:'🗓 Shift roster' },
           ]}/>
         </div>
       </div>
@@ -210,6 +214,10 @@ export function ResourcesPage() {
           </div>
         )}
 
+        {tab==='operations' && (
+          <OperationsPanel garments={garments}/>
+        )}
+
         {tab==='skills' && (
           <SkillMatrixPanel
             operators={operators}
@@ -218,6 +226,7 @@ export function ResourcesPage() {
             skillMatrix={skillMatrix}
             setSkill={setSkill}
             resetSkillMatrix={resetSkillMatrix}
+            garments={garments}
           />
         )}
 
@@ -250,6 +259,265 @@ export function ResourcesPage() {
   );
 }
 
+// ── Operations editor ───────────────────────────────────────────────────────
+
+const ALL_SKILL_IDS: SkillId[] = [
+  'stitching', 'overlock', 'flatlock', 'kansai', 'feed_of_arm',
+  'buttonhole', 'button_sew', 'bartack', 'embroidery',
+  'cutting_manual', 'cutting_cad', 'spreading', 'fusing',
+  'pressing', 'inspection', 'packing', 'bundling',
+  'material_handling', 'mechanical_maint', 'supervision',
+];
+
+const ALL_OPERATION_CATEGORIES: OperationCategory[] = [
+  'sewing', 'manual', 'cutting', 'spreading', 'pressing',
+  'fusing', 'inspection', 'embroidery', 'finishing',
+];
+
+interface OperationsPanelProps {
+  garments: EffectiveGarments;
+}
+
+/**
+ * Operation library editor — pick a garment, edit / add / reorder / delete
+ * its operations. Edits are stored in `project.garmentEdits` (built-in or
+ * custom) and flow through `useGarments()` so every read site (LiveSim,
+ * Yamazumi, Twin run-line, etc.) picks them up immediately.
+ */
+function OperationsPanel({ garments }: OperationsPanelProps) {
+  const project = useProject();
+  const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
+  const garment = garments.byId[garmentId] ?? garments.all[0];
+  const builtIn = GARMENT_TEMPLATES[garmentId];
+  const isEdited = project.garmentEdits[garmentId] !== undefined;
+  const isBuiltIn = !!builtIn;
+
+  function patch(p: Partial<Omit<GarmentTemplate, 'operations'>>) {
+    project.patchGarment(garmentId, builtIn, p);
+  }
+
+  function addOp() {
+    const newOp: Operation = {
+      id: `${garmentId}-${Date.now().toString(36)}`,
+      code: `OP-${(garment.operations.length + 1).toString().padStart(2, '0')}`,
+      name: 'New operation',
+      smv: 0.30,
+      machineCode: 'SNL',
+      skill: 'stitching',
+      category: 'sewing',
+    };
+    project.addOperation(garmentId, builtIn, newOp);
+  }
+
+  function newCustomGarment() {
+    const name = prompt('New garment name', 'Custom garment');
+    if (!name) return;
+    const id = `custom-${Date.now().toString(36)}`;
+    const blank: GarmentTemplate = {
+      id,
+      name,
+      class: 'top',
+      description: 'User-defined garment.',
+      operations: [],
+      defaultBundleSize: 20,
+      totalSmv: 0,
+      hourlyTarget100: 0,
+      bestFor: '',
+    };
+    project.setGarmentEdit(id, blank);
+    setGarmentId(id);
+  }
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 14 }}>
+      {/* Garment picker + meta */}
+      <Card padding={16}>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', marginBottom: 12 }}>
+          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>GARMENT</span>
+          <ToggleGroup value={garmentId} onChange={setGarmentId} options={garments.all.map((g) => ({
+            value: g.id,
+            label: g.name.replace(/\s*\(.*\)/, '') + (project.garmentEdits[g.id] ? ' ●' : ''),
+          }))}/>
+          <div style={{ flex: 1 }}/>
+          <Button variant="secondary" size="sm" icon="+" onClick={newCustomGarment}>New garment</Button>
+          {isEdited && isBuiltIn && (
+            <Button variant="ghost" size="sm" onClick={() => {
+              if (confirm(`Reset ${garment.name} back to its built-in defaults? Your edits will be discarded.`)) {
+                project.resetGarment(garmentId);
+              }
+            }}>Reset to built-in</Button>
+          )}
+          {!isBuiltIn && (
+            <Button variant="ghost" size="sm" onClick={() => {
+              if (confirm(`Delete ${garment.name}?`)) {
+                project.resetGarment(garmentId);
+                setGarmentId('tshirt');
+              }
+            }}>Delete custom</Button>
+          )}
+        </div>
+
+        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Name</div>
+            <input value={garment.name} onChange={(e) => patch({ name: e.target.value })}
+              style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700 }}/>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Default bundle size</div>
+            <input type="number" min={1} max={500} value={garment.defaultBundleSize}
+              onChange={(e) => patch({ defaultBundleSize: Math.max(1, parseInt(e.target.value) || 1) })}
+              style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700 }}/>
+          </div>
+          <div>
+            <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Total SAM</div>
+            <div style={{ padding: '8px 10px', borderRadius: SW_RADIUS.sm, background: SW_COLORS.paperDeep, fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700 }}>
+              {garment.totalSmv.toFixed(3)} min
+              <span style={{ color: SW_COLORS.muted, fontWeight: 600, marginLeft: 6, fontSize: 11 }}>· {garment.operations.length} ops</span>
+            </div>
+          </div>
+        </div>
+        <div style={{ marginTop: 8 }}>
+          <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Description</div>
+          <input value={garment.description} onChange={(e) => patch({ description: e.target.value })}
+            style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 12, fontWeight: 600, color: SW_COLORS.ink }}/>
+        </div>
+      </Card>
+
+      {/* Operations table */}
+      <Card padding={0} style={{ overflow: 'auto', maxHeight: 'calc(100vh - 380px)' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.body, fontSize: 12 }}>
+          <thead>
+            <tr style={{ background: SW_COLORS.paperDeep, borderBottom: `1px solid ${SW_COLORS.line}` }}>
+              {['#', 'Order', 'Code', 'Name', 'SMV (min)', 'Machine', 'Skill', 'Category', ''].map((h) => (
+                <th key={h} style={{ padding: '10px 10px', textAlign: 'left', fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>{h}</th>
+              ))}
+            </tr>
+          </thead>
+          <tbody>
+            {garment.operations.map((op, i) => (
+              <tr key={op.id} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                <td style={{ padding: '6px 10px', fontFamily: SW_FONTS.mono, fontWeight: 700, color: SW_COLORS.muted, width: 28 }}>{i + 1}</td>
+                <td style={{ padding: '6px 6px', whiteSpace: 'nowrap' }}>
+                  <button onClick={() => project.moveOperation(garmentId, builtIn, op.id, -1)} disabled={i === 0}
+                    style={miniBtn(i === 0)}>↑</button>
+                  <button onClick={() => project.moveOperation(garmentId, builtIn, op.id, 1)} disabled={i === garment.operations.length - 1}
+                    style={miniBtn(i === garment.operations.length - 1)}>↓</button>
+                </td>
+                <td style={{ padding: '6px 6px' }}>
+                  <input value={op.code ?? ''}
+                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { code: e.target.value })}
+                    style={cellInput(60)}
+                  />
+                </td>
+                <td style={{ padding: '6px 6px' }}>
+                  <input value={op.name}
+                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { name: e.target.value })}
+                    style={cellInput(220)}
+                  />
+                </td>
+                <td style={{ padding: '6px 6px' }}>
+                  <input type="number" step={0.01} min={0.001} value={op.smv}
+                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { smv: Math.max(0.001, parseFloat(e.target.value) || 0.001) })}
+                    style={{ ...cellInput(72), fontFamily: SW_FONTS.mono, fontWeight: 700 }}
+                  />
+                </td>
+                <td style={{ padding: '6px 6px' }}>
+                  <select value={op.machineCode}
+                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { machineCode: e.target.value as MachineCode })}
+                    style={cellSelect()}
+                  >
+                    {ALL_MACHINES.map((m) => <option key={m.code} value={m.code}>{m.code} · {m.shortName}</option>)}
+                  </select>
+                </td>
+                <td style={{ padding: '6px 6px' }}>
+                  <select value={op.skill}
+                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { skill: e.target.value as SkillId })}
+                    style={cellSelect()}
+                  >
+                    {ALL_SKILL_IDS.map((s) => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
+                  </select>
+                </td>
+                <td style={{ padding: '6px 6px' }}>
+                  <select value={op.category}
+                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { category: e.target.value as OperationCategory })}
+                    style={cellSelect()}
+                  >
+                    {ALL_OPERATION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
+                  </select>
+                </td>
+                <td style={{ padding: '6px 10px', textAlign: 'right' }}>
+                  <button onClick={() => {
+                    if (confirm(`Delete ${op.code ?? op.name}?`)) project.removeOperation(garmentId, builtIn, op.id);
+                  }} style={{ ...miniBtn(false), background: 'transparent', color: SW_COLORS.alarm, fontSize: 13 }}>×</button>
+                </td>
+              </tr>
+            ))}
+            {garment.operations.length === 0 && (
+              <tr>
+                <td colSpan={9} style={{ padding: 24, textAlign: 'center', color: SW_COLORS.muted, fontSize: 12, fontStyle: 'italic' }}>
+                  No operations yet. Click <strong style={{ color: SW_COLORS.ink }}>+ Add operation</strong> below.
+                </td>
+              </tr>
+            )}
+          </tbody>
+        </table>
+        <div style={{ padding: '10px 14px', borderTop: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep }}>
+          <Button variant="primary" size="sm" icon="+" onClick={addOp}>Add operation</Button>
+        </div>
+      </Card>
+
+      <div style={{ padding: 12, background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontSize: 12, color: SW_COLORS.muted, lineHeight: 1.5 }}>
+        Edits flow live to <strong style={{ color: SW_COLORS.ink }}>LiveSim</strong>, the <strong style={{ color: SW_COLORS.ink }}>Yamazumi chart</strong> on Reports, the
+        <strong style={{ color: SW_COLORS.ink }}> Factory Twin's run-line</strong>, and the <strong style={{ color: SW_COLORS.ink }}>skill matrix</strong>. Total SAM auto-recomputes on every change.
+        Built-in garments restore their defaults via <em>Reset to built-in</em>; custom garments live entirely in your project file.
+      </div>
+    </div>
+  );
+}
+
+function miniBtn(disabled: boolean): React.CSSProperties {
+  return {
+    width: 22, height: 22, marginRight: 2,
+    background: disabled ? SW_COLORS.paperEdge : SW_COLORS.paper,
+    color: disabled ? SW_COLORS.faint : SW_COLORS.ink,
+    border: `1px solid ${SW_COLORS.line}`,
+    borderRadius: 4,
+    cursor: disabled ? 'not-allowed' : 'pointer',
+    fontSize: 11,
+    fontWeight: 800,
+    fontFamily: SW_FONTS.mono,
+  };
+}
+
+function cellInput(width: number): React.CSSProperties {
+  return {
+    width,
+    padding: '5px 7px',
+    border: `1px solid ${SW_COLORS.line}`,
+    borderRadius: 4,
+    fontFamily: SW_FONTS.body,
+    fontSize: 12,
+    fontWeight: 600,
+    background: SW_COLORS.paper,
+    color: SW_COLORS.ink,
+  };
+}
+
+function cellSelect(): React.CSSProperties {
+  return {
+    padding: '5px 6px',
+    border: `1px solid ${SW_COLORS.line}`,
+    borderRadius: 4,
+    fontFamily: SW_FONTS.mono,
+    fontSize: 11,
+    fontWeight: 600,
+    background: SW_COLORS.paper,
+    color: SW_COLORS.ink,
+    cursor: 'pointer',
+  };
+}
+
 // ── Skill matrix ────────────────────────────────────────────────────────────
 
 interface SkillMatrixPanelProps {
@@ -259,6 +527,7 @@ interface SkillMatrixPanelProps {
   skillMatrix: Record<string, Record<string, number>>;
   setSkill: (operatorId: string, opId: string, efficiency: number) => void;
   resetSkillMatrix: () => void;
+  garments: EffectiveGarments;
 }
 
 /**
@@ -273,9 +542,9 @@ interface SkillMatrixPanelProps {
  * grey (0 = ineligible). Click any cell to type a new value.
  */
 function SkillMatrixPanel({
-  operators, garmentId, setGarmentId, skillMatrix, setSkill, resetSkillMatrix,
+  operators, garmentId, setGarmentId, skillMatrix, setSkill, resetSkillMatrix, garments,
 }: SkillMatrixPanelProps) {
-  const garment = GARMENT_TEMPLATES[garmentId];
+  const garment = garments.byId[garmentId] ?? garments.all[0];
   const ops = garment.operations;
 
   function defaultEfficiency(arch: WorkerArchetype, opSkill: SkillId): number {
@@ -302,7 +571,7 @@ function SkillMatrixPanel({
       <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
         <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
           <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>GARMENT</span>
-          <ToggleGroup value={garmentId} onChange={setGarmentId} options={ALL_GARMENT_TEMPLATES.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
+          <ToggleGroup value={garmentId} onChange={setGarmentId} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
         </div>
         <div style={{ flex: 1 }}/>
         <div style={{ display:'flex', alignItems:'center', gap: 14, fontSize: 11, fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>

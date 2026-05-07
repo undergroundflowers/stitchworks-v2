@@ -10,6 +10,7 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
+import type { GarmentTemplate, Operation } from '../domain';
 
 export const PROJECT_SCHEMA_VERSION = 1 as const;
 
@@ -124,6 +125,14 @@ export interface ProjectState {
   /** Multi-line factory structure consumed by the Factory Twin. */
   factory: FactoryStructure;
 
+  /**
+   * User edits to garment templates — per-garment overrides that shadow
+   * the built-in `GARMENT_TEMPLATES`. Editing a built-in (e.g. SMV change)
+   * clones it into here. Custom garments created from scratch live here
+   * too (with ids that don't collide with built-ins).
+   */
+  garmentEdits: Record<string, GarmentTemplate>;
+
   // ── Mutators ─────────────────────────────────────────────────────────────
   rename: (name: string) => void;
   setSelectedGarment: (id: string) => void;
@@ -162,6 +171,48 @@ export interface ProjectState {
   updateLine: (id: string, patch: Partial<Omit<Line, 'id' | 'floorId'>>) => void;
   /** Cache a fresh KPI snapshot on a line (called by Twin's Run-line). */
   setLineKpis: (id: string, kpis: ScenarioKpis) => void;
+
+  // ── Garment / operation library ──────────────────────────────────────────
+  /** Replace (or seed) an entire garment edit. Used when adding a brand-new
+   *  garment from scratch and when the editor wants to commit a wholesale
+   *  change. */
+  setGarmentEdit: (id: string, garment: GarmentTemplate) => void;
+  /** Patch top-level garment fields (name, description, defaultBundleSize,
+   *  bestFor, totalSmv, hourlyTarget100). Auto-clones the built-in into
+   *  `garmentEdits` if it isn't there yet. */
+  patchGarment: (
+    id: string,
+    builtIn: GarmentTemplate | undefined,
+    patch: Partial<Omit<GarmentTemplate, 'operations'>>,
+  ) => void;
+  /** Update one operation on a garment. */
+  updateOperation: (
+    garmentId: string,
+    builtIn: GarmentTemplate | undefined,
+    opId: string,
+    patch: Partial<Operation>,
+  ) => void;
+  /** Append a new operation. */
+  addOperation: (
+    garmentId: string,
+    builtIn: GarmentTemplate | undefined,
+    op: Operation,
+  ) => void;
+  /** Remove an operation by id. */
+  removeOperation: (
+    garmentId: string,
+    builtIn: GarmentTemplate | undefined,
+    opId: string,
+  ) => void;
+  /** Shift an operation up (-1) or down (+1) in the bulletin. */
+  moveOperation: (
+    garmentId: string,
+    builtIn: GarmentTemplate | undefined,
+    opId: string,
+    dir: -1 | 1,
+  ) => void;
+  /** Drop the override for a garment id; built-in default returns. */
+  resetGarment: (id: string) => void;
 
   // ── Project actions ──────────────────────────────────────────────────────
   /** Wipe everything back to defaults. Caller should confirm first. */
@@ -231,6 +282,13 @@ const defaults: Omit<
   | 'removeLine'
   | 'updateLine'
   | 'setLineKpis'
+  | 'setGarmentEdit'
+  | 'patchGarment'
+  | 'updateOperation'
+  | 'addOperation'
+  | 'removeOperation'
+  | 'moveOperation'
+  | 'resetGarment'
 > = {
   schemaVersion: PROJECT_SCHEMA_VERSION,
   meta: defaultMeta(),
@@ -241,7 +299,25 @@ const defaults: Omit<
   skillMatrix: {},
   scenarios: [],
   factory: defaultFactory(),
+  garmentEdits: {},
 };
+
+/** Re-derive totalSmv after operations change. */
+function recomputeSmv(g: GarmentTemplate): GarmentTemplate {
+  return { ...g, totalSmv: g.operations.reduce((s, o) => s + o.smv, 0) };
+}
+
+/** Clone the built-in into garmentEdits if no edit exists yet. */
+function ensureEdit(
+  edits: Record<string, GarmentTemplate>,
+  id: string,
+  builtIn: GarmentTemplate | undefined,
+): { edits: Record<string, GarmentTemplate>; current: GarmentTemplate | undefined } {
+  if (edits[id]) return { edits, current: edits[id] };
+  if (!builtIn) return { edits, current: undefined };
+  const clone = JSON.parse(JSON.stringify(builtIn)) as GarmentTemplate;
+  return { edits: { ...edits, [id]: clone }, current: clone };
+}
 
 function touch<T extends ProjectState>(s: T): T {
   return { ...s, meta: { ...s.meta, modifiedAt: new Date().toISOString() } };
@@ -417,6 +493,73 @@ export const useProject = create<ProjectState>()(
           }),
         ),
 
+      setGarmentEdit: (id, garment) =>
+        set((s) => touch({ ...s, garmentEdits: { ...s.garmentEdits, [id]: recomputeSmv(garment) } })),
+
+      patchGarment: (id, builtIn, patch) =>
+        set((s) => {
+          const { edits, current } = ensureEdit(s.garmentEdits, id, builtIn);
+          if (!current) return s;
+          return touch({
+            ...s,
+            garmentEdits: { ...edits, [id]: recomputeSmv({ ...current, ...patch }) },
+          });
+        }),
+
+      updateOperation: (garmentId, builtIn, opId, patch) =>
+        set((s) => {
+          const { edits, current } = ensureEdit(s.garmentEdits, garmentId, builtIn);
+          if (!current) return s;
+          const next = recomputeSmv({
+            ...current,
+            operations: current.operations.map((o) => (o.id === opId ? { ...o, ...patch } : o)),
+          });
+          return touch({ ...s, garmentEdits: { ...edits, [garmentId]: next } });
+        }),
+
+      addOperation: (garmentId, builtIn, op) =>
+        set((s) => {
+          const { edits, current } = ensureEdit(s.garmentEdits, garmentId, builtIn);
+          if (!current) return s;
+          const next = recomputeSmv({
+            ...current,
+            operations: [...current.operations, op],
+          });
+          return touch({ ...s, garmentEdits: { ...edits, [garmentId]: next } });
+        }),
+
+      removeOperation: (garmentId, builtIn, opId) =>
+        set((s) => {
+          const { edits, current } = ensureEdit(s.garmentEdits, garmentId, builtIn);
+          if (!current) return s;
+          const next = recomputeSmv({
+            ...current,
+            operations: current.operations.filter((o) => o.id !== opId),
+          });
+          return touch({ ...s, garmentEdits: { ...edits, [garmentId]: next } });
+        }),
+
+      moveOperation: (garmentId, builtIn, opId, dir) =>
+        set((s) => {
+          const { edits, current } = ensureEdit(s.garmentEdits, garmentId, builtIn);
+          if (!current) return s;
+          const idx = current.operations.findIndex((o) => o.id === opId);
+          if (idx < 0) return s;
+          const j = idx + dir;
+          if (j < 0 || j >= current.operations.length) return s;
+          const ops = current.operations.slice();
+          [ops[idx], ops[j]] = [ops[j], ops[idx]];
+          const next = recomputeSmv({ ...current, operations: ops });
+          return touch({ ...s, garmentEdits: { ...edits, [garmentId]: next } });
+        }),
+
+      resetGarment: (id) =>
+        set((s) => {
+          const next = { ...s.garmentEdits };
+          delete next[id];
+          return touch({ ...s, garmentEdits: next });
+        }),
+
       resetProject: () =>
         set(() => ({
           ...defaults,
@@ -440,6 +583,13 @@ export const useProject = create<ProjectState>()(
           removeLine: get().removeLine,
           updateLine: get().updateLine,
           setLineKpis: get().setLineKpis,
+          setGarmentEdit: get().setGarmentEdit,
+          patchGarment: get().patchGarment,
+          updateOperation: get().updateOperation,
+          addOperation: get().addOperation,
+          removeOperation: get().removeOperation,
+          moveOperation: get().moveOperation,
+          resetGarment: get().resetGarment,
           resetProject: get().resetProject,
           loadProject: get().loadProject,
           exportProject: get().exportProject,
@@ -465,6 +615,7 @@ export const useProject = create<ProjectState>()(
           skillMatrix: s.skillMatrix ?? {},
           scenarios: s.scenarios ?? [],
           factory: s.factory ?? defaultFactory(),
+          garmentEdits: s.garmentEdits ?? {},
         }));
         return { ok: true };
       },
@@ -481,6 +632,7 @@ export const useProject = create<ProjectState>()(
           skillMatrix: s.skillMatrix,
           scenarios: s.scenarios,
           factory: s.factory,
+          garmentEdits: s.garmentEdits,
         } as ProjectState;
       },
     }),
@@ -499,6 +651,7 @@ export const useProject = create<ProjectState>()(
         skillMatrix: state.skillMatrix,
         scenarios: state.scenarios,
         factory: state.factory,
+        garmentEdits: state.garmentEdits,
       }),
     },
   ),
