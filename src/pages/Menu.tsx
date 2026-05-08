@@ -42,14 +42,14 @@ export function MenuPage() {
             Build it.<br/>Run it.<br/><span style={{ color: SW_COLORS.brand }}>Optimize it.</span>
           </h1>
           <p style={{ fontSize: 16, color: SW_COLORS.muted, marginTop: 16, maxWidth: 480, lineHeight: 1.5 }}>
-            A complete digital twin of your apparel production floor. Place machines, hire operators, run simulations across all 9 production systems, and watch your KPIs respond in real-time.
+            A complete flexible digital twin for your apparel production floor that scales as your enterprises scale.
           </p>
         </div>
 
         {/* Continue / New */}
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <Button variant="primary" size="lg" onClick={() => navigate('/floor')} icon="▶">
-            CONTINUE — {game.factoryName}
+          <Button variant="primary" size="lg" onClick={() => navigate('/builder')} icon="+">
+            CREATE NEW DIGITAL FACTORY
           </Button>
           <Button variant="secondary" size="lg" onClick={() => navigate('/scenarios')} icon="✦">
             NEW SCENARIO
@@ -59,21 +59,14 @@ export function MenuPage() {
         {/* Save slots */}
         <div style={{ marginTop: 8 }}>
           <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1.5px', marginBottom: 8 }}>
-            SAVED FACTORIES · 3 / 5
+            SAVED FACTORIES · 1 / 5
           </div>
           <div style={{ display: 'flex', gap: 10 }}>
             {[
-              { name: 'Stitchworks Demo', mode: 'CAMPAIGN', day: 14, eff: 78 },
-              { name: 'Polo Run #4',       mode: 'SCENARIO', day: 3,  eff: 91 },
-              { name: 'Test Bench',        mode: 'SANDBOX',  day: 1,  eff: 64 },
+              { name: 'Test Factory', day: 14, eff: 78 },
             ].map((slot, i) => (
-              <Card key={i} hover padding={14} style={{ flex: 1, minWidth: 0 }} onClick={() => navigate('/twin')}>
-                <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6 }}>
-                  <Tag soft color={
-                    slot.mode === 'CAMPAIGN' ? SW_COLORS.brand :
-                    slot.mode === 'SCENARIO' ? SW_COLORS.bobbin :
-                    SW_COLORS.fabric
-                  }>{slot.mode}</Tag>
+              <Card key={i} hover padding={14} style={{ flex: 1, minWidth: 0 }} onClick={() => navigate('/builder')}>
+                <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 6 }}>
                   <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>D{slot.day}</span>
                 </div>
                 <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
@@ -90,14 +83,6 @@ export function MenuPage() {
           </div>
         </div>
 
-        <div style={{ marginTop: 'auto', display: 'flex', gap: 18, fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
-          <span style={{ cursor: 'pointer' }} onClick={() => navigate('/settings')}>SETTINGS</span>
-          <span>·</span>
-          <span style={{ cursor: 'pointer' }}>HELP</span>
-          <span>·</span>
-          <span style={{ cursor: 'pointer' }}>CHANGELOG</span>
-          <span style={{ marginLeft: 'auto' }}>BUILD 0.4.2 · OFFLINE</span>
-        </div>
       </div>
 
       {/* RIGHT: live status + achievements + isometric thumbnail */}
@@ -151,34 +136,19 @@ export function MenuPage() {
           ))}
         </Card>
 
-        {/* Recent achievements */}
-        <Card padding={16}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 13, fontWeight: 900 }}>RECENT BADGES</div>
-            <span style={{ fontSize: 11, color: SW_COLORS.brand, fontWeight: 700, cursor: 'pointer' }}>View all →</span>
-          </div>
-          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 8 }}>
-            {[
-              { icon: '⚡', label: 'Bottleneck Buster', when: 'D12', color: SW_COLORS.thread, locked: false },
-              { icon: '◆', label: 'Zero Defects',      when: 'D10', color: SW_COLORS.fabric, locked: false },
-              { icon: '⚙', label: 'Modular Master',    when: 'D8',  color: SW_COLORS.bobbin, locked: false },
-              { icon: '?', label: 'Locked',            when: '—',   color: SW_COLORS.faint,  locked: true  },
-            ].map((a, i) => (
-              <div key={i} style={{
-                textAlign: 'center', padding: '10px 4px',
-                background: a.locked ? SW_COLORS.paperDeep : SW_COLORS.paper,
-                border: `1px solid ${a.locked ? SW_COLORS.line : a.color + '40'}`,
-                borderRadius: SW_RADIUS.sm,
-                opacity: a.locked ? 0.5 : 1,
-              }}>
-                <div style={{ fontSize: 22, color: a.color, marginBottom: 4 }}>{a.icon}</div>
-                <div style={{ fontSize: 10, fontWeight: 700, color: SW_COLORS.ink, lineHeight: 1.2 }}>{a.label}</div>
-                <div style={{ fontSize: 9, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop: 2 }}>{a.when}</div>
-              </div>
-            ))}
-          </div>
-        </Card>
       </div>
+
+      <span style={{
+        position: 'fixed',
+        bottom: 16,
+        right: 20,
+        fontSize: 11,
+        color: SW_COLORS.muted,
+        fontFamily: SW_FONTS.mono,
+        pointerEvents: 'none',
+      }}>
+        BUILD 0.4.2 · OFFLINE
+      </span>
     </div>
   );
 }

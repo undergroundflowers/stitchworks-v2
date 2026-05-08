@@ -1,12 +1,8 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Button, Stat, SectionHeader, ToggleGroup, Tag } from '../components';
-import { useState, useMemo, type ReactNode } from 'react';
+import { Button, Stat, SectionHeader, ToggleGroup, Tag, FactoryTreePanel } from '../components';
+import { useState, useMemo } from 'react';
 import { useNavigate } from 'react-router-dom';
-import {
-  ALL_PRODUCTION_SYSTEMS,
-  PRODUCTION_SYSTEMS,
-  type ProductionSystem,
-} from '../domain';
+import { ALL_PRODUCTION_SYSTEMS } from '../domain';
 import { buildSimConfig, efficiencyFromSkillMatrix, Sim } from '../simulation';
 import { useProject, useGarments, type Line, type Floor, type EffectiveGarments } from '../store';
 
@@ -29,7 +25,7 @@ const SHIFT_MIN = 480;
  */
 export function FactoryTwinPage() {
   const navigate = useNavigate();
-  const project = useProject((s) => s);
+  const project = useProject();
   const garments = useGarments();
   const factory = project.factory;
 
@@ -96,67 +92,17 @@ export function FactoryTwinPage() {
   return (
     <div style={{ width:'100%', height:'100%', display:'grid', gridTemplateColumns: '300px 1fr 340px', background: SW_COLORS.paperDeep }}>
       {/* LEFT — tree */}
-      <div style={{ borderRight: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paper, overflow: 'auto', padding: 16 }}>
-        <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 8 }}>
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1.5px' }}>FACTORY TREE</div>
-          <Button variant="ghost" size="sm" onClick={runAllLines} icon="▶">Run all</Button>
-        </div>
-
-        <TreeNode
-          label={project.meta.name || 'STITCHWORKS DEMO'}
-          sub={`${factory.floors.length} floors · ${factory.lines.length} lines`}
-          expanded
-          active={zoom === 'factory'}
-          onClick={() => setZoom('factory')}
-        >
-          {factory.floors.map((f) => {
-            const floorLines = factory.lines.filter((l) => l.floorId === f.id);
-            return (
-              <TreeNode key={f.id} indent={1}
-                label={f.name}
-                sub={`${floorLines.length} line${floorLines.length === 1 ? '' : 's'}`}
-                expanded={selFloorId === f.id}
-                onClick={() => { setZoom('floor'); setSelFloorId(f.id); }}
-                active={zoom === 'floor' && selFloorId === f.id}
-                actions={
-                  <button
-                    onClick={(e) => { e.stopPropagation(); promptAddLine(project, f.id, () => { /* refresh-via-store */ }); }}
-                    style={{ background:'transparent', border:'none', color: SW_COLORS.muted, cursor:'pointer', fontSize: 14, fontWeight: 800, padding: 0 }}
-                    title="Add line to this floor"
-                  >+</button>
-                }
-              >
-                {floorLines.map((l) => {
-                  const garment = garments.byId[l.garmentTemplateId];
-                  return (
-                    <TreeNode key={l.id} indent={2}
-                      label={l.name}
-                      sub={`${garment?.name.replace(/\s*\(.*\)/, '') ?? l.garmentTemplateId} · ${l.operators} ops · ${PRODUCTION_SYSTEMS[l.productionSystem as ProductionSystem]?.short ?? l.productionSystem}`}
-                      onClick={() => { setZoom('line'); setSelFloorId(f.id); setSelLineId(l.id); }}
-                      active={zoom === 'line' && selLineId === l.id}
-                      hasKpis={!!l.lastKpis}
-                    />
-                  );
-                })}
-              </TreeNode>
-            );
-          })}
-        </TreeNode>
-
-        <div style={{ marginTop: 24, fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1.5px', marginBottom: 8 }}>OVERLAYS</div>
-        {[
-          { id:'heat', label:'Bottleneck heat',       color: SW_COLORS.alarm,  on: true  },
-          { id:'wip',  label:'WIP density',           color: SW_COLORS.thread, on: true  },
-          { id:'op',   label:'Operator utilization',  color: SW_COLORS.bobbin, on: false },
-          { id:'qual', label:'Defect zones',          color: SW_COLORS.press,  on: false },
-        ].map(ov => (
-          <label key={ov.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 0', cursor:'pointer', fontSize:12, fontWeight:600, color: SW_COLORS.ink }}>
-            <input type="checkbox" defaultChecked={ov.on} style={{ accentColor: ov.color }}/>
-            <span style={{ width:8, height:8, background: ov.color, borderRadius:2 }}/>
-            {ov.label}
-          </label>
-        ))}
-      </div>
+      <FactoryTreePanel
+        activeMode={zoom}
+        activeFloorId={selFloorId}
+        activeLineId={selLineId}
+        expandedFloorId={selFloorId}
+        onPickFactory={() => setZoom('factory')}
+        onPickFloor={(id) => { setZoom('floor'); setSelFloorId(id); }}
+        onPickLine={(id, l) => { setZoom('line'); setSelFloorId(l.floorId); setSelLineId(id); }}
+        onAddLine={(floorId) => promptAddLine(project, floorId, () => { /* refresh-via-store */ })}
+        onRunAll={runAllLines}
+      />
 
       {/* CENTER — viewport */}
       <div style={{ position:'relative', overflow:'hidden', display:'flex', flexDirection:'column' }}>
@@ -176,7 +122,6 @@ export function FactoryTwinPage() {
             {zoom === 'line' && (selLine ? `${selLine.name} — close-up` : '—')}
           </div>
           <div style={{ flex:1 }}/>
-          <Button variant="secondary" size="sm" icon="↻">Reset view</Button>
           <Button variant="dark" size="sm" icon="▶" onClick={()=>navigate('/sim')}>Open in sim</Button>
         </div>
 
@@ -185,11 +130,6 @@ export function FactoryTwinPage() {
           linear-gradient(90deg, ${SW_COLORS.paperEdge}30 1px, transparent 1px),
           ${SW_COLORS.paperDeep}
         `, backgroundSize:'24px 24px' }}>
-          {zoom === 'factory' && (
-            <FactoryView factory={factory} garments={garments}
-              onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); setSelFloorId(l.floorId); }}
-              onRunLine={runLine}/>
-          )}
           {zoom === 'floor' && selFloor && (
             <FloorView floor={selFloor} garments={garments} lines={factory.lines.filter((l) => l.floorId === selFloor.id)}
               onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); }}
@@ -221,7 +161,7 @@ export function FactoryTwinPage() {
         <SectionHeader
           kicker="Inspector"
           title={
-            zoom === 'factory' ? (project.meta.name || 'STITCHWORKS DEMO')
+            zoom === 'factory' ? (project.meta.name || 'Test Factory')
             : zoom === 'floor' ? (selFloor?.name ?? 'Floor')
             : (selLine?.name ?? 'Line')
           }
@@ -241,6 +181,11 @@ export function FactoryTwinPage() {
               {rollup.ranLines === 0
                 ? 'No lines have run yet. Click "Run all" in the tree to populate KPIs across the factory.'
                 : `${rollup.ranLines} of ${rollup.lines} lines have cached KPIs. Throughput is summed; efficiency is operator-weighted.`}
+            </div>
+            <div style={{ margin: '14px -16px -16px -16px' }}>
+              <FactoryView factory={factory} garments={garments}
+                onPickLine={(l) => { setZoom('line'); setSelLineId(l.id); setSelFloorId(l.floorId); }}
+                onRunLine={runLine}/>
             </div>
           </>
         )}
@@ -283,95 +228,6 @@ export function FactoryTwinPage() {
   );
 }
 
-// ── Tree node ────────────────────────────────────────────────────────────────
-
-interface TreeNodeProps {
-  label: string;
-  sub?: string;
-  indent?: number;
-  expanded?: boolean;
-  children?: ReactNode;
-  onClick?: () => void;
-  active?: boolean;
-  /** Show a small green dot if cached KPIs exist on this leaf. */
-  hasKpis?: boolean;
-  actions?: ReactNode;
-}
-
-function TreeNode({ label, sub, indent = 0, expanded, children, onClick, active, hasKpis, actions }: TreeNodeProps) {
-  return (
-    <div>
-      <div onClick={onClick} style={{
-        display:'flex', alignItems:'center', gap:8,
-        padding:'6px 8px', borderRadius: SW_RADIUS.sm,
-        marginLeft: indent * 14,
-        background: active ? SW_COLORS.brandLite : 'transparent',
-        cursor: 'pointer',
-        borderLeft: active ? `3px solid ${SW_COLORS.brand}` : '3px solid transparent',
-      }}>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>{children ? '▾' : '·'}</span>
-        <div style={{ flex: 1, minWidth: 0 }}>
-          <div style={{ fontFamily: SW_FONTS.body, fontWeight: 700, fontSize: 12, color: SW_COLORS.ink, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{label}</div>
-          {sub && <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600 }}>{sub}</div>}
-        </div>
-        {hasKpis && <span style={{ width: 6, height: 6, borderRadius: '50%', background: SW_COLORS.ok }} title="Cached KPIs"/>}
-        {actions}
-      </div>
-      {expanded && children}
-    </div>
-  );
-}
-
-// ── Animated flow banner ────────────────────────────────────────────────────
-
-/**
- * SVG strip showing material moving across the factory: fabric receiving →
- * cutting → sewing → finishing → dispatch. Decorative; the real per-line
- * KPIs are below it. Five colour-coded dots travel along the same path,
- * staggered, so there's always something moving.
- */
-function FlowAnimation() {
-  const stages = [
-    { label: 'FABRIC',    color: SW_COLORS.fabric },
-    { label: 'CUTTING',   color: SW_COLORS.press },
-    { label: 'SEWING',    color: SW_COLORS.brand },
-    { label: 'FINISHING', color: SW_COLORS.thread },
-    { label: 'DISPATCH',  color: SW_COLORS.ship },
-  ];
-  const W = 1000;
-  const H = 64;
-  const padX = 40;
-  const innerW = W - padX * 2;
-  const stageX = (i: number) => padX + (innerW * i) / (stages.length - 1);
-  const y = H / 2;
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width: '100%', height: H, display: 'block' }}>
-      {/* path */}
-      <line x1={padX} y1={y} x2={W - padX} y2={y} stroke={SW_COLORS.line} strokeWidth={2}/>
-      {/* stage markers */}
-      {stages.map((s, i) => (
-        <g key={s.label} transform={`translate(${stageX(i)}, ${y})`}>
-          <circle r={9} fill="#fff" stroke={s.color} strokeWidth={2}/>
-          <circle r={4} fill={s.color}/>
-          <text x={0} y={26} textAnchor="middle" fill={SW_COLORS.muted} fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700}>{s.label}</text>
-        </g>
-      ))}
-      {/* travelling bundle dots */}
-      {[0, 1, 2, 3, 4].map((i) => (
-        <circle key={i} r={4} fill={stages[i % stages.length].color}>
-          <animateMotion
-            dur={`${6 + i * 0.6}s`}
-            begin={`${i * 1.0}s`}
-            repeatCount="indefinite"
-            path={`M ${padX} ${y} L ${W - padX} ${y}`}
-          />
-        </circle>
-      ))}
-    </svg>
-  );
-}
-
 // ── Factory view (zoom = factory) ───────────────────────────────────────────
 
 interface FactoryViewProps {
@@ -382,20 +238,8 @@ interface FactoryViewProps {
 }
 
 function FactoryView({ factory, garments, onPickLine, onRunLine }: FactoryViewProps) {
-  // Animated flow banner — visualises material moving across floors as a
-  // continuous pipeline: cutting → sewing → finishing → dispatch.
-  const flow = (
-    <div style={{ marginBottom: 18, padding: '12px 16px', background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.md, overflow: 'hidden' }}>
-      <div style={{ display:'flex', alignItems:'center', justifyContent:'space-between', marginBottom: 6 }}>
-        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1px' }}>FACTORY FLOW</div>
-        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>fabric in → garments out</div>
-      </div>
-      <FlowAnimation/>
-    </div>
-  );
   return (
     <div style={{ padding: 24, display:'flex', flexDirection:'column', gap: 18 }}>
-      {flow}
       {factory.floors.map((floor) => {
         const lines = factory.lines.filter((l) => l.floorId === floor.id);
         return (

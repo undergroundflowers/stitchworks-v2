@@ -7,7 +7,7 @@ import { ALL_GARMENT_TEMPLATES } from '../domain';
 
 export function SettingsPage() {
   const navigate = useNavigate();
-  const project = useProject((s) => s);
+  const project = useProject();
   const [importMsg, setImportMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
 
   // Local UI state for the simulation sliders — these are presentational
@@ -172,7 +172,7 @@ export function SettingsPage() {
 
         <div style={{ marginTop: 18, display: 'flex', justifyContent: 'flex-end', gap: 8 }}>
           <Button variant="secondary" onClick={() => navigate('/')}>Back to menu</Button>
-          <Button variant="primary" onClick={() => navigate('/twin')}>Save</Button>
+          <Button variant="primary" onClick={() => navigate('/builder')}>Save</Button>
         </div>
       </div>
     </div>

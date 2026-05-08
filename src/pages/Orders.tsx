@@ -30,7 +30,7 @@ interface OrderState {
  */
 export function OrdersPage() {
   const navigate = useNavigate();
-  const project = useProject((s) => s);
+  const project = useProject();
   const garments = useGarments();
   const [order, setOrder] = useState<OrderState>({
     po: 'PO-4422',
@@ -48,7 +48,7 @@ export function OrdersPage() {
    * then navigate. Downstream pages (LiveSim, Reports, Resources skill tab)
    * pick the new defaults up automatically.
    */
-  function commit(target: '/layout' | '/sim') {
+  function commit(target: '/sim') {
     project.setSelectedGarment(order.garmentTemplateId);
     project.setDefaultOperators(crewSize);
     navigate(target);
@@ -77,7 +77,7 @@ export function OrdersPage() {
       <div style={{ maxWidth: 1180, margin:'0 auto' }}>
         <SectionHeader kicker="Plan a job" title="New production order"
           sub="Enter order specs. We'll suggest the line, system and crew based on the garment template's SAM."
-          right={<Button variant="dark" onClick={()=>navigate('/twin')}>Cancel</Button>}
+          right={<Button variant="dark" onClick={()=>navigate('/builder')}>Cancel</Button>}
         />
 
         <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:18 }}>
@@ -176,8 +176,7 @@ export function OrdersPage() {
         </div>
 
         <div style={{ marginTop: 18, display:'flex', justifyContent:'flex-end', gap:10, flexWrap:'wrap' }}>
-          <Button variant="secondary" onClick={()=>navigate('/twin')}>Save draft</Button>
-          <Button variant="secondary" size="lg" onClick={() => commit('/layout')}>Plan line layout →</Button>
+          <Button variant="secondary" onClick={()=>navigate('/builder')}>Save draft</Button>
           <Button variant="primary" size="lg" onClick={() => commit('/sim')}>Run simulation →</Button>
         </div>
       </div>

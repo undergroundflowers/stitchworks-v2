@@ -22,7 +22,7 @@ export interface GameState {
 }
 
 export const INITIAL_GAME: GameState = {
-  factoryName: 'STITCHWORKS DEMO',
+  factoryName: 'Test Factory',
   level: 7,
   xp: 2840,
   xpForNext: 4000,

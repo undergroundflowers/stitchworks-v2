@@ -20,7 +20,7 @@ type Mode = 'list' | 'compare';
  */
 export function ScenariosPage() {
   const navigate = useNavigate();
-  const project = useProject((s) => s);
+  const project = useProject();
   const garments = useGarments();
   const scenarios = project.scenarios;
 
@@ -41,7 +41,7 @@ export function ScenariosPage() {
   function handleLoad(s: Scenario) {
     if (!confirm(`Load "${s.name}"? This replaces the current factory's garment, operators, skill matrix and Yamazumi assignment.`)) return;
     project.loadScenario(s.id);
-    navigate('/kpi');
+    navigate('/sim');
   }
 
   function handleDelete(s: Scenario) {
@@ -69,14 +69,14 @@ export function ScenariosPage() {
         <SectionHeader
           kicker="Scenarios"
           title={scenarios.length === 0 ? 'No saved scenarios yet' : `${scenarios.length} saved scenario${scenarios.length === 1 ? '' : 's'}`}
-          sub="Save a sim run from Reports as a named scenario, then compare scenarios side-by-side to find the layout / staffing / system that wins on the KPIs you care about."
+          sub="Save a sim run from Simulation as a named scenario, then compare scenarios side-by-side to find the layout / staffing / system that wins on the KPIs you care about."
           right={
             <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
               <ToggleGroup value={mode} onChange={setMode} options={[
                 { value: 'list',    label: '◰ List' },
                 { value: 'compare', label: `◇ Compare${selected.length > 0 ? ` (${selected.length})` : ''}` },
               ]}/>
-              <Button variant="primary" size="sm" icon="✦" onClick={() => navigate('/kpi')}>
+              <Button variant="primary" size="sm" icon="✦" onClick={() => navigate('/sim')}>
                 Run shift to save
               </Button>
             </div>
@@ -90,12 +90,12 @@ export function ScenariosPage() {
               Capture your first scenario
             </div>
             <div style={{ fontSize: 13, color: SW_COLORS.muted, maxWidth: 540, margin: '0 auto', lineHeight: 1.6 }}>
-              Open <strong style={{ color: SW_COLORS.ink }}>Reports</strong>, configure the garment / operator count / skill matrix / Yamazumi
+              Open <strong style={{ color: SW_COLORS.ink }}>Simulation</strong>, configure the garment / operator count / skill matrix / Yamazumi
               assignment you want to evaluate, then click <strong style={{ color: SW_COLORS.ink }}>Save scenario</strong>. The current
               KPIs and configuration are stored together so you can compare runs apples-to-apples later.
             </div>
             <div style={{ marginTop: 18 }}>
-              <Button variant="primary" onClick={() => navigate('/kpi')}>Open Reports →</Button>
+              <Button variant="primary" onClick={() => navigate('/sim')}>Open Simulation →</Button>
             </div>
           </Card>
         )}

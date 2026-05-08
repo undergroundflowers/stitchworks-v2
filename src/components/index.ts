@@ -8,3 +8,4 @@ export { Progress } from './Progress';
 export { ToggleGroup } from './ToggleGroup';
 export { Slider } from './Slider';
 export { Yamazumi, autoAssign, type OperatorAssignment } from './Yamazumi';
+export { FactoryTreePanel } from './FactoryTreePanel';

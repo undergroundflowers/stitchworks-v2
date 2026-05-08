@@ -24,14 +24,12 @@ export interface RouteDef {
 
 export const ROUTES: RouteDef[] = [
   { path: '/',          id: 'menu',      label: 'MENU',             icon: '⌂', kind: 'special' },
-  { path: '/twin',      id: 'twin',      label: 'Factory Twin',     icon: '◈', kind: 'main' },
   { path: '/floor',     id: 'floor',     label: 'Live Floor',       icon: '⬢', kind: 'main' },
-  { path: '/layout',    id: 'layout',    label: 'Layout Builder',   icon: '▦', kind: 'main' },
-  { path: '/iso',       id: 'iso',       label: 'Iso Builder',      icon: '◆', kind: 'main' },
+  { path: '/iso',       id: 'iso',       label: 'Factory Builder',      icon: '◆', kind: 'main' },
   { path: '/orders',    id: 'orders',    label: 'Orders',           icon: '⎙', kind: 'main' },
-  { path: '/sim',       id: 'sim',       label: 'Live Simulation',  icon: '▷', kind: 'main' },
+  { path: '/sim',       id: 'sim',       label: 'Simulation',       icon: '▷', kind: 'main' },
   { path: '/resources', id: 'resources', label: 'Resources',        icon: '⊟', kind: 'main' },
-  { path: '/kpi',       id: 'kpi',       label: 'Reports',          icon: '⌬', kind: 'main' },
+  { path: '/kpi',       id: 'kpi',       label: 'Reports',          icon: '⌬', kind: 'special' },
   { path: '/scenarios', id: 'scenarios', label: 'Scenarios',        icon: '✦', kind: 'main' },
   { path: '/balance',   id: 'balance',   label: 'Line Balance',     icon: '⚖', kind: 'main' },
   { path: '/settings',  id: 'settings',  label: 'Settings',         icon: '⚙', kind: 'main' },
@@ -43,12 +41,10 @@ export const ROUTES: RouteDef[] = [
  *
  *   /dept/:deptId               department interior (drill-down from Live Floor)
  *   /workstation/:deptId/:wsId  one workstation inside a department
- *   /iso/dept/:deptId           iso builder for a dept
  */
 export const DRILL_PATHS = {
   dept:        (deptId: string) => `/dept/${deptId}`,
   workstation: (deptId: string, wsId: string) => `/workstation/${deptId}/${wsId}`,
-  isoDept:     (deptId: string) => `/iso/dept/${deptId}`,
 } as const;
 
 export const ROUTE_BY_ID: Record<string, RouteDef> = Object.fromEntries(

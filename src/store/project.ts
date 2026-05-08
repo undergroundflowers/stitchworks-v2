@@ -237,7 +237,7 @@ export interface ProjectState {
 function defaultMeta(): ProjectMeta {
   const now = new Date().toISOString();
   return {
-    name: 'Stitchworks Demo',
+    name: 'Test Factory',
     factory: 'Brandix Unit-3',
     createdAt: now,
     modifiedAt: now,

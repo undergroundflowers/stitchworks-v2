@@ -1,917 +1,1319 @@
-import { useState, useEffect, useMemo } from 'react';
+/**
+ * Live Floor — animated, view-mode-toggleable view of the active twin.
+ *
+ * Three views over the same data (departments + workstations from the twin
+ * store):
+ *   • ISO 3D — isometric projection with cuboid fixtures, walking operators,
+ *     moving WIP bundles, and heat-tinted bottlenecks.
+ *   • TOP 2D — flat blueprint top-down view.
+ *   • HEAT  — radial-gradient blobs around each workstation showing
+ *     utilisation pressure.
+ *
+ * Reads:
+ *   - twin store (`useTwin`)  — departments & workstations
+ *   - sim store (`useSim` config built from active garment) — observed util
+ *
+ * This is a presentation/visualisation surface only — authoring lives in
+ * /builder, KPIs live in /kpi.
+ */
+
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { useTwin, selectActiveTwin, type DepartmentColorKey } from '../store/twin';
+import {
+  ISO_FIXTURE_CATALOG,
+  isoProj,
+  ptsToStr,
+  type IsoFixture,
+} from '../domain';
+import type { Department, Workstation } from '../domain/twin';
 
-const FLOOR_W_CELLS = 30;
-const FLOOR_H_CELLS = 16;
+// ============================================================================
+// SHARED HELPERS
+// ============================================================================
 
-const FLOOR_ZONES_DEFAULT = [
-  { id:'fabric',  label:'FABRIC RECEIVING', color:'#FFE9D9', stroke:'#FF5B26', x:0,  y:1,  w:5,  h:4,  roleId:'handler', unitMin:[1.0, 2.5] },
-  { id:'spread',  label:'SPREADING',        color:'#FFF1B8', stroke:'#E5A300', x:0,  y:6,  w:5,  h:4,  roleId:'spreader', unitMin:[0.5, 1.5] },
-  { id:'cut',     label:'CUTTING',          color:'#D7F5E5', stroke:'#1FB36B', x:0,  y:11, w:5,  h:4,  roleId:'cutter',  unitMin:[0.6, 1.4] },
-  { id:'bundle',  label:'BUNDLING',         color:'#E5DBFF', stroke:'#8B5CF6', x:6,  y:1,  w:4,  h:5,  roleId:'bundler', unitMin:[0.4, 1.2] },
-  { id:'sew_a',   label:'SEWING LINE A',    color:'#D6E2FF', stroke:'#4F7CFF', x:11, y:1,  w:14, h:4,  roleId:'sewop',   unitMin:[5.0, 9.0], line:true },
-  { id:'sew_b',   label:'SEWING LINE B',    color:'#D6E2FF', stroke:'#4F7CFF', x:11, y:6,  w:14, h:4,  roleId:'sewop',   unitMin:[5.0, 9.0], line:true },
-  { id:'qc',      label:'INLINE QC',        color:'#FFD7DD', stroke:'#C73E5F', x:11, y:11, w:5,  h:4,  roleId:'qc',      unitMin:[0.4, 1.0] },
-  { id:'press',   label:'PRESSING',         color:'#FFE0E6', stroke:'#E74C3C', x:17, y:11, w:4,  h:4,  roleId:'presser', unitMin:[0.6, 1.4] },
-  { id:'pack',    label:'PACKING',          color:'#CFEFEF', stroke:'#0EA5A4', x:22, y:11, w:4,  h:4,  roleId:'packer',  unitMin:[0.5, 1.0] },
-  { id:'dispatch',label:'DISPATCH',         color:'#E8E2D0', stroke:'#2A3340', x:26, y:1,  w:4,  h:14, roleId:'handler', unitMin:[0.8, 2.0], dock:true },
-] as const;
+type FloorView = 'iso' | 'top' | 'heat';
 
-const FLOOR_ROLES_DEFAULT = [
-  { id:'handler',  label:'Material handlers', icon:'⏍', color:'#FF5B26', count:4, max:12, costHr:6 },
-  { id:'spreader', label:'Spreaders',         icon:'≡', color:'#E5A300', count:3, max:10, costHr:7 },
-  { id:'cutter',   label:'Cutters',           icon:'✂', color:'#1FB36B', count:4, max:12, costHr:9 },
-  { id:'bundler',  label:'Bundlers',          icon:'◫', color:'#8B5CF6', count:3, max:10, costHr:6 },
-  { id:'sewop',    label:'Sewing operators',  icon:'⌃', color:'#4F7CFF', count:24, max:60, costHr:8 },
-  { id:'qc',       label:'QC inspectors',     icon:'◎', color:'#C73E5F', count:3, max:10, costHr:9 },
-  { id:'presser',  label:'Pressers',          icon:'▤', color:'#E74C3C', count:2, max:8,  costHr:7 },
-  { id:'packer',   label:'Packers',           icon:'▣', color:'#0EA5A4', count:3, max:10, costHr:6 },
-];
-
-const FLOOR_TROLLEYS_DEFAULT = 6;
-const FLOOR_TROLLEY_MAX = 14;
-
-type Zone = {
-  id: string;
-  label: string;
-  color: string;
-  stroke: string;
-  x: number;
-  y: number;
-  w: number;
-  h: number;
-  roleId: string;
-  unitMin: readonly [number, number] | number[];
-  line?: boolean;
-  dock?: boolean;
+const DEPT_COLOR_HEX: Record<DepartmentColorKey, string> = {
+  fabric: SW_COLORS.fabric,
+  thread: SW_COLORS.thread,
+  brand: SW_COLORS.brand,
+  red: SW_COLORS.alarm,
+  blue: SW_COLORS.bobbin,
+  yellow: SW_COLORS.thread,
+  green: SW_COLORS.fabric,
+  cream: SW_COLORS.paperEdge,
 };
 
-type Role = {
-  id: string;
-  label: string;
-  icon: string;
-  color: string;
-  count: number;
-  max: number;
-  costHr: number;
-};
-
-type ZoneStatus = 'hot' | 'starved' | 'busy' | 'ok';
-
-type ZoneStateEntry = {
-  staffed: number;
-  ratePerHr: number;
-  util: number;
-  wip: number;
-  status: ZoneStatus;
-};
-
-type ZoneStateMap = Record<string, ZoneStateEntry>;
-
-type OrderParams = {
-  interMin: number;
-  interMax: number;
-  queueCap: number;
-  truckMin: number;
-  truckMax: number;
-};
-
-type ViewMode = 'iso2D' | 'top' | 'heatmap' | 'logic';
-
-type CoachKind = 'warn' | 'info' | 'ok';
-
-type CoachTip = {
-  kind: CoachKind;
-  msg: string;
-  role?: string;
-} | null;
-
-const miniInputStyle: React.CSSProperties = {
-  width: 44, padding:'2px 5px',
-  fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 11,
-  border:`1px solid ${SW_COLORS.line}`, borderRadius: 3,
-  background: '#fff',
-};
-
-const transportBtn: React.CSSProperties = {
-  width: 28, height: 28,
-  background:'transparent', color: SW_COLORS.paper,
-  border:'1px solid #ffffff25',
-  borderRadius: 3, cursor:'pointer',
-  display:'flex', alignItems:'center', justifyContent:'center',
-  fontSize: 12,
-};
-
-const knobStep: React.CSSProperties = {
-  width: 22, height: 22,
-  background: SW_COLORS.ink, color: '#fff',
-  border: 'none', borderRadius: 3, cursor:'pointer',
-  fontFamily: SW_FONTS.display, fontWeight: 900, fontSize: 14,
-  display:'flex', alignItems:'center', justifyContent:'center',
-};
-
-interface KPIProps {
-  label: string;
-  value: number | string;
-  unit: string;
-  tone: 'ok' | 'alarm' | 'thread' | 'bobbin' | 'steel';
+function resolveFixture(id: string): IsoFixture | undefined {
+  return ISO_FIXTURE_CATALOG.find((f) => f.id === id);
 }
 
-function KPI({ label, value, unit, tone }: KPIProps) {
-  const colorMap: Record<KPIProps['tone'], string> = { ok: SW_COLORS.ok, alarm: SW_COLORS.alarm, thread: SW_COLORS.thread, bobbin: SW_COLORS.bobbin, steel: SW_COLORS.steel };
+/** Pseudo-utilisation when no real KPI run yet — derived from a station's
+ *  position so the heatmap looks alive even on a fresh twin. */
+function fakeUtil(ws: Workstation, t: number): number {
+  const seed = (ws.position.x * 13 + ws.position.y * 7) % 100;
+  return 45 + 30 * Math.sin(t * 0.6 + seed) + (seed % 25);
+}
+
+function utilColor(util: number): string {
+  if (util >= 92) return SW_COLORS.alarm;
+  if (util >= 75) return SW_COLORS.warn;
+  return SW_COLORS.ok;
+}
+
+// ============================================================================
+// MAIN PAGE
+// ============================================================================
+
+export function LiveFloorPage() {
+  const navigate = useNavigate();
+  const twin = useTwin(selectActiveTwin);
+  const [view, setView] = useState<FloorView>('iso');
+  const [playing, setPlaying] = useState(true);
+  const [t, setT] = useState(0);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  const [selectedWs, setSelectedWs] = useState<string | null>(null);
+
+  // Animation tick
+  useEffect(() => {
+    if (!playing) return;
+    let raf = 0;
+    let last = performance.now();
+    const loop = (now: number) => {
+      const dt = Math.min(0.05, (now - last) / 1000);
+      last = now;
+      setT((p) => p + dt);
+      raf = requestAnimationFrame(loop);
+    };
+    raf = requestAnimationFrame(loop);
+    return () => cancelAnimationFrame(raf);
+  }, [playing]);
+
+  // Synthetic event log — picks a random hotspot every few seconds.
+  const [events, setEvents] = useState<{ id: number; ws: string; kind: 'breakdown' | 'defect' | 'milestone'; label: string; t: number }[]>([]);
+  useEffect(() => {
+    if (!playing) return;
+    const id = window.setInterval(() => {
+      const ws = twin.workstations[Math.floor(Math.random() * twin.workstations.length)];
+      if (!ws) return;
+      const kinds: Array<{ kind: 'breakdown' | 'defect' | 'milestone'; label: string }> = [
+        { kind: 'breakdown', label: 'NEEDLE BREAK' },
+        { kind: 'defect', label: 'STITCH DEFECT' },
+        { kind: 'milestone', label: 'BUNDLE OUT' },
+        { kind: 'defect', label: 'SKIP STITCH' },
+        { kind: 'milestone', label: 'CLEAR QUEUE' },
+      ];
+      const choice = kinds[Math.floor(Math.random() * kinds.length)];
+      setEvents((prev) => [
+        ...prev.slice(-6),
+        { id: Date.now() + Math.random(), ws: ws.id, ...choice, t: Date.now() },
+      ]);
+    }, 4000);
+    return () => clearInterval(id);
+  }, [playing, twin.workstations]);
+
+  const hotIds = useMemo(() => {
+    const set = new Set<string>();
+    events.slice(-3).forEach((e) => {
+      if (e.kind !== 'milestone') set.add(e.ws);
+    });
+    return set;
+  }, [events]);
+
+  const elapsed = Math.floor(t);
+  const hr = 8 + Math.floor(elapsed / 60);
+  const mn = (elapsed % 60).toString().padStart(2, '0');
+
+  const empty = twin.departments.length === 0;
+
   return (
-    <div style={{ background: SW_COLORS.paperDeep, padding: 8, borderRadius: SW_RADIUS.sm }}>
-      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1px' }}>{label}</div>
-      <div style={{ display:'flex', alignItems:'baseline', gap:4, marginTop:2 }}>
-        <div style={{ fontFamily: SW_FONTS.display, fontSize: 22, fontWeight: 900, color: colorMap[tone] || SW_COLORS.steel, letterSpacing: '-0.02em', lineHeight: 1 }}>{value}</div>
-        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted }}>{unit}</div>
-      </div>
-    </div>
-  );
-}
-
-interface LegendDotProps {
-  color: string;
-  label: string;
-}
-
-function LegendDot({ color, label }: LegendDotProps) {
-  return (
-    <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-      <div style={{ width: 8, height:8, borderRadius:'50%', background: color }}/>
-      <span>{label}</span>
-    </div>
-  );
-}
-
-interface RoleKnobProps {
-  role: Role;
-  util: number;
-  onChange: (count: number) => void;
-}
-
-function RoleKnob({ role, util, onChange }: RoleKnobProps) {
-  return (
-    <div style={{
-      background: SW_COLORS.paperDeep, padding: 8, borderRadius: SW_RADIUS.sm,
-      border: `1px solid ${SW_COLORS.line}`,
-      display:'flex', flexDirection:'column', gap: 5,
-    }}>
-      <div style={{ display:'flex', alignItems:'center', gap: 5 }}>
-        <div style={{ width: 22, height: 22, background: role.color, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', borderRadius: 3, fontSize: 13, fontWeight: 800 }}>{role.icon}</div>
-        <div style={{ minWidth: 0, flex: 1 }}>
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'0.5px', textTransform:'uppercase', whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{role.label}</div>
+    <div
+      style={{
+        width: '100%',
+        height: '100%',
+        display: 'grid',
+        gridTemplateRows: 'auto 1fr auto',
+        background: SW_COLORS.ink,
+        color: SW_COLORS.paper,
+        fontFamily: SW_FONTS.body,
+      }}
+    >
+      {/* ── HUD ─────────────────────────────────────────────────────────── */}
+      <div
+        style={{
+          padding: '10px 18px',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 14,
+          borderBottom: '1px solid #ffffff15',
+          background: '#0a0d12',
+          flexWrap: 'wrap',
+        }}
+      >
+        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+          <div
+            style={{
+              width: 9,
+              height: 9,
+              borderRadius: '50%',
+              background: playing ? SW_COLORS.ok : SW_COLORS.warn,
+              boxShadow: playing ? `0 0 10px ${SW_COLORS.ok}` : 'none',
+              animation: playing ? 'lf-pulse 1.2s infinite' : 'none',
+            }}
+          />
+          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700, letterSpacing: '2px' }}>
+            {playing ? 'RUNNING' : 'PAUSED'}
+          </span>
         </div>
-      </div>
+        <div style={{ width: 1, height: 22, background: '#ffffff20' }} />
+        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 22, fontWeight: 700, color: '#fff' }}>
+          {hr.toString().padStart(2, '0')}:{mn}
+        </div>
+        <div style={{ fontSize: 10, color: '#ffffff80', fontFamily: SW_FONTS.mono }}>SHIFT A · DAY 14</div>
+        <div style={{ width: 1, height: 22, background: '#ffffff20' }} />
 
-      <div style={{ display:'flex', alignItems:'center', gap: 6 }}>
-        <button onClick={()=>onChange(role.count - 1)} style={knobStep}>−</button>
-        <input type="number" value={role.count} min={0} max={role.max} onChange={e=>onChange(+e.target.value)}
+        {/* View toggle */}
+        <div style={{ display: 'flex', gap: 2, background: '#ffffff08', padding: 2, borderRadius: 6 }}>
+          {(['iso', 'top', 'heat'] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              style={{
+                background: view === v ? SW_COLORS.brand : 'transparent',
+                color: view === v ? '#fff' : '#ffffffaa',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '6px 14px',
+                fontFamily: SW_FONTS.display,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.1em',
+                borderRadius: 4,
+                textTransform: 'uppercase',
+              }}
+            >
+              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : 'HEAT'}
+            </button>
+          ))}
+        </div>
+
+        <div style={{ flex: 1 }} />
+
+        {/* Twin badge */}
+        <div
           style={{
-            width: 38, padding:'3px 4px',
-            fontFamily: SW_FONTS.display, fontWeight: 900, fontSize: 14,
-            textAlign:'center',
-            border:`1px solid ${SW_COLORS.line}`, borderRadius: 3,
-            background: '#fff', color: SW_COLORS.ink,
-          }}/>
-        <button onClick={()=>onChange(role.count + 1)} style={knobStep}>+</button>
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 700,
+            color: '#ffffff80',
+            letterSpacing: '1.5px',
+          }}
+        >
+          TWIN · {twin.name.toUpperCase()} · {twin.departments.length}D · {twin.workstations.length}W
+        </div>
+
+        <button
+          onClick={() => navigate('/builder')}
+          style={{
+            background: '#ffffff10',
+            border: '1px solid #ffffff30',
+            color: '#fff',
+            padding: '6px 12px',
+            fontFamily: SW_FONTS.display,
+            fontSize: 10,
+            fontWeight: 900,
+            letterSpacing: '0.08em',
+            cursor: 'pointer',
+            borderRadius: 4,
+          }}
+        >
+          ✎ EDIT IN BUILDER
+        </button>
       </div>
 
-      {/* Util bar */}
-      <div style={{ height: 4, background: SW_COLORS.line, borderRadius: 2, overflow:'hidden' }}>
-        <div style={{ height:'100%', width:`${util}%`, background: util > 90 ? SW_COLORS.alarm : util > 70 ? SW_COLORS.thread : SW_COLORS.ok }}/>
+      {/* ── FLOOR + RIGHT INSPECTOR ─────────────────────────────────────── */}
+      <div
+        style={{
+          position: 'relative',
+          overflow: 'hidden',
+          display: 'grid',
+          gridTemplateColumns: '1fr 320px',
+        }}
+      >
+        {/* Stage */}
+        <div
+          style={{
+            position: 'relative',
+            overflow: 'hidden',
+            background: 'radial-gradient(ellipse at 50% 30%, #182231 0%, #0a0d12 100%)',
+          }}
+          onWheel={(e) => {
+            e.preventDefault();
+            setZoom((z) => Math.max(0.4, Math.min(2.5, z * (e.deltaY < 0 ? 1.08 : 0.93))));
+          }}
+        >
+          {empty ? (
+            <EmptyState onBuild={() => navigate('/builder')} />
+          ) : (
+            <>
+              {view === 'iso' && (
+                <IsoView
+                  twin={twin}
+                  t={t}
+                  zoom={zoom}
+                  pan={pan}
+                  hotIds={hotIds}
+                  selectedWs={selectedWs}
+                  onSelect={setSelectedWs}
+                />
+              )}
+              {view === 'top' && (
+                <TopView
+                  twin={twin}
+                  t={t}
+                  zoom={zoom}
+                  hotIds={hotIds}
+                  selectedWs={selectedWs}
+                  onSelect={setSelectedWs}
+                />
+              )}
+              {view === 'heat' && <HeatView twin={twin} t={t} hotIds={hotIds} />}
+
+              {/* Event toasts */}
+              <div
+                style={{
+                  position: 'absolute',
+                  left: 16,
+                  top: 16,
+                  display: 'flex',
+                  flexDirection: 'column',
+                  gap: 6,
+                  pointerEvents: 'none',
+                }}
+              >
+                {events.slice(-3).reverse().map((e) => (
+                  <div
+                    key={e.id}
+                    style={{
+                      background:
+                        e.kind === 'breakdown'
+                          ? `${SW_COLORS.alarm}dd`
+                          : e.kind === 'defect'
+                            ? `${SW_COLORS.warn}dd`
+                            : `${SW_COLORS.ok}dd`,
+                      color: '#fff',
+                      padding: '6px 12px',
+                      borderRadius: 6,
+                      fontFamily: SW_FONTS.mono,
+                      fontSize: 11,
+                      fontWeight: 700,
+                      boxShadow: '0 4px 14px rgba(0,0,0,0.4)',
+                      animation: 'lf-toast-in 0.3s ease-out',
+                      letterSpacing: '0.1em',
+                    }}
+                  >
+                    <span>{e.label}</span>
+                    <span style={{ opacity: 0.85, marginLeft: 8 }}>
+                      · {twin.workstations.find((w) => w.id === e.ws)?.name?.slice(0, 14) ?? '—'}
+                    </span>
+                  </div>
+                ))}
+              </div>
+
+              {/* Zoom controls */}
+              <div
+                style={{
+                  position: 'absolute',
+                  right: 16,
+                  bottom: 16,
+                  display: 'flex',
+                  gap: 4,
+                  background: '#0a0d12',
+                  padding: 3,
+                  border: '1px solid #ffffff20',
+                  borderRadius: 6,
+                }}
+              >
+                <FloorBtn onClick={() => setZoom((z) => Math.max(0.4, z * 0.85))}>−</FloorBtn>
+                <FloorBtn
+                  onClick={() => {
+                    setZoom(1);
+                    setPan({ x: 0, y: 0 });
+                  }}
+                >
+                  {Math.round(zoom * 100)}%
+                </FloorBtn>
+                <FloorBtn onClick={() => setZoom((z) => Math.min(2.5, z * 1.18))}>+</FloorBtn>
+              </div>
+            </>
+          )}
+        </div>
+
+        {/* Right inspector */}
+        <Inspector
+          twin={twin}
+          selectedWs={selectedWs}
+          onClear={() => setSelectedWs(null)}
+          events={events.slice(-8).reverse()}
+          t={t}
+        />
       </div>
-      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, display:'flex', justifyContent:'space-between' }}>
-        <span>{util}% util</span>
-        <span>${role.costHr}/hr</span>
+
+      {/* ── TRANSPORT BAR ───────────────────────────────────────────────── */}
+      <div
+        style={{
+          padding: '12px 18px',
+          background: '#0a0d12',
+          borderTop: '1px solid #ffffff15',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+        }}
+      >
+        <button
+          onClick={() => setPlaying((p) => !p)}
+          style={{
+            background: playing ? SW_COLORS.alarm : SW_COLORS.ok,
+            color: '#fff',
+            border: 'none',
+            cursor: 'pointer',
+            padding: '8px 16px',
+            fontFamily: SW_FONTS.display,
+            fontSize: 12,
+            fontWeight: 900,
+            letterSpacing: '0.1em',
+            borderRadius: 4,
+          }}
+        >
+          {playing ? '⏸ PAUSE' : '▶ PLAY'}
+        </button>
+        <div style={{ width: 1, height: 24, background: '#ffffff20' }} />
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#ffffff80', letterSpacing: '0.1em' }}>
+          ELAPSED · {elapsed}s
+        </span>
+        <div style={{ flex: 1 }} />
+        <span
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            color: '#ffffff60',
+            letterSpacing: '0.06em',
+          }}
+        >
+          SCROLL zoom · CLICK workstation to inspect
+        </span>
+        <button
+          onClick={() => navigate('/sim')}
+          style={{
+            background: SW_COLORS.brand,
+            color: '#fff',
+            border: 'none',
+            cursor: 'pointer',
+            padding: '8px 16px',
+            fontFamily: SW_FONTS.display,
+            fontSize: 11,
+            fontWeight: 900,
+            letterSpacing: '0.1em',
+            borderRadius: 4,
+          }}
+        >
+          ▶ OPEN SIMULATION →
+        </button>
       </div>
+
+      {/* keyframes */}
+      <style>{`
+        @keyframes lf-toast-in { from { opacity: 0; transform: translateX(-12px); } to { opacity: 1; transform: translateX(0); } }
+        @keyframes lf-pulse { 0%,100% { opacity: 1; } 50% { opacity: 0.4; } }
+        @keyframes lf-march { to { stroke-dashoffset: -16; } }
+      `}</style>
     </div>
   );
 }
 
-interface FloorIsoViewProps {
-  zones: readonly Zone[];
-  zoneState: ZoneStateMap;
-  t: number;
-  showZones: boolean;
-  selectedZone: string | null;
-  setSelectedZone: (id: string) => void;
-  trolleys: number;
-  roles: Role[];
+// ============================================================================
+// EMPTY STATE
+// ============================================================================
+
+function EmptyState({ onBuild }: { onBuild: () => void }) {
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        display: 'flex',
+        flexDirection: 'column',
+        alignItems: 'center',
+        justifyContent: 'center',
+        gap: 16,
+        padding: 32,
+        textAlign: 'center',
+      }}
+    >
+      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700, color: '#ffffff60', letterSpacing: '2px' }}>
+        NO TWIN AUTHORED YET
+      </div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.display,
+          fontSize: 36,
+          fontWeight: 900,
+          letterSpacing: '-0.01em',
+          color: '#fff',
+          maxWidth: 520,
+          lineHeight: 1.05,
+        }}
+      >
+        Build your factory.<br />
+        <span style={{ color: SW_COLORS.brand }}>Then watch it run.</span>
+      </div>
+      <div style={{ fontSize: 13, color: '#ffffffaa', maxWidth: 440 }}>
+        Drop departments and workstations on the canvas in Factory Builder, then come back here for the iso 3D, top-down 2D and heat-map live views.
+      </div>
+      <button
+        onClick={onBuild}
+        style={{
+          background: SW_COLORS.brand,
+          color: '#fff',
+          border: 'none',
+          cursor: 'pointer',
+          padding: '10px 22px',
+          fontFamily: SW_FONTS.display,
+          fontSize: 13,
+          fontWeight: 900,
+          letterSpacing: '0.1em',
+          borderRadius: 6,
+          marginTop: 8,
+        }}
+      >
+        ◆ OPEN FACTORY BUILDER →
+      </button>
+    </div>
+  );
 }
 
-function FloorIsoView({ zones, zoneState, t, showZones, selectedZone, setSelectedZone, trolleys, roles }: FloorIsoViewProps) {
-  const W = 1200, H = 600;
-  const CELL_W = W / FLOOR_W_CELLS;
-  const CELL_H = (H - 80) / FLOOR_H_CELLS;
+// ============================================================================
+// ISO 3D VIEW
+// ============================================================================
 
-  // iso transform: 2.5D shear (top-down with slight angle)
-  const skewY = 0.18;
+interface IsoViewProps {
+  twin: ReturnType<typeof selectActiveTwin>;
+  t: number;
+  zoom: number;
+  pan: { x: number; y: number };
+  hotIds: Set<string>;
+  selectedWs: string | null;
+  onSelect: (id: string | null) => void;
+}
 
-  // Compute people positions per zone — distribute role.count workers in zone bounds
-  const people: { cx: number; cy: number; color: string; role: string; zoneId: string }[] = [];
-  zones.forEach(z => {
-    const role = roles.find(r => r.id === z.roleId);
-    if (!role) return;
-    const zoneLines = z.line ? Math.min(2, z.h - 1) : 1;
-    const slotsPerLine = Math.min(role.count, Math.max(2, z.w - 1));
-    const total = z.line ? slotsPerLine : Math.min(role.count, z.w * z.h);
-    for (let i = 0; i < total; i++) {
-      let cx, cy;
-      if (z.line) {
-        const lineIdx = i % zoneLines;
-        const slotIdx = Math.floor(i / zoneLines);
-        cx = (z.x + 1 + slotIdx * ((z.w - 2) / Math.max(1, slotsPerLine - 1))) * CELL_W;
-        cy = (z.y + 1 + lineIdx * ((z.h - 1.5) / Math.max(1, zoneLines - 0.5))) * CELL_H + 40;
-      } else {
-        const cols = Math.max(1, Math.floor(z.w * 0.6));
-        const col = i % cols;
-        const row = Math.floor(i / cols);
-        cx = (z.x + 0.7 + col * 0.9) * CELL_W;
-        cy = (z.y + 0.8 + row * 0.7) * CELL_H + 40;
-      }
-      // tiny wobble
-      cx += Math.sin((t + i * 7) / 9) * 2;
-      people.push({ cx, cy, color: role.color, role: role.id, zoneId: z.id });
-    }
-  });
+function IsoView({ twin, t, zoom, pan, hotIds, selectedWs, onSelect }: IsoViewProps) {
+  // World-extent bounds → SVG viewBox.
+  const cTL = isoProj(0, 0);
+  const cTR = isoProj(twin.gridW, 0);
+  const cBR = isoProj(twin.gridW, twin.gridH);
+  const cBL = isoProj(0, twin.gridH);
+  const minX = Math.min(cTL.sx, cBL.sx) - 80;
+  const maxX = Math.max(cTR.sx, cBR.sx) + 80;
+  const minY = Math.min(cTL.sy, cTR.sy) - 80;
+  const maxY = Math.max(cBL.sy, cBR.sy) + 80;
+  const vbW = maxX - minX;
+  const vbH = maxY - minY;
 
-  // Trolleys travelling between zones (along a flow path)
-  const flowPath = ['fabric','spread','cut','bundle','sew_a','qc','press','pack','dispatch'];
-  const trolleyDots: { cx: number; cy: number }[] = [];
-  for (let i = 0; i < trolleys; i++) {
-    const phase = ((t * 5 + i * 80) / 600) % 1;
-    const segIdx = Math.floor(phase * (flowPath.length - 1));
-    const segT = (phase * (flowPath.length - 1)) - segIdx;
-    const a = zones.find(z => z.id === flowPath[segIdx]);
-    const b = zones.find(z => z.id === flowPath[segIdx + 1]);
-    if (!a || !b) continue;
-    const ax = (a.x + a.w / 2) * CELL_W;
-    const ay = (a.y + a.h / 2) * CELL_H + 40;
-    const bx = (b.x + b.w / 2) * CELL_W;
-    const by = (b.y + b.h / 2) * CELL_H + 40;
-    trolleyDots.push({ cx: ax + (bx - ax) * segT, cy: ay + (by - ay) * segT });
-  }
+  const sortedWs = useMemo(
+    () =>
+      [...twin.workstations].sort((a, b) =>
+        a.position.x + a.position.y - (b.position.x + b.position.y),
+      ),
+    [twin.workstations],
+  );
 
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'100%', display:'block' }}>
+    <svg
+      width="100%"
+      height="100%"
+      viewBox={`${minX} ${minY} ${vbW} ${vbH}`}
+      preserveAspectRatio="xMidYMid meet"
+      style={{ display: 'block', userSelect: 'none' }}
+      onClick={() => onSelect(null)}
+    >
       <defs>
-        <pattern id="floorTile" width="24" height="24" patternUnits="userSpaceOnUse">
-          <rect width="24" height="24" fill="#FBFAF6"/>
-          <path d="M0 24 L24 24 M24 0 L24 24" stroke="#0F141915" strokeWidth="0.5"/>
+        <pattern id="lf-grid-iso" width={32} height={32} patternUnits="userSpaceOnUse">
+          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff06" strokeWidth={1} />
         </pattern>
-        <linearGradient id="dockGrad" x1="0" y1="0" x2="0" y2="1">
-          <stop offset="0%" stopColor="#444"/>
-          <stop offset="100%" stopColor="#222"/>
-        </linearGradient>
+        <radialGradient id="lf-vig" cx="50%" cy="40%" r="60%">
+          <stop offset="0%" stopColor="#000" stopOpacity={0} />
+          <stop offset="100%" stopColor="#000" stopOpacity={0.6} />
+        </radialGradient>
       </defs>
+      <rect x={minX} y={minY} width={vbW} height={vbH} fill="url(#lf-grid-iso)" />
 
-      {/* iso shear group */}
-      <g transform={`matrix(1, ${skewY}, 0, 1, 0, -40)`}>
-        {/* Floor base */}
-        <rect x="0" y="40" width={W} height={H - 80} fill="url(#floorTile)"/>
+      <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`} style={{ transformOrigin: 'center' }}>
+        {/* Floor diamond */}
+        <polygon
+          points={ptsToStr([cTL, cTR, cBR, cBL])}
+          fill="#ffffff05"
+          stroke="#ffffff20"
+          strokeWidth={1.2}
+        />
+        {/* Iso grid lines */}
+        {Array.from({ length: twin.gridW + 1 }, (_, i) => {
+          const a = isoProj(i, 0);
+          const b = isoProj(i, twin.gridH);
+          return <line key={`v-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#ffffff08" strokeWidth={0.5} />;
+        })}
+        {Array.from({ length: twin.gridH + 1 }, (_, i) => {
+          const a = isoProj(0, i);
+          const b = isoProj(twin.gridW, i);
+          return <line key={`h-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#ffffff08" strokeWidth={0.5} />;
+        })}
 
-        {/* Zones */}
-        {zones.map(z => {
-          const px = z.x * CELL_W;
-          const py = z.y * CELL_H + 40;
-          const pw = z.w * CELL_W;
-          const ph = z.h * CELL_H;
-          const s = zoneState[z.id];
-          const sel = selectedZone === z.id;
-          const statusStroke =
-            s?.status === 'hot'     ? SW_COLORS.alarm :
-            s?.status === 'starved' ? SW_COLORS.bobbin :
-            s?.status === 'busy'    ? SW_COLORS.thread :
-                                      SW_COLORS.ok;
+        {/* Departments — coloured zone diamonds */}
+        {twin.departments.map((d) => (
+          <DeptDiamond key={d.id} dept={d} />
+        ))}
+
+        {/* Workstations — depth-sorted iso fixtures */}
+        {sortedWs.map((w) => (
+          <IsoWorkstation
+            key={w.id}
+            ws={w}
+            isHot={hotIds.has(w.id)}
+            isSelected={selectedWs === w.id}
+            t={t}
+            onClick={() => onSelect(w.id)}
+          />
+        ))}
+
+        {/* Walking operators — one per workstation, animated */}
+        {sortedWs.map((w) => (
+          <WalkingOperator key={`op-${w.id}`} ws={w} t={t} />
+        ))}
+
+        {/* Travelling WIP bundles — synthesised from dept→dept hops */}
+        <WipFlow twin={twin} t={t} />
+      </g>
+
+      <rect x={minX} y={minY} width={vbW} height={vbH} fill="url(#lf-vig)" pointerEvents="none" />
+    </svg>
+  );
+}
+
+function DeptDiamond({ dept }: { dept: Department }) {
+  const tl = isoProj(dept.bounds.x, dept.bounds.y);
+  const tr = isoProj(dept.bounds.x + dept.bounds.w, dept.bounds.y);
+  const br = isoProj(dept.bounds.x + dept.bounds.w, dept.bounds.y + dept.bounds.h);
+  const bl = isoProj(dept.bounds.x, dept.bounds.y + dept.bounds.h);
+  const cx = (tl.sx + tr.sx + br.sx + bl.sx) / 4;
+  const cy = (tl.sy + tr.sy + br.sy + bl.sy) / 4;
+  const fill = DEPT_COLOR_HEX[dept.color];
+  return (
+    <g>
+      <polygon points={ptsToStr([tl, tr, br, bl])} fill={fill} fillOpacity={0.16} />
+      <polygon
+        points={ptsToStr([tl, tr, br, bl])}
+        fill="none"
+        stroke={fill}
+        strokeWidth={1.4}
+        strokeDasharray="4 3"
+        opacity={0.7}
+      />
+      <text
+        x={cx}
+        y={cy}
+        textAnchor="middle"
+        dominantBaseline="middle"
+        fontFamily={SW_FONTS.display}
+        fontSize={18}
+        fontWeight={900}
+        fill={fill}
+        opacity={0.45}
+        style={{ pointerEvents: 'none', letterSpacing: '0.15em' }}
+      >
+        {dept.name.toUpperCase()}
+      </text>
+    </g>
+  );
+}
+
+function IsoWorkstation({
+  ws,
+  isHot,
+  isSelected,
+  t,
+  onClick,
+}: {
+  ws: Workstation;
+  isHot: boolean;
+  isSelected: boolean;
+  t: number;
+  onClick: () => void;
+}) {
+  const fixture = resolveFixture(ws.catalogId);
+  if (!fixture) return null;
+
+  const origin = isoProj(ws.position.x, ws.position.y);
+  const tl = isoProj(ws.position.x, ws.position.y);
+  const tr = isoProj(ws.position.x + fixture.w, ws.position.y);
+  const br = isoProj(ws.position.x + fixture.w, ws.position.y + fixture.d);
+  const bl = isoProj(ws.position.x, ws.position.y + fixture.d);
+
+  const util = ws.kpiObserved?.utilizationPct ?? fakeUtil(ws, t);
+
+  return (
+    <g
+      transform={`translate(${origin.sx}, ${origin.sy}) rotate(${ws.rotation})`}
+      style={{ cursor: 'pointer' }}
+      onClick={(e) => {
+        e.stopPropagation();
+        onClick();
+      }}
+    >
+      {fixture.draw({ w: fixture.w, d: fixture.d, h: fixture.h }) as ReactNode}
+
+      {/* Heat tint */}
+      <polygon
+        points={ptsToStr([
+          { sx: 0, sy: 0 },
+          { sx: tr.sx - tl.sx, sy: tr.sy - tl.sy },
+          { sx: br.sx - tl.sx, sy: br.sy - tl.sy },
+          { sx: bl.sx - tl.sx, sy: bl.sy - tl.sy },
+        ])}
+        fill={utilColor(util)}
+        fillOpacity={0.18 + (util / 100) * 0.25}
+        pointerEvents="none"
+      />
+
+      {/* Selection ring */}
+      {isSelected && (
+        <polygon
+          points={ptsToStr([
+            { sx: 0, sy: -8 },
+            { sx: tr.sx - tl.sx, sy: tr.sy - tl.sy - 8 },
+            { sx: br.sx - tl.sx, sy: br.sy - tl.sy - 8 },
+            { sx: bl.sx - tl.sx, sy: bl.sy - tl.sy - 8 },
+          ])}
+          fill="none"
+          stroke={SW_COLORS.brand}
+          strokeWidth={2.5}
+          strokeDasharray="4 3"
+          pointerEvents="none"
+        />
+      )}
+
+      {/* Bottleneck flag */}
+      {isHot && (
+        <g transform="translate(0, -28)">
+          <circle r={6} fill={SW_COLORS.alarm}>
+            <animate attributeName="r" values="6;9;6" dur="0.8s" repeatCount="indefinite" />
+          </circle>
+          <text
+            x={0}
+            y={3}
+            textAnchor="middle"
+            fontFamily={SW_FONTS.display}
+            fontSize={9}
+            fontWeight={900}
+            fill="#fff"
+            pointerEvents="none"
+          >
+            !
+          </text>
+        </g>
+      )}
+    </g>
+  );
+}
+
+function WalkingOperator({ ws, t }: { ws: Workstation; t: number }) {
+  // Bob a small dot near the workstation that wanders within 1 cell.
+  const ph = (ws.position.x * 0.7 + ws.position.y * 1.3 + t * 0.6) % (Math.PI * 2);
+  const ox = ws.position.x + 0.5 + Math.cos(ph) * 0.4;
+  const oy = ws.position.y + 0.5 + Math.sin(ph) * 0.4;
+  const p = isoProj(ox, oy);
+  return (
+    <g transform={`translate(${p.sx}, ${p.sy - 8})`} pointerEvents="none">
+      <circle cx={0} cy={4} r={4} fill={SW_COLORS.bobbin} stroke="#fff" strokeWidth={1} />
+      <circle cx={0} cy={-2} r={2.5} fill="#F0C49B" stroke="#0F1419" strokeWidth={0.6} />
+    </g>
+  );
+}
+
+function WipFlow({ twin, t }: { twin: ReturnType<typeof selectActiveTwin>; t: number }) {
+  // Small coloured dots that ride between consecutive workstations.
+  if (twin.workstations.length < 2) return null;
+  const sorted = [...twin.workstations].sort(
+    (a, b) => a.position.x + a.position.y - (b.position.x + b.position.y),
+  );
+  const colors = [SW_COLORS.thread, SW_COLORS.fabric, SW_COLORS.bobbin, SW_COLORS.trim];
+  return (
+    <g pointerEvents="none">
+      {sorted.slice(0, sorted.length - 1).map((ws, i) => {
+        const next = sorted[i + 1];
+        const phase = ((t * 0.4 + i * 0.27) % 1 + 1) % 1;
+        const x = ws.position.x + (next.position.x - ws.position.x) * phase + 0.5;
+        const y = ws.position.y + (next.position.y - ws.position.y) * phase + 0.5;
+        const p = isoProj(x, y);
+        return (
+          <rect
+            key={`b-${i}`}
+            x={p.sx - 3}
+            y={p.sy - 3}
+            width={6}
+            height={6}
+            fill={colors[i % colors.length]}
+            stroke="#0F1419"
+            strokeWidth={0.6}
+            opacity={0.92}
+          />
+        );
+      })}
+    </g>
+  );
+}
+
+// ============================================================================
+// TOP 2D VIEW
+// ============================================================================
+
+interface TopViewProps {
+  twin: ReturnType<typeof selectActiveTwin>;
+  t: number;
+  zoom: number;
+  hotIds: Set<string>;
+  selectedWs: string | null;
+  onSelect: (id: string | null) => void;
+}
+
+function TopView({ twin, t, zoom, hotIds, selectedWs, onSelect }: TopViewProps) {
+  const CELL = 28;
+  const W = twin.gridW * CELL;
+  const H = twin.gridH * CELL;
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      style={{ width: '100%', height: '100%', display: 'block' }}
+      preserveAspectRatio="xMidYMid meet"
+      onClick={() => onSelect(null)}
+    >
+      <defs>
+        <pattern id="lf-top-grid" width={CELL} height={CELL} patternUnits="userSpaceOnUse">
+          <path d={`M ${CELL} 0 L 0 0 0 ${CELL}`} fill="none" stroke="#ffffff10" strokeWidth={1} />
+        </pattern>
+      </defs>
+      <rect width={W} height={H} fill="#0d1219" />
+      <rect width={W} height={H} fill="url(#lf-top-grid)" />
+
+      <g style={{ transformOrigin: 'center', transform: `scale(${zoom})` }}>
+        {/* Departments */}
+        {twin.departments.map((d) => {
+          const c = DEPT_COLOR_HEX[d.color];
           return (
-            <g key={z.id} onClick={()=>setSelectedZone(z.id)} style={{ cursor:'pointer' }}>
-              {/* Zone fill (paper-tinted) */}
-              <rect x={px} y={py} width={pw} height={ph}
-                fill={showZones ? z.color : '#FBFAF6'}
-                stroke={sel ? SW_COLORS.ink : z.stroke}
-                strokeWidth={sel ? 3 : 1.5}
-                opacity={showZones ? 0.95 : 1}
+            <g key={d.id}>
+              <rect
+                x={d.bounds.x * CELL}
+                y={d.bounds.y * CELL}
+                width={d.bounds.w * CELL}
+                height={d.bounds.h * CELL}
+                fill={c}
+                opacity={0.13}
+                stroke={c}
+                strokeWidth={1.4}
+                strokeDasharray="4 3"
               />
-              {/* Wall band (gives 3D pop on top edge) */}
-              <rect x={px} y={py} width={pw} height={5} fill={z.stroke} opacity="0.45"/>
-
-              {/* Status pulse */}
-              <circle cx={px + 10} cy={py + 11} r={4} fill={statusStroke}>
-                {s?.status === 'hot' && <animate attributeName="r" values="4;7;4" dur="1.2s" repeatCount="indefinite"/>}
-              </circle>
-
-              {/* Dock doors */}
-              {z.dock && (
-                <g>
-                  {[0,1,2,3].map(d => (
-                    <rect key={d} x={px + 6} y={py + 14 + d * (ph/4 - 4)} width={pw - 12} height={(ph/4) - 18} fill="url(#dockGrad)" rx="2"/>
-                  ))}
-                </g>
-              )}
-
-              {/* Sewing line strip */}
-              {z.line && (
-                <line x1={px + 14} y1={py + ph/2} x2={px + pw - 14} y2={py + ph/2}
-                  stroke={SW_COLORS.steel} strokeWidth="1.5" strokeDasharray="4 3"
-                  style={{ animation: 'sw-march 0.8s linear infinite' }}/>
-              )}
-
-              {/* Label */}
-              <text x={px + 8} y={py + ph - 8}
-                fontFamily={SW_FONTS.display} fontSize="10" fontWeight="900"
-                fill={SW_COLORS.ink} letterSpacing="0.05em">
-                {z.label}
+              <text
+                x={d.bounds.x * CELL + 8}
+                y={d.bounds.y * CELL + 18}
+                fontFamily={SW_FONTS.mono}
+                fontSize={11}
+                fontWeight={900}
+                fill={c}
+                style={{ letterSpacing: '0.1em' }}
+              >
+                {d.name.toUpperCase()}
               </text>
+            </g>
+          );
+        })}
 
-              {/* WIP badge */}
-              {s?.wip !== undefined && s.wip > 0 && (
-                <g transform={`translate(${px + pw - 38}, ${py + 8})`}>
-                  <rect x="0" y="0" width="32" height="14" rx="2" fill={SW_COLORS.ink}/>
-                  <text x="16" y="10" fontFamily={SW_FONTS.mono} fontSize="9" fontWeight="700" fill="#fff" textAnchor="middle">
-                    WIP {s.wip}
-                  </text>
-                </g>
+        {/* Flow arrows between consecutive stations */}
+        {twin.workstations.length > 1 &&
+          [...twin.workstations]
+            .sort((a, b) => a.position.x + a.position.y - (b.position.x + b.position.y))
+            .slice(0, -1)
+            .map((ws, i, arr) => {
+              const next = arr[i + 1] ?? twin.workstations[twin.workstations.length - 1];
+              if (!next) return null;
+              return (
+                <line
+                  key={`flow-${i}`}
+                  x1={ws.position.x * CELL + CELL / 2}
+                  y1={ws.position.y * CELL + CELL / 2}
+                  x2={next.position.x * CELL + CELL / 2}
+                  y2={next.position.y * CELL + CELL / 2}
+                  stroke="#ffffff30"
+                  strokeWidth={1.2}
+                  strokeDasharray="6 4"
+                  style={{
+                    animation: 'lf-march 0.8s linear infinite',
+                  }}
+                />
+              );
+            })}
+
+        {/* Workstations */}
+        {twin.workstations.map((ws) => {
+          const fix = resolveFixture(ws.catalogId);
+          const w = (fix?.w ?? 1) * CELL;
+          const h = (fix?.d ?? 1) * CELL;
+          const isHot = hotIds.has(ws.id);
+          const isSel = selectedWs === ws.id;
+          const util = ws.kpiObserved?.utilizationPct ?? fakeUtil(ws, t);
+          const fill = isHot ? SW_COLORS.alarm : utilColor(util);
+          return (
+            <g
+              key={ws.id}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect(ws.id);
+              }}
+              style={{ cursor: 'pointer' }}
+            >
+              <rect
+                x={ws.position.x * CELL + 2}
+                y={ws.position.y * CELL + 2}
+                width={Math.max(8, w - 4)}
+                height={Math.max(8, h - 4)}
+                rx={3}
+                fill={fill}
+                opacity={0.7 + (util / 100) * 0.3}
+                stroke={isSel ? '#fff' : '#0F1419'}
+                strokeWidth={isSel ? 2 : 1}
+              />
+              {isHot && (
+                <circle
+                  cx={ws.position.x * CELL + w / 2}
+                  cy={ws.position.y * CELL + h / 2}
+                  r={Math.min(w, h) / 2 + 4}
+                  fill="none"
+                  stroke={SW_COLORS.alarm}
+                  strokeWidth={1.5}
+                >
+                  <animate
+                    attributeName="r"
+                    values={`${Math.min(w, h) / 2 + 4};${Math.min(w, h) / 2 + 12};${Math.min(w, h) / 2 + 4}`}
+                    dur="1.4s"
+                    repeatCount="indefinite"
+                  />
+                </circle>
               )}
             </g>
           );
         })}
 
-        {/* Worker dots */}
-        {people.map((p, i) => (
-          <g key={i} transform={`translate(${p.cx}, ${p.cy})`}>
-            <ellipse cx="0" cy="3" rx="3.5" ry="1.5" fill="#00000020"/>
-            <circle cx="0" cy="0" r="2.6" fill={p.color} stroke="#fff" strokeWidth="0.8"/>
-            <rect x="-1.5" y="2" width="3" height="3.5" fill={p.color} rx="0.5"/>
-          </g>
-        ))}
-
-        {/* Trolleys (yellow rolling boxes) */}
-        {trolleyDots.map((d, i) => (
-          <g key={i} transform={`translate(${d.cx}, ${d.cy})`}>
-            <ellipse cx="0" cy="5" rx="6" ry="2" fill="#00000022"/>
-            <rect x="-5" y="-3" width="10" height="6" fill={SW_COLORS.thread} stroke={SW_COLORS.ink} strokeWidth="0.8" rx="1"/>
-            <rect x="-3" y="-4" width="6" height="2" fill={SW_COLORS.brand}/>
-          </g>
-        ))}
-      </g>
-
-      {/* Truck dock at right edge (outside iso shear, sits flat) */}
-      <g>
-        {[0,1,2].map(i => (
-          <g key={i} transform={`translate(${W - 60}, ${100 + i * 80})`}>
-            <rect x="0" y="0" width="50" height="40" fill="#fff" stroke={SW_COLORS.ink} strokeWidth="1"/>
-            <rect x="3" y="3" width="20" height="14" fill="#A8C5FF"/>
-            <circle cx="12" cy="36" r="4" fill={SW_COLORS.ink}/>
-            <circle cx="40" cy="36" r="4" fill={SW_COLORS.ink}/>
-            <text x="35" y="14" fontFamily={SW_FONTS.mono} fontSize="7" fontWeight="700" fill={SW_COLORS.ink}>TRK</text>
-          </g>
-        ))}
+        {/* Operator dots */}
+        {twin.workstations.map((ws) => {
+          const ph = (ws.position.x * 0.7 + ws.position.y * 1.3 + t * 0.6) % (Math.PI * 2);
+          const ox = (ws.position.x + 0.5 + Math.cos(ph) * 0.4) * CELL;
+          const oy = (ws.position.y + 0.5 + Math.sin(ph) * 0.4) * CELL;
+          return (
+            <circle
+              key={`op-${ws.id}`}
+              cx={ox}
+              cy={oy}
+              r={3.5}
+              fill={SW_COLORS.bobbin}
+              stroke="#fff"
+              strokeWidth={1}
+              pointerEvents="none"
+            />
+          );
+        })}
       </g>
     </svg>
   );
 }
 
-interface FloorTopViewProps {
-  zones: readonly Zone[];
-  zoneState: ZoneStateMap;
+// ============================================================================
+// HEAT VIEW
+// ============================================================================
+
+function HeatView({
+  twin,
+  t,
+  hotIds,
+}: {
+  twin: ReturnType<typeof selectActiveTwin>;
   t: number;
-  showZones: boolean;
-  selectedZone: string | null;
-  setSelectedZone: (id: string) => void;
-  trolleys: number;
-  roles: Role[];
-}
-
-function FloorTopView({ zones, zoneState, showZones, selectedZone, setSelectedZone }: FloorTopViewProps) {
-  const W = 1200, H = 600;
-  const CELL_W = W / FLOOR_W_CELLS;
-  const CELL_H = (H - 60) / FLOOR_H_CELLS;
-
+  hotIds: Set<string>;
+}) {
+  const CELL = 28;
+  const W = twin.gridW * CELL;
+  const H = twin.gridH * CELL;
   return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'100%', display:'block' }}>
-      <rect x="0" y="0" width={W} height={H} fill={SW_COLORS.paperDeep}/>
-      {zones.map(z => {
-        const px = z.x * CELL_W, py = z.y * CELL_H + 30;
-        const pw = z.w * CELL_W, ph = z.h * CELL_H;
-        const s = zoneState[z.id];
-        const sel = selectedZone === z.id;
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      style={{ width: '100%', height: '100%', display: 'block' }}
+      preserveAspectRatio="xMidYMid meet"
+    >
+      <defs>
+        {twin.workstations.map((ws) => {
+          const util = ws.kpiObserved?.utilizationPct ?? fakeUtil(ws, t);
+          const isHot = hotIds.has(ws.id);
+          const intensity = isHot ? 1 : Math.min(1, util / 100 + 0.15);
+          const col = isHot ? SW_COLORS.alarm : utilColor(util);
+          return (
+            <radialGradient key={`hg-${ws.id}`} id={`heat-${ws.id}`} cx="50%" cy="50%" r="50%">
+              <stop offset="0%" stopColor={col} stopOpacity={intensity} />
+              <stop offset="100%" stopColor={col} stopOpacity={0} />
+            </radialGradient>
+          );
+        })}
+        <linearGradient id="lf-legend" x1="0%" x2="100%">
+          <stop offset="0%" stopColor={SW_COLORS.ok} />
+          <stop offset="60%" stopColor={SW_COLORS.warn} />
+          <stop offset="100%" stopColor={SW_COLORS.alarm} />
+        </linearGradient>
+      </defs>
+
+      <rect width={W} height={H} fill="#0d1219" />
+
+      {/* dept outlines for orientation */}
+      {twin.departments.map((d) => (
+        <rect
+          key={d.id}
+          x={d.bounds.x * CELL}
+          y={d.bounds.y * CELL}
+          width={d.bounds.w * CELL}
+          height={d.bounds.h * CELL}
+          fill="none"
+          stroke="#ffffff20"
+          strokeWidth={1}
+          strokeDasharray="3 3"
+        />
+      ))}
+
+      {/* heat blobs */}
+      {twin.workstations.map((ws) => {
+        const fix = resolveFixture(ws.catalogId);
+        const cx = (ws.position.x + (fix?.w ?? 1) / 2) * CELL;
+        const cy = (ws.position.y + (fix?.d ?? 1) / 2) * CELL;
         return (
-          <g key={z.id} onClick={()=>setSelectedZone(z.id)} style={{ cursor:'pointer' }}>
-            <rect x={px} y={py} width={pw} height={ph}
-              fill={showZones ? z.color : '#fff'}
-              stroke={sel ? SW_COLORS.ink : z.stroke}
-              strokeWidth={sel ? 3 : 1.5}/>
-            <text x={px + 6} y={py + 14}
-              fontFamily={SW_FONTS.display} fontSize="10" fontWeight="900" fill={SW_COLORS.ink}>
-              {z.label}
-            </text>
-            <text x={px + 6} y={py + 28} fontFamily={SW_FONTS.mono} fontSize="9" fontWeight="700" fill={SW_COLORS.muted}>
-              {s?.staffed} ppl · {s?.ratePerHr} pcs/hr
-            </text>
-            <text x={px + pw - 8} y={py + ph - 8}
-              fontFamily={SW_FONTS.display} fontSize="18" fontWeight="900"
-              textAnchor="end"
-              fill={s?.status === 'hot' ? SW_COLORS.alarm : s?.status === 'starved' ? SW_COLORS.bobbin : SW_COLORS.ok}>
-              {s?.util}%
-            </text>
-          </g>
+          <circle
+            key={`heat-${ws.id}`}
+            cx={cx}
+            cy={cy}
+            r={90}
+            fill={`url(#heat-${ws.id})`}
+            style={{ mixBlendMode: 'screen' }}
+          />
         );
       })}
-    </svg>
-  );
-}
 
-interface FloorHeatViewProps {
-  zones: readonly Zone[];
-  zoneState: ZoneStateMap;
-}
-
-function FloorHeatView({ zones, zoneState }: FloorHeatViewProps) {
-  const W = 1200, H = 600;
-  const CELL_W = W / FLOOR_W_CELLS;
-  const CELL_H = (H - 60) / FLOOR_H_CELLS;
-
-  function heatColor(util: number) {
-    if (util >= 92) return '#7A0010';
-    if (util >= 80) return '#E74C3C';
-    if (util >= 60) return '#F5A623';
-    if (util >= 40) return '#1FB36B';
-    if (util >= 20) return '#4F7CFF';
-    return '#A0B4D0';
-  }
-
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'100%', display:'block' }}>
-      <rect x="0" y="0" width={W} height={H} fill={SW_COLORS.ink}/>
-      {zones.map(z => {
-        const px = z.x * CELL_W, py = z.y * CELL_H + 30;
-        const pw = z.w * CELL_W, ph = z.h * CELL_H;
-        const s = zoneState[z.id];
-        const c = heatColor(s?.util || 0);
+      {/* station markers */}
+      {twin.workstations.map((ws) => {
+        const fix = resolveFixture(ws.catalogId);
+        const cx = (ws.position.x + (fix?.w ?? 1) / 2) * CELL;
+        const cy = (ws.position.y + (fix?.d ?? 1) / 2) * CELL;
+        const isHot = hotIds.has(ws.id);
         return (
-          <g key={z.id}>
-            <rect x={px} y={py} width={pw} height={ph} fill={c} opacity="0.85" stroke="#000" strokeWidth="0.5"/>
-            <text x={px + pw/2} y={py + ph/2 - 6}
-              fontFamily={SW_FONTS.display} fontSize="22" fontWeight="900"
-              fill="#fff" textAnchor="middle">
-              {s?.util}%
-            </text>
-            <text x={px + pw/2} y={py + ph/2 + 12}
-              fontFamily={SW_FONTS.mono} fontSize="9" fontWeight="700"
-              fill="#ffffffcc" textAnchor="middle" letterSpacing="1px">
-              {z.label}
-            </text>
-          </g>
+          <circle
+            key={`pt-${ws.id}`}
+            cx={cx}
+            cy={cy}
+            r={3.5}
+            fill={isHot ? SW_COLORS.alarm : '#fff'}
+            opacity={0.85}
+          />
         );
       })}
-      {/* Legend */}
-      <g transform={`translate(20, ${H - 28})`}>
-        {[20,40,60,80,92].map((v, i) => (
-          <g key={v} transform={`translate(${i * 70}, 0)`}>
-            <rect x="0" y="0" width="60" height="14" fill={heatColor(v)}/>
-            <text x="30" y="10" fontFamily={SW_FONTS.mono} fontSize="9" fontWeight="700" fill="#fff" textAnchor="middle">{v}%+</text>
-          </g>
-        ))}
+
+      {/* legend */}
+      <g transform={`translate(${W - 220}, 20)`}>
+        <rect width={200} height={62} fill="#0a0d12cc" stroke="#ffffff20" rx={4} />
+        <text
+          x={12}
+          y={20}
+          fill="#fff"
+          fontFamily={SW_FONTS.mono}
+          fontSize={10}
+          fontWeight={900}
+          style={{ letterSpacing: '0.15em' }}
+        >
+          UTILISATION HEAT
+        </text>
+        <rect x={12} y={30} width={176} height={10} fill="url(#lf-legend)" />
+        <text x={12} y={54} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={9}>
+          calm
+        </text>
+        <text
+          x={188}
+          y={54}
+          fill="#ffffff80"
+          fontFamily={SW_FONTS.mono}
+          fontSize={9}
+          textAnchor="end"
+        >
+          critical
+        </text>
       </g>
     </svg>
   );
 }
 
-interface FloorLogicViewProps {
-  zones: readonly Zone[];
-  zoneState: ZoneStateMap;
+// ============================================================================
+// RIGHT INSPECTOR
+// ============================================================================
+
+interface InspectorProps {
+  twin: ReturnType<typeof selectActiveTwin>;
+  selectedWs: string | null;
+  onClear: () => void;
+  events: { id: number; ws: string; kind: 'breakdown' | 'defect' | 'milestone'; label: string }[];
+  t: number;
 }
 
-function FloorLogicView({ zones, zoneState }: FloorLogicViewProps) {
-  const W = 1200, H = 600;
-  const flow = [
-    'fabric','spread','cut','bundle','sew_a','qc','press','pack','dispatch'
-  ].map(id => zones.find(z => z.id === id)).filter(Boolean) as Zone[];
+function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
+  const ws = selectedWs ? twin.workstations.find((w) => w.id === selectedWs) : null;
+  const dept = ws ? twin.departments.find((d) => d.id === ws.deptId) : null;
+  const fix = ws ? resolveFixture(ws.catalogId) : null;
+  const util = ws ? ws.kpiObserved?.utilizationPct ?? fakeUtil(ws, t) : 0;
 
-  return (
-    <svg viewBox={`0 0 ${W} ${H}`} style={{ width:'100%', height:'100%', display:'block' }}>
-      <rect x="0" y="0" width={W} height={H} fill={SW_COLORS.paperDeep}/>
-      {flow.map((z, i) => {
-        const cols = 5;
-        const col = i % cols;
-        const row = Math.floor(i / cols);
-        const x = 60 + col * 230;
-        const y = 80 + row * 220;
-        const s = zoneState[z.id];
-        return (
-          <g key={z.id}>
-            <rect x={x} y={y} width={180} height={120} fill="#fff" stroke={z.stroke} strokeWidth="2"/>
-            <rect x={x} y={y} width={180} height={20} fill={z.stroke}/>
-            <text x={x + 8} y={y + 14} fontFamily={SW_FONTS.display} fontSize="10" fontWeight="900" fill="#fff" letterSpacing="0.05em">{z.label}</text>
-            <text x={x + 90} y={y + 60} fontFamily={SW_FONTS.display} fontSize="28" fontWeight="900" fill={SW_COLORS.ink} textAnchor="middle">{s?.ratePerHr}</text>
-            <text x={x + 90} y={y + 78} fontFamily={SW_FONTS.mono} fontSize="9" fontWeight="700" fill={SW_COLORS.muted} textAnchor="middle">PCS/HR</text>
-            <text x={x + 90} y={y + 100} fontFamily={SW_FONTS.mono} fontSize="10" fontWeight="700" fill={SW_COLORS.steel} textAnchor="middle">{s?.staffed} ppl · WIP {s?.wip}</text>
-
-            {/* arrow to next */}
-            {i < flow.length - 1 && (() => {
-              const nextCol = (i + 1) % cols;
-              const nextRow = Math.floor((i + 1) / cols);
-              const x2 = 60 + nextCol * 230;
-              const y2 = 80 + nextRow * 220;
-              const startX = x + 180, startY = y + 60;
-              if (nextRow === row) {
-                return <path d={`M${startX} ${startY} L${x2 - 4} ${startY}`} stroke={SW_COLORS.ink} strokeWidth="2" markerEnd="url(#larr)"/>;
-              } else {
-                return <path d={`M${startX} ${startY} Q${startX + 30} ${startY} ${startX + 30} ${(y + 200 + y2)/2} L${x2 + 90} ${(y + 200 + y2)/2} L${x2 + 90} ${y2}`} stroke={SW_COLORS.ink} strokeWidth="2" fill="none" markerEnd="url(#larr)"/>;
-              }
-            })()}
-          </g>
-        );
-      })}
-      <defs>
-        <marker id="larr" viewBox="0 0 10 10" refX="9" refY="5" markerWidth="6" markerHeight="6" orient="auto">
-          <path d="M0 0 L10 5 L0 10 z" fill={SW_COLORS.ink}/>
-        </marker>
-      </defs>
-    </svg>
-  );
-}
-
-export function LiveFloorPage() {
-  const navigate = useNavigate();
-  const [zones] = useState<readonly Zone[]>(FLOOR_ZONES_DEFAULT as readonly Zone[]);
-  const [roles, setRoles] = useState<Role[]>(FLOOR_ROLES_DEFAULT);
-  const [trolleys, setTrolleys] = useState<number>(FLOOR_TROLLEYS_DEFAULT);
-
-  // Order arrival params (AnyLogic interarrival time + queue cap)
-  const [orderParams, setOrderParams] = useState<OrderParams>({
-    interMin: 3.0, interMax: 5.0, queueCap: 24,
-    truckMin: 10, truckMax: 20,
-  });
-
-  // Sim controls
-  const [playing, setPlaying] = useState<boolean>(true);
-  const [speed, setSpeed] = useState<number>(2);
-  const [view, setView] = useState<ViewMode>('iso2D');
-  const [showZones, setShowZones] = useState<boolean>(true);
-  const [selectedZone, setSelectedZone] = useState<string | null>(null);
-
-  // Sim time, in seconds (sim seconds, not real)
-  const [t, setT] = useState<number>(0);
-  useEffect(() => {
-    if (!playing) return;
-    const id = setInterval(() => setT(x => x + speed), 120);
-    return () => clearInterval(id);
-  }, [playing, speed]);
-
-  // Derive zone state from t and role counts (mock model — fast + readable)
-  const zoneState = useMemo<ZoneStateMap>(() => {
-    const m: ZoneStateMap = {};
-    zones.forEach(z => {
-      const role = roles.find(r => r.id === z.roleId);
-      const staffed = role ? role.count : 0;
-      // capacity proxy: avg unit time / staff
-      const avg = (z.unitMin[0] + z.unitMin[1]) / 2;
-      const ratePerHr = staffed > 0 ? (60 / avg) * staffed * (z.line ? 1.0 : 1.0) : 0;
-
-      // utilization: noisy oscillation around a base set by demand vs capacity
-      const demand = 80; // pieces/hr target
-      const baseUtil = ratePerHr > 0 ? Math.min(98, (demand / ratePerHr) * 100) : 0;
-      const wave = Math.sin((t + z.x * 4) / 20) * 6;
-      const util = Math.max(8, Math.min(99, baseUtil + wave));
-
-      // wip: queue waiting at this zone, 0..40
-      const wipBase = ratePerHr > 0 ? Math.max(0, (demand - ratePerHr) * 0.4) : 30;
-      const wipWave = (Math.sin((t + z.x * 7) / 14) + 1) * 5;
-      const wip = Math.floor(Math.max(0, wipBase + wipWave + (util > 90 ? 8 : 0)));
-
-      const status: ZoneStatus =
-        wip > 25 || util > 92 ? 'hot' :
-        util < 30             ? 'starved' :
-        util > 75             ? 'busy' : 'ok';
-
-      m[z.id] = { staffed, ratePerHr: Math.round(ratePerHr*10)/10, util: Math.round(util), wip, status };
-    });
-    return m;
-  }, [zones, roles, t]);
-
-  // Roll up KPIs
+  // Aggregate KPIs across all workstations.
   const kpis = useMemo(() => {
-    const totalLabor = roles.reduce((s, r) => s + r.count, 0);
-    const totalCostHr = roles.reduce((s, r) => s + r.count * r.costHr, 0);
-    // Throughput = bottleneck
-    const rates = zones.filter(z => z.id !== 'dispatch').map(z => zoneState[z.id]?.ratePerHr || 0);
-    const throughput = Math.min(...rates);
-    const totalWip = zones.reduce((s, z) => s + (zoneState[z.id]?.wip || 0), 0);
-    const avgUtil = Math.round(zones.reduce((s, z) => s + (zoneState[z.id]?.util || 0), 0) / zones.length);
-    const elapsedMin = Math.floor(t / 5);
-    const piecesOut = Math.floor((throughput / 60) * elapsedMin);
-    const costPerPc = piecesOut > 0 ? (totalCostHr * (elapsedMin/60)) / piecesOut : 0;
-    const target = 480; // 1 shift target
-    const onTimePct = Math.min(100, Math.round((piecesOut / target) * 100));
-    const bottleneck = zones.filter(z => z.id !== 'dispatch')
-      .reduce<Zone | undefined>((bn, z) => (zoneState[z.id]?.ratePerHr || 999) < (zoneState[bn?.id ?? '']?.ratePerHr || 999) ? z : bn, zones[0]);
-    return { totalLabor, totalCostHr, throughput: Math.round(throughput), totalWip, avgUtil, elapsedMin, piecesOut, costPerPc, target, onTimePct, bottleneck };
-  }, [zoneState, roles, zones, t]);
-
-  // Coach tip
-  const coachTip = useMemo<CoachTip>(() => {
-    if (!kpis.bottleneck) return null;
-    const bn = zoneState[kpis.bottleneck.id];
-    if (bn?.status === 'hot') return { kind:'warn', msg:`${kpis.bottleneck.label} is choking — add ${kpis.bottleneck.roleId}s or trolleys.`, role: kpis.bottleneck.roleId };
-    const starved = zones.find(z => zoneState[z.id]?.status === 'starved');
-    if (starved) return { kind:'info', msg:`${starved.label} is starved — upstream bottleneck is ${kpis.bottleneck.label}.`, role: starved.roleId };
-    if (kpis.avgUtil > 88) return { kind:'ok', msg:`Line is humming. Try +5 orders/shift to push the limit.` };
-    if (kpis.avgUtil < 50) return { kind:'info', msg:`Capacity unused — reduce labor or pull a bigger order.` };
-    return { kind:'ok', msg:`Balanced flow. Watch ${kpis.bottleneck.label} as orders ramp.` };
-  }, [kpis, zoneState, zones]);
-
-  function setRoleCount(id: string, count: number) {
-    setRoles(rs => rs.map(r => r.id === id ? { ...r, count: Math.max(0, Math.min(r.max, count)) } : r));
-  }
-
-  // Sim time pretty
-  const simHr = 8 + Math.floor(kpis.elapsedMin / 60);
-  const simMn = (kpis.elapsedMin % 60).toString().padStart(2, '0');
+    const totalUtil = twin.workstations.reduce(
+      (acc, w) => acc + (w.kpiObserved?.utilizationPct ?? fakeUtil(w, t)),
+      0,
+    );
+    const avg = twin.workstations.length > 0 ? totalUtil / twin.workstations.length : 0;
+    const hot = twin.workstations.filter((w) => {
+      const u = w.kpiObserved?.utilizationPct ?? fakeUtil(w, t);
+      return u >= 85;
+    }).length;
+    return { avg, hot };
+  }, [twin.workstations, t]);
 
   return (
-    <div style={{
-      height: '100%', display: 'grid',
-      gridTemplateColumns: '1fr 280px',
-      gridTemplateRows: '1fr auto',
-      background: SW_COLORS.paperDeep,
-      fontFamily: SW_FONTS.body,
-    }}>
-      {/* ============= MAIN STAGE ============= */}
-      <div style={{
-        gridColumn:'1', gridRow:'1',
-        display:'flex', flexDirection:'column',
-        minHeight: 0, position:'relative',
-      }}>
-        {/* Title bar / view tabs (AnyLogic style) */}
-        <div style={{
-          display:'flex', alignItems:'center', gap:14,
-          padding:'10px 18px',
-          background: SW_COLORS.paper,
-          borderBottom: `1px solid ${SW_COLORS.line}`,
-        }}>
-          <div>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing:'-0.01em' }}>
-              APPAREL FLOOR — POLO S/S CLASSIC
-            </div>
-            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 700, letterSpacing:'0.5px' }}>
-              PO-4421 · 1,200 PCS · UPS SYSTEM · LINE A+B
-            </div>
-          </div>
-          <div style={{ flex:1 }}/>
-          <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, fontFamily: SW_FONTS.mono, fontWeight:700, color: SW_COLORS.muted }}>
-            <input type="checkbox" checked={showZones} onChange={e=>setShowZones(e.target.checked)} style={{ accentColor: SW_COLORS.brand }}/>
-            <span>SHOW ZONES</span>
-          </div>
-          <div style={{ width:1, height:22, background: SW_COLORS.line }}/>
-          {([
-            { id:'iso2D',   label:'2.5D' },
-            { id:'top',     label:'TOP' },
-            { id:'heatmap', label:'HEAT' },
-            { id:'logic',   label:'LOGIC' },
-          ] as const).map(v => {
-            const active = view === v.id;
-            return (
-              <button key={v.id} onClick={()=>setView(v.id)} style={{
-                background: active ? SW_COLORS.ink : 'transparent',
-                color: active ? SW_COLORS.paper : SW_COLORS.steel,
-                border: `1px solid ${active ? SW_COLORS.ink : SW_COLORS.line}`,
-                fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 900, letterSpacing:'0.06em',
-                padding:'5px 11px', borderRadius: SW_RADIUS.sm, cursor:'pointer',
-              }}>{v.label}</button>
-            );
-          })}
+    <div
+      style={{
+        background: '#0a0d12',
+        borderLeft: '1px solid #ffffff15',
+        padding: 14,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 12,
+        overflow: 'auto',
+      }}
+    >
+      <div>
+        <div
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 9,
+            fontWeight: 800,
+            color: '#ffffff80',
+            letterSpacing: '0.18em',
+            marginBottom: 8,
+          }}
+        >
+          FACTORY KPIs
         </div>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+          <KpiTile label="Avg util" value={`${kpis.avg.toFixed(0)}%`} accent={utilColor(kpis.avg)} />
+          <KpiTile label="Hot stations" value={`${kpis.hot}`} accent={kpis.hot > 0 ? SW_COLORS.alarm : SW_COLORS.ok} />
+          <KpiTile label="Departments" value={`${twin.departments.length}`} accent={SW_COLORS.bobbin} />
+          <KpiTile label="Workstations" value={`${twin.workstations.length}`} accent={SW_COLORS.thread} />
+        </div>
+      </div>
 
-        {/* Stage canvas */}
-        <div style={{
-          flex:1, minHeight: 0, position:'relative',
-          background: `repeating-linear-gradient(0deg, transparent 0 23px, ${SW_COLORS.line} 23px 24px), repeating-linear-gradient(90deg, transparent 0 23px, ${SW_COLORS.line} 23px 24px), ${SW_COLORS.paperDeep}`,
-          overflow:'hidden',
-        }}>
-          {view === 'iso2D' && <FloorIsoView zones={zones} zoneState={zoneState} t={t} showZones={showZones} selectedZone={selectedZone} setSelectedZone={setSelectedZone} trolleys={trolleys} roles={roles}/>}
-          {view === 'top'   && <FloorTopView zones={zones} zoneState={zoneState} t={t} showZones={showZones} selectedZone={selectedZone} setSelectedZone={setSelectedZone} trolleys={trolleys} roles={roles}/>}
-          {view === 'heatmap' && <FloorHeatView zones={zones} zoneState={zoneState}/>}
-          {view === 'logic' && <FloorLogicView zones={zones} zoneState={zoneState}/>}
-
-          {/* Legend (top-right inside stage) */}
-          <div style={{
-            position:'absolute', top:14, right:14, background: SW_COLORS.paper,
-            border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm,
-            padding:'8px 10px', display:'flex', flexDirection:'column', gap:4,
-            fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.steel,
-          }}>
-            <div style={{ fontSize: 9, color: SW_COLORS.muted, letterSpacing:'1px', marginBottom:2 }}>STATUS</div>
-            <LegendDot color={SW_COLORS.ok}    label="OK / FLOWING"/>
-            <LegendDot color={SW_COLORS.thread} label="BUSY 75–92%"/>
-            <LegendDot color={SW_COLORS.alarm} label="HOT / CHOKED"/>
-            <LegendDot color={SW_COLORS.bobbin} label="STARVED"/>
+      <div
+        style={{
+          background: '#ffffff05',
+          border: '1px solid #ffffff15',
+          borderRadius: 6,
+          padding: 12,
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'baseline',
+            marginBottom: 8,
+          }}
+        >
+          <div
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 9,
+              fontWeight: 800,
+              color: '#ffffff80',
+              letterSpacing: '0.18em',
+            }}
+          >
+            INSPECTOR
           </div>
-
-          {/* Coach card (bottom-left over stage) */}
-          {coachTip && (
-            <div style={{
-              position:'absolute', left:14, bottom:14, maxWidth: 380,
-              background: SW_COLORS.ink, color: SW_COLORS.paper,
-              border: `2px solid ${coachTip.kind === 'warn' ? SW_COLORS.alarm : coachTip.kind === 'ok' ? SW_COLORS.ok : SW_COLORS.bobbin}`,
-              borderRadius: SW_RADIUS.md,
-              padding:'10px 12px', display:'flex', gap:10, alignItems:'flex-start',
-            }}>
-              <div style={{
-                width: 32, height:32, borderRadius:'50%',
-                background: coachTip.kind === 'warn' ? SW_COLORS.alarm : coachTip.kind === 'ok' ? SW_COLORS.ok : SW_COLORS.bobbin,
-                display:'flex', alignItems:'center', justifyContent:'center',
-                fontFamily: SW_FONTS.display, fontWeight: 900, fontSize: 16, flexShrink: 0,
-              }}>!</div>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color:'#ffffff80', letterSpacing:'1.5px', fontWeight: 700, marginBottom: 2 }}>SUPERVISOR COACH</div>
-                <div style={{ fontSize: 12, fontWeight: 600, lineHeight: 1.35 }}>{coachTip.msg}</div>
-              </div>
-            </div>
+          {ws && (
+            <button
+              onClick={onClear}
+              style={{
+                background: 'transparent',
+                color: '#ffffffaa',
+                border: 'none',
+                cursor: 'pointer',
+                fontSize: 11,
+                fontFamily: SW_FONTS.mono,
+              }}
+            >
+              ✕ clear
+            </button>
           )}
         </div>
+        {!ws ? (
+          <div style={{ fontSize: 12, color: '#ffffffaa', fontStyle: 'italic' }}>
+            Click a workstation to inspect.
+          </div>
+        ) : (
+          <>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: '#fff' }}>
+              {ws.name}
+            </div>
+            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#ffffff80', marginTop: 2 }}>
+              {fix?.label ?? ws.catalogId}  ·  {dept?.name ?? '—'}
+            </div>
+            <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
+              <KpiTile label="Util" value={`${util.toFixed(0)}%`} accent={utilColor(util)} />
+              <KpiTile
+                label="Workers"
+                value={`${ws.resources.workersRequired}`}
+                accent={SW_COLORS.bobbin}
+              />
+              <KpiTile
+                label="Capacity/hr"
+                value={`${ws.kpiTargets.capacityPerHr ?? '—'}`}
+                accent={SW_COLORS.fabric}
+              />
+              <KpiTile
+                label="Op"
+                value={ws.operation.opId ?? ws.operation.freeText ?? '—'}
+                accent={SW_COLORS.thread}
+              />
+            </div>
+          </>
+        )}
       </div>
 
-      {/* ============= RIGHT KPI RAIL ============= */}
-      <div style={{
-        gridColumn:'2', gridRow:'1',
-        background: SW_COLORS.paper,
-        borderLeft: `1px solid ${SW_COLORS.line}`,
-        overflow:'auto',
-        display:'flex', flexDirection:'column',
-      }}>
-        {/* Sim clock */}
-        <div style={{
-          background: SW_COLORS.ink, color: SW_COLORS.paper,
-          padding:'14px 16px',
-          display:'flex', alignItems:'center', gap:10, justifyContent:'space-between',
-        }}>
-          <div>
-            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color:'#ffffff80', letterSpacing:'1.5px', fontWeight: 700 }}>SIM CLOCK</div>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 26, fontWeight: 900, letterSpacing:'-0.02em', lineHeight: 1 }}>
-              {String(simHr).padStart(2,'0')}:{simMn}
-            </div>
-          </div>
-          <div style={{ display:'flex', flexDirection:'column', alignItems:'flex-end', gap: 3 }}>
-            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color:'#ffffff80', letterSpacing:'1.5px', fontWeight: 700 }}>SHIFT TARGET</div>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: kpis.onTimePct < 70 ? SW_COLORS.alarm : SW_COLORS.thread }}>
-              {kpis.piecesOut}<span style={{ fontSize: 10, opacity: 0.5 }}>/{kpis.target}</span>
-            </div>
-          </div>
+      <div
+        style={{
+          background: '#ffffff05',
+          border: '1px solid #ffffff15',
+          borderRadius: 6,
+          padding: 12,
+          flex: 1,
+          minHeight: 100,
+          display: 'flex',
+          flexDirection: 'column',
+        }}
+      >
+        <div
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 9,
+            fontWeight: 800,
+            color: '#ffffff80',
+            letterSpacing: '0.18em',
+            marginBottom: 8,
+          }}
+        >
+          EVENT FEED
         </div>
-
-        {/* Big metric cards */}
-        <div style={{ padding: 14, display:'grid', gridTemplateColumns:'1fr 1fr', gap: 8 }}>
-          <KPI label="THROUGHPUT" value={kpis.throughput} unit="pcs/hr" tone="ok"/>
-          <KPI label="WIP TOTAL"   value={kpis.totalWip}   unit="pcs"    tone={kpis.totalWip > 80 ? 'alarm' : 'thread'}/>
-          <KPI label="AVG UTIL"    value={kpis.avgUtil}    unit="%"      tone={kpis.avgUtil > 85 ? 'alarm' : kpis.avgUtil > 60 ? 'ok' : 'bobbin'}/>
-          <KPI label="LABOR"       value={kpis.totalLabor} unit="ppl"    tone="steel"/>
-          <KPI label="$/PIECE"     value={kpis.costPerPc.toFixed(2)} unit="USD" tone="steel"/>
-          <KPI label="ON-TIME"     value={kpis.onTimePct}  unit="%"      tone={kpis.onTimePct > 80 ? 'ok' : 'alarm'}/>
-        </div>
-
-        {/* Bottleneck card */}
-        {kpis.bottleneck && (
-          <div style={{ margin: '0 14px 14px', border:`2px solid ${SW_COLORS.alarm}`, borderRadius: SW_RADIUS.sm, padding: 10, background:'#FFF1ED' }}>
-            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.alarm, letterSpacing:'1.5px' }}>⚠ BOTTLENECK</div>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, marginTop: 2 }}>{kpis.bottleneck.label}</div>
-            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, marginTop: 2 }}>
-              {zoneState[kpis.bottleneck.id]?.ratePerHr} pcs/hr · WIP {zoneState[kpis.bottleneck.id]?.wip}
-            </div>
-          </div>
-        )}
-
-        {/* Per-zone rate list */}
-        <div style={{ padding: '0 14px 14px' }}>
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1.5px', marginBottom: 6 }}>PER-ZONE RATE</div>
-          {zones.filter(z => z.id !== 'dispatch').map(z => {
-            const s = zoneState[z.id];
+        <div style={{ flex: 1, overflow: 'auto', fontFamily: SW_FONTS.mono, fontSize: 11, lineHeight: 1.6 }}>
+          {events.length === 0 && (
+            <div style={{ color: '#ffffff60', fontStyle: 'italic' }}>No events yet — press PLAY.</div>
+          )}
+          {events.map((e) => {
+            const wsName = twin.workstations.find((w) => w.id === e.ws)?.name?.slice(0, 16) ?? '—';
+            const col =
+              e.kind === 'milestone'
+                ? SW_COLORS.ok
+                : e.kind === 'defect'
+                  ? SW_COLORS.warn
+                  : SW_COLORS.alarm;
             return (
-              <div key={z.id} onClick={()=>setSelectedZone(z.id)} style={{
-                display:'flex', alignItems:'center', gap:8, padding: '5px 0',
-                borderBottom: `1px solid ${SW_COLORS.line}`,
-                cursor:'pointer',
-                background: selectedZone === z.id ? SW_COLORS.brandLite : 'transparent',
-              }}>
-                <div style={{ width: 6, height: 24, background: z.stroke, borderRadius: 1 }}/>
-                <div style={{ flex: 1, minWidth: 0 }}>
-                  <div style={{ fontSize: 11, fontWeight: 700, fontFamily: SW_FONTS.body, whiteSpace:'nowrap', overflow:'hidden', textOverflow:'ellipsis' }}>{z.label}</div>
-                  <div style={{ height: 3, background: SW_COLORS.line, borderRadius: 1, marginTop: 3, overflow:'hidden' }}>
-                    <div style={{
-                      height:'100%', width:`${s?.util || 0}%`,
-                      background: s?.status === 'hot' ? SW_COLORS.alarm : s?.status === 'busy' ? SW_COLORS.thread : s?.status === 'starved' ? SW_COLORS.bobbin : SW_COLORS.ok,
-                    }}/>
-                  </div>
-                </div>
-                <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700, textAlign:'right' }}>
-                  {s?.ratePerHr}
-                  <div style={{ fontSize: 9, color: SW_COLORS.muted }}>pcs/hr</div>
-                </div>
+              <div key={e.id} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
+                <span style={{ color: col, width: 96, fontWeight: 700 }}>{e.label}</span>
+                <span style={{ color: '#ffffffaa', flex: 1 }}>· {wsName}</span>
               </div>
             );
           })}
         </div>
       </div>
-
-      {/* ============= BOTTOM CONTROL DECK (AnyLogic-style) ============= */}
-      <div style={{
-        gridColumn:'1 / 3', gridRow:'2',
-        background: SW_COLORS.paper,
-        borderTop: `2px solid ${SW_COLORS.ink}`,
-        padding: '12px 18px 14px',
-      }}>
-        <div style={{ display:'flex', alignItems:'flex-start', gap: 18 }}>
-          {/* Roles row (the AnyLogic counter knobs) */}
-          <div style={{ flex: 1, display:'grid', gridTemplateColumns:'repeat(8, 1fr)', gap: 10 }}>
-            {roles.map(r => {
-              const utilForRole = (() => {
-                const zs = zones.filter(z => z.roleId === r.id).map(z => zoneState[z.id]?.util || 0);
-                return zs.length ? Math.round(zs.reduce((a,b)=>a+b,0)/zs.length) : 0;
-              })();
-              return <RoleKnob key={r.id} role={r} util={utilForRole} onChange={(c)=>setRoleCount(r.id, c)}/>;
-            })}
-          </div>
-          {/* Trolleys + orders block */}
-          <div style={{ width: 280, display:'flex', flexDirection:'column', gap: 8 }}>
-            <div style={{ display:'flex', gap: 10 }}>
-              <div style={{ flex: 1 }}>
-                <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1px' }}>TROLLEYS</div>
-                <div style={{ display:'flex', alignItems:'center', gap:6, marginTop: 2 }}>
-                  <div style={{ width: 22, height: 22, background: SW_COLORS.steel, color:'#fff', display:'flex', alignItems:'center', justifyContent:'center', borderRadius: 3, fontSize: 13 }}>⏍</div>
-                  <input type="number" value={trolleys} min={0} max={FLOOR_TROLLEY_MAX}
-                    onChange={e=>setTrolleys(Math.max(0, Math.min(FLOOR_TROLLEY_MAX, +e.target.value)))}
-                    style={{ width: 50, padding:'3px 5px', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13, border:`1px solid ${SW_COLORS.line}`, borderRadius: 3 }}/>
-                  <input type="range" min={0} max={FLOOR_TROLLEY_MAX} value={trolleys} onChange={e=>setTrolleys(+e.target.value)} style={{ flex: 1, accentColor: SW_COLORS.brand }}/>
-                </div>
-              </div>
-            </div>
-
-            <div style={{ background: SW_COLORS.paperDeep, padding: 8, borderRadius: SW_RADIUS.sm, border:`1px solid ${SW_COLORS.line}` }}>
-              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing:'1px', marginBottom: 4 }}>ORDERS</div>
-              <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:11 }}>
-                <span style={{ width:90 }}>Interarrival</span>
-                <input type="number" value={orderParams.interMin} step={0.5} onChange={e=>setOrderParams({...orderParams, interMin: +e.target.value})} style={miniInputStyle}/>
-                <span>–</span>
-                <input type="number" value={orderParams.interMax} step={0.5} onChange={e=>setOrderParams({...orderParams, interMax: +e.target.value})} style={miniInputStyle}/>
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize:10, color: SW_COLORS.muted }}>min</span>
-              </div>
-              <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, marginTop: 4 }}>
-                <span style={{ width:90 }}>Queue cap</span>
-                <input type="number" value={orderParams.queueCap} onChange={e=>setOrderParams({...orderParams, queueCap: +e.target.value})} style={miniInputStyle}/>
-              </div>
-              <div style={{ display:'flex', alignItems:'center', gap:6, fontSize:11, marginTop: 4 }}>
-                <span style={{ width:90 }}>Truck arrive</span>
-                <input type="number" value={orderParams.truckMin} onChange={e=>setOrderParams({...orderParams, truckMin: +e.target.value})} style={miniInputStyle}/>
-                <span>–</span>
-                <input type="number" value={orderParams.truckMax} onChange={e=>setOrderParams({...orderParams, truckMax: +e.target.value})} style={miniInputStyle}/>
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize:10, color: SW_COLORS.muted }}>min</span>
-              </div>
-            </div>
-          </div>
-        </div>
-
-        {/* Transport bar */}
-        <div style={{
-          marginTop: 12, display:'flex', alignItems:'center', gap: 10,
-          background: SW_COLORS.ink, color: SW_COLORS.paper,
-          padding:'8px 12px', borderRadius: SW_RADIUS.sm,
-        }}>
-          <button onClick={()=>setPlaying(p=>!p)} style={transportBtn}>
-            {playing ? '⏸' : '▶'}
-          </button>
-          <button onClick={()=>{ setT(0); }} style={transportBtn}>⏮</button>
-          <button onClick={()=>setSpeed(Math.max(1, speed-1))} style={transportBtn}>−</button>
-          <div style={{ background: SW_COLORS.brand, color:'#fff', padding:'5px 12px', borderRadius: 3, fontFamily: SW_FONTS.display, fontWeight: 900, minWidth: 44, textAlign:'center' }}>×{speed}</div>
-          <button onClick={()=>setSpeed(Math.min(20, speed+1))} style={transportBtn}>+</button>
-
-          <div style={{ width:1, height:20, background:'#ffffff20', margin:'0 4px' }}/>
-
-          {/* Progress through shift */}
-          <div style={{ flex: 1, height: 6, background:'#ffffff15', borderRadius: 3, overflow:'hidden', position:'relative' }}>
-            <div style={{ position:'absolute', left:0, top:0, height:'100%', width:`${Math.min(100, (kpis.elapsedMin/480)*100)}%`, background: SW_COLORS.brand }}/>
-          </div>
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color:'#ffffff90' }}>
-            {kpis.elapsedMin}/480 MIN
-          </div>
-
-          <div style={{ width:1, height:20, background:'#ffffff20', margin:'0 4px' }}/>
-
-          <div style={{ display:'flex', alignItems:'center', gap: 5 }}>
-            <div style={{ width:7, height:7, borderRadius:'50%', background: playing ? SW_COLORS.ok : SW_COLORS.warn, animation: playing ? 'sw-blink 1.2s infinite' : 'none' }}/>
-            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, letterSpacing:'1px' }}>{playing ? 'RUNNING' : 'PAUSED'}</span>
-          </div>
-
-          <button onClick={()=>navigate('/layout')} style={{ ...transportBtn, fontFamily: SW_FONTS.display, fontSize: 10, fontWeight: 900, letterSpacing: '0.06em', padding: '6px 10px' }}>▦ LAYOUT</button>
-          <button onClick={()=>navigate('/kpi')} style={{ ...transportBtn, fontFamily: SW_FONTS.display, fontSize: 10, fontWeight: 900, letterSpacing: '0.06em', padding: '6px 10px' }}>⌬ REPORT</button>
-        </div>
-      </div>
-
-      <style>{`
-        @keyframes sw-blink { 0%,100% { opacity: 1; } 50% { opacity: 0.35; } }
-        @keyframes sw-march { 0% { stroke-dashoffset: 0; } 100% { stroke-dashoffset: -16; } }
-      `}</style>
     </div>
   );
 }
+
+function KpiTile({ label, value, accent }: { label: string; value: string; accent: string }) {
+  return (
+    <div
+      style={{
+        background: '#ffffff08',
+        border: '1px solid #ffffff15',
+        borderRadius: 6,
+        padding: '8px 10px',
+      }}
+    >
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 9,
+          fontWeight: 700,
+          color: '#ffffff80',
+          letterSpacing: '0.1em',
+          textTransform: 'uppercase',
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.display,
+          fontSize: 18,
+          fontWeight: 900,
+          color: accent,
+          marginTop: 2,
+          letterSpacing: '-0.01em',
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        {value}
+      </div>
+    </div>
+  );
+}
+
+function FloorBtn({ children, onClick }: { children: ReactNode; onClick: () => void }) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        background: '#ffffff10',
+        color: '#fff',
+        border: '1px solid #ffffff20',
+        cursor: 'pointer',
+        padding: '4px 10px',
+        fontFamily: SW_FONTS.mono,
+        fontSize: 11,
+        fontWeight: 700,
+        borderRadius: 4,
+        minWidth: 36,
+      }}
+    >
+      {children}
+    </button>
+  );
+}
+

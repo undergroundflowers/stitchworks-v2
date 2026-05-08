@@ -29,10 +29,14 @@ const SHIFT_MIN = 480;
  * mount, then renders KPIs from the resulting state. Yamazumi assignments
  * are user-overridable via drag; overrides are persisted in the project
  * store keyed by garment template id.
+ *
+ * `embedded` mode drops the outer scroll wrapper and the "Back to twin"
+ * footer button so the same content can be mounted inside another page
+ * (e.g. underneath the LiveSim view).
  */
-export function ReportsPage() {
+export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
-  const project = useProject((s) => s);
+  const project = useProject();
   const garments = useGarments();
   const setYamazumiOverride = project.setYamazumiOverride;
   const clearYamazumiOverride = project.clearYamazumiOverride;
@@ -108,7 +112,9 @@ export function ReportsPage() {
   const wipBundles = agg.wipBundles.mean;
 
   return (
-    <div style={{ width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
+    <div style={embedded
+      ? { width:'100%', background: SW_COLORS.paperDeep, padding: 24 }
+      : { width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
       <SectionHeader kicker="Reports" title="Production KPIs"
         sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} ops respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
         right={
@@ -324,7 +330,9 @@ export function ReportsPage() {
 
       <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
         <Button variant="secondary" icon="↓">Export PDF</Button>
-        <Button variant="dark" icon="✓" onClick={() => navigate('/twin')}>Back to twin</Button>
+        {!embedded && (
+          <Button variant="dark" icon="✓" onClick={() => navigate('/builder')}>Back to builder</Button>
+        )}
       </div>
     </div>
   );

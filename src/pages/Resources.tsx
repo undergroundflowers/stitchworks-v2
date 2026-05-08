@@ -26,7 +26,7 @@ import { useProject, useGarments, type EffectiveGarments } from '../store';
  */
 export function ResourcesPage() {
   const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster' | 'skills' | 'operations'>('operators');
-  const project = useProject((s) => s);
+  const project = useProject();
   const garments = useGarments();
   const skillMatrix = project.skillMatrix;
   const setSkill = project.setSkill;
@@ -285,7 +285,7 @@ interface OperationsPanelProps {
  * Yamazumi, Twin run-line, etc.) picks them up immediately.
  */
 function OperationsPanel({ garments }: OperationsPanelProps) {
-  const project = useProject((s) => s);
+  const project = useProject();
   const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
   const garment = garments.byId[garmentId] ?? garments.all[0];
   const builtIn = GARMENT_TEMPLATES[garmentId];

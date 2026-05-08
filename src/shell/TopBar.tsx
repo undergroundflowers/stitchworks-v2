@@ -19,7 +19,6 @@ export function TopBar({ game }: TopBarProps) {
   // Find the current route by matching the pathname; default to 'menu'.
   const currentRoute =
     ROUTES.find((r) => r.path === location.pathname)?.id ?? 'menu';
-  const xpPct = (game.xp / game.xpForNext) * 100;
 
   return (
     <div
@@ -76,24 +75,42 @@ export function TopBar({ game }: TopBarProps) {
 
       <div style={{ width: 1, height: 24, background: '#ffffff20' }} />
 
-      {/* Factory + day/shift */}
-      <div style={{ fontFamily: SW_FONTS.body, fontSize: 12 }}>
+      {/* Factory + settings icon */}
+      <div style={{ fontFamily: SW_FONTS.body, fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
         <div style={{ fontWeight: 700, fontSize: 12 }}>{game.factoryName}</div>
-        <div
+        <button
+          onClick={() => navigate('/settings')}
+          aria-label="Settings"
+          title="Settings"
+          onMouseEnter={(e) => {
+            if (currentRoute !== 'settings') e.currentTarget.style.background = '#ffffff0a';
+          }}
+          onMouseLeave={(e) => {
+            if (currentRoute !== 'settings') e.currentTarget.style.background = 'transparent';
+          }}
           style={{
-            fontSize: 10,
-            color: '#ffffff80',
-            fontFamily: SW_FONTS.mono,
-            fontWeight: 600,
+            background: currentRoute === 'settings' ? '#ffffff15' : 'transparent',
+            border: 'none',
+            cursor: 'pointer',
+            padding: 4,
+            width: 26,
+            height: 26,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            color: currentRoute === 'settings' ? SW_COLORS.brand : '#ffffffcc',
+            fontSize: 14,
+            borderRadius: SW_RADIUS.sm,
+            transition: 'background 100ms',
           }}
         >
-          DAY {game.day} · SHIFT {game.shift}
-        </div>
+          ⚙
+        </button>
       </div>
 
       {/* Nav */}
       <div style={{ flex: 1, display: 'flex', justifyContent: 'center', gap: 2 }}>
-        {ROUTES.filter((r) => r.kind === 'main').map((r) => {
+        {ROUTES.filter((r) => r.kind === 'main' && r.id !== 'settings').map((r) => {
           const active = currentRoute === r.id;
           return (
             <button
@@ -142,151 +159,6 @@ export function TopBar({ game }: TopBarProps) {
         })}
       </div>
 
-      {/* Gamification HUD */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 14 }}>
-        {/* Currency */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            fontFamily: SW_FONTS.mono,
-            fontSize: 12,
-            fontWeight: 700,
-          }}
-        >
-          <span style={{ color: SW_COLORS.thread, fontSize: 14 }}>$</span>
-          <span style={{ color: SW_COLORS.thread }}>
-            {game.currency.toLocaleString()}
-          </span>
-        </div>
-
-        {/* Level + XP */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <div
-            style={{
-              width: 28,
-              height: 28,
-              borderRadius: '50%',
-              background: SW_COLORS.brand,
-              color: '#fff',
-              display: 'flex',
-              alignItems: 'center',
-              justifyContent: 'center',
-              fontFamily: SW_FONTS.display,
-              fontSize: 12,
-              fontWeight: 900,
-            }}
-          >
-            {game.level}
-          </div>
-          <div style={{ width: 90 }}>
-            <div
-              style={{
-                fontSize: 9,
-                color: '#ffffff80',
-                fontFamily: SW_FONTS.mono,
-                fontWeight: 700,
-                letterSpacing: '0.5px',
-              }}
-            >
-              {game.xp}/{game.xpForNext} XP
-            </div>
-            <div
-              style={{
-                height: 4,
-                background: '#ffffff15',
-                borderRadius: 2,
-                overflow: 'hidden',
-                marginTop: 2,
-              }}
-            >
-              <div
-                style={{
-                  width: `${xpPct}%`,
-                  height: '100%',
-                  background: SW_COLORS.brand,
-                }}
-              />
-            </div>
-          </div>
-        </div>
-
-        {/* Efficiency */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 6,
-            background: '#ffffff10',
-            padding: '4px 9px',
-            borderRadius: SW_RADIUS.sm,
-          }}
-        >
-          <span
-            style={{
-              fontSize: 9,
-              color: '#ffffff80',
-              fontFamily: SW_FONTS.mono,
-              fontWeight: 700,
-            }}
-          >
-            EFF
-          </span>
-          <span
-            style={{
-              fontFamily: SW_FONTS.display,
-              fontSize: 14,
-              fontWeight: 900,
-              color:
-                game.efficiency >= 80
-                  ? SW_COLORS.ok
-                  : game.efficiency >= 60
-                    ? SW_COLORS.thread
-                    : SW_COLORS.alarm,
-            }}
-          >
-            {game.efficiency}%
-          </span>
-        </div>
-
-        {/* Achievements */}
-        <div
-          style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 5,
-            fontSize: 11,
-            fontFamily: SW_FONTS.mono,
-            fontWeight: 700,
-            color: '#ffffffcc',
-          }}
-        >
-          <span style={{ fontSize: 13 }}>♦</span>
-          <span>
-            {game.achievements}/{game.totalAchievements}
-          </span>
-        </div>
-
-        {/* User chip */}
-        <div
-          style={{
-            width: 30,
-            height: 30,
-            borderRadius: '50%',
-            background: SW_COLORS.steelLite,
-            display: 'flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            fontSize: 11,
-            fontWeight: 800,
-            fontFamily: SW_FONTS.body,
-            border: '1px solid #ffffff20',
-          }}
-        >
-          RM
-        </div>
-      </div>
     </div>
   );
 }

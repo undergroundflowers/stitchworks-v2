@@ -7,20 +7,18 @@ import { SW_TWEAK_DEFAULTS, applyVibe } from './lib/vibe';
 import { TweaksPanel, TweakSection, TweakSlider, TweakRadio, useTweaks } from './tweaks';
 
 import { MenuPage } from './pages/Menu';
-import { FactoryTwinPage } from './pages/FactoryTwin';
-import { LayoutBuilderPage } from './pages/LayoutBuilder';
 import { OrdersPage } from './pages/Orders';
 import { LiveSimPage } from './pages/LiveSim';
-import { LiveFloorPage } from './pages/LiveFloor';
 import { LineBalancePage } from './pages/LineBalance';
 import { ScenariosPage } from './pages/Scenarios';
 import { ResourcesPage } from './pages/Resources';
 import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { Onboarding } from './pages/Onboarding';
-import { IsoBuilderPage } from './pages/IsoBuilder';
 import { DeptInteriorPage } from './pages/DeptInterior';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
+import { BuilderPage } from './pages/Builder';
+import { LiveFloorPage } from './pages/LiveFloor';
 
 /**
  * App shell: top bar + route outlet, vibe-driven theming, the floating
@@ -70,7 +68,7 @@ export default function App() {
     if (!skipped) {
       // mirror the original behaviour: completing onboarding lands you on
       // the live floor; skipping leaves you wherever you were
-      window.history.pushState({}, '', '/floor');
+      window.history.pushState({}, '', '/builder');
       window.dispatchEvent(new PopStateEvent('popstate'));
     }
   };
@@ -94,19 +92,19 @@ export default function App() {
       <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
         <Routes>
           <Route path="/" element={<MenuPage />} />
-          <Route path="/twin" element={<FactoryTwinPage />} />
-          <Route path="/layout" element={<LayoutBuilderPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/sim" element={<LiveSimPage />} />
-          <Route path="/floor" element={<LiveFloorPage />} />
           <Route path="/balance" element={<LineBalancePage />} />
           <Route path="/scenarios" element={<ScenariosPage />} />
           <Route path="/resources" element={<ResourcesPage />} />
           <Route path="/kpi" element={<ReportsPage />} />
           <Route path="/settings" element={<SettingsPage />} />
-          {/* New in v2 design import — currently stubbed pending deep port */}
-          <Route path="/iso" element={<IsoBuilderPage />} />
-          <Route path="/iso/dept/:deptId" element={<IsoBuilderPage />} />
+          {/* Live Floor — iso 3D / top 2D / heat-map views over the active twin */}
+          <Route path="/floor" element={<LiveFloorPage />} />
+          {/* Factory Builder — single authoring surface for the digital twin.
+              Both /iso (legacy nav id) and /builder route here. */}
+          <Route path="/builder" element={<BuilderPage />} />
+          <Route path="/iso" element={<BuilderPage />} />
           <Route path="/dept/:deptId" element={<DeptInteriorPage />} />
           <Route path="/workstation/:deptId/:wsId" element={<WorkstationDetailPage />} />
         </Routes>
