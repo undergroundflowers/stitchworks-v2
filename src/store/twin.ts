@@ -37,17 +37,21 @@ import {
   type Rect,
   type Rotation,
   type KpiObservedAttrs,
+  type Connector,
+  type ConnectorKind,
   emptyTwin,
   forkTwin,
   newDeptId,
   newWorkstationId,
   newScenarioId,
   newRunId,
+  newConnectorId,
   makeWorkstation,
+  normalizeTwin,
   validateTwin,
 } from '../domain/twin';
 
-export const TWIN_STORE_SCHEMA_VERSION = 1 as const;
+export const TWIN_STORE_SCHEMA_VERSION = 2 as const;
 
 // ============================================================================
 // STATE SHAPE
@@ -90,6 +94,21 @@ export interface TwinState {
   /** Clone a workstation, offsetting the copy slightly. Returns the new id
    *  (or null if the source id doesn't resolve in the active twin). */
   duplicateWorkstation: (id: string) => string | null;
+
+  // ── Connector CRUD ───────────────────────────────────────────────────────
+  /** Create a directed connector between two workstations. Returns the
+   *  created id, or null if the source/target ids don't resolve in the
+   *  active twin or if from === to. */
+  addConnector: (input: {
+    kind: ConnectorKind;
+    fromWsId: string;
+    toWsId: string;
+    label?: string;
+  }) => string | null;
+  /** Patch fields on a connector. */
+  updateConnector: (id: string, patch: Partial<Omit<Connector, 'id'>>) => void;
+  /** Remove a connector by id. */
+  removeConnector: (id: string) => void;
 
   // ── Lens-attribute writes (sugar over updateWorkstation) ─────────────────
   setOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
@@ -220,12 +239,21 @@ export const useTwin = create<TwinState>()(
 
       removeDepartment: (id) =>
         set((s) =>
-          updateActive(s, (twin) => ({
-            ...twin,
-            departments: twin.departments.filter((d) => d.id !== id),
-            // Cascade: workstations whose dept disappeared also disappear.
-            workstations: twin.workstations.filter((w) => w.deptId !== id),
-          })),
+          updateActive(s, (twin) => {
+            // Cascade: workstations whose dept disappeared also disappear,
+            // and any connector touching one of those workstations follows.
+            const orphanedWsIds = new Set(
+              twin.workstations.filter((w) => w.deptId === id).map((w) => w.id),
+            );
+            return {
+              ...twin,
+              departments: twin.departments.filter((d) => d.id !== id),
+              workstations: twin.workstations.filter((w) => w.deptId !== id),
+              connectors: (twin.connectors ?? []).filter(
+                (c) => !orphanedWsIds.has(c.fromWsId) && !orphanedWsIds.has(c.toWsId),
+              ),
+            };
+          }),
         ),
 
       moveDepartment: (id, bounds) =>
@@ -258,6 +286,10 @@ export const useTwin = create<TwinState>()(
           updateActive(s, (twin) => ({
             ...twin,
             workstations: twin.workstations.filter((w) => w.id !== id),
+            // Cascade: drop connectors that touch the removed workstation.
+            connectors: (twin.connectors ?? []).filter(
+              (c) => c.fromWsId !== id && c.toWsId !== id,
+            ),
           })),
         ),
 
@@ -302,6 +334,47 @@ export const useTwin = create<TwinState>()(
         );
         return newId;
       },
+
+      // ── Connector CRUD ─────────────────────────────────────────────────────
+      addConnector: (input) => {
+        if (input.fromWsId === input.toWsId) return null;
+        const active = selectActiveTwin(get());
+        const wsIds = new Set(active.workstations.map((w) => w.id));
+        if (!wsIds.has(input.fromWsId) || !wsIds.has(input.toWsId)) return null;
+        const id = newConnectorId();
+        const conn: Connector = {
+          id,
+          kind: input.kind,
+          fromWsId: input.fromWsId,
+          toWsId: input.toWsId,
+          label: input.label,
+        };
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            connectors: [...(twin.connectors ?? []), conn],
+          })),
+        );
+        return id;
+      },
+
+      updateConnector: (id, patch) =>
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            connectors: (twin.connectors ?? []).map((c) =>
+              c.id === id ? { ...c, ...patch } : c,
+            ),
+          })),
+        ),
+
+      removeConnector: (id) =>
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            connectors: (twin.connectors ?? []).filter((c) => c.id !== id),
+          })),
+        ),
 
       // ── Lens-attribute sugar ───────────────────────────────────────────────
       setOperation: (wsId, patch) =>
@@ -488,6 +561,9 @@ export const useTwin = create<TwinState>()(
           moveWorkstation: get().moveWorkstation,
           rotateWorkstation: get().rotateWorkstation,
           duplicateWorkstation: get().duplicateWorkstation,
+          addConnector: get().addConnector,
+          updateConnector: get().updateConnector,
+          removeConnector: get().removeConnector,
           setOperation: get().setOperation,
           setResources: get().setResources,
           setKpiTargets: get().setKpiTargets,
@@ -539,7 +615,28 @@ export const useTwin = create<TwinState>()(
         scenarios: state.scenarios,
         activeScenarioId: state.activeScenarioId,
       }),
-      // No migrations yet — store is brand new.
+      // v1 → v2: add `connectors: []` to canonical and every scenario's twin.
+      // Existing factory data is otherwise unchanged.
+      migrate: (persisted, fromVersion) => {
+        const s = (persisted ?? {}) as {
+          canonical?: unknown;
+          scenarios?: Array<{ twin?: unknown; runs?: unknown[] } & Record<string, unknown>>;
+          activeScenarioId?: string | null;
+        };
+        if (fromVersion < 2) {
+          return {
+            schemaVersion: TWIN_STORE_SCHEMA_VERSION,
+            canonical: normalizeTwin(s.canonical),
+            scenarios: (s.scenarios ?? []).map((scn) => ({
+              ...scn,
+              twin: normalizeTwin(scn.twin),
+              runs: scn.runs ?? [],
+            })),
+            activeScenarioId: s.activeScenarioId ?? null,
+          };
+        }
+        return persisted;
+      },
     },
   ),
 );

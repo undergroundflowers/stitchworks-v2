@@ -35,7 +35,7 @@ import {
 // SCHEMA
 // ============================================================================
 
-export const TWIN_SCHEMA_VERSION = 1 as const;
+export const TWIN_SCHEMA_VERSION = 2 as const;
 export type TwinSchemaVersion = typeof TWIN_SCHEMA_VERSION;
 
 // ============================================================================
@@ -149,6 +149,28 @@ export interface KpiObservedAttrs {
 }
 
 // ============================================================================
+// CONNECTORS — directed links between workstations that define flow
+// ============================================================================
+
+/** A connector's *meaning*. The geometry is identical for all kinds; only the
+ *  rendering tint and the inspector label differ.
+ *   • flow      — material/garment progresses from → to.
+ *   • operator  — operator role moves from station to station (e.g. floater).
+ *   • material  — feeder/raw-material supply path. */
+export type ConnectorKind = 'flow' | 'operator' | 'material';
+
+export interface Connector {
+  id: string;
+  kind: ConnectorKind;
+  /** Source workstation id. */
+  fromWsId: string;
+  /** Target workstation id. */
+  toWsId: string;
+  /** Optional caption shown on the arrow. */
+  label?: string;
+}
+
+// ============================================================================
 // DRAWABLE LAYER 2 — WORKSTATION
 // ============================================================================
 
@@ -198,6 +220,10 @@ export interface Twin {
   gridH: number;
   departments: Department[];
   workstations: Workstation[];
+  /** Directed flow/operator/material links between workstations. Edge geometry
+   *  is computed from the source + target workstation footprints; this list
+   *  stores only the topology. */
+  connectors: Connector[];
   notes?: string;
 }
 
@@ -270,6 +296,7 @@ export const newWorkstationId = () => newId('ws');
 export const newTwinId = () => newId('twin');
 export const newScenarioId = () => newId('scn');
 export const newRunId = () => newId('run');
+export const newConnectorId = () => newId('cn');
 
 // ============================================================================
 // FACTORIES
@@ -292,6 +319,170 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
     gridH: 28,
     departments: [],
     workstations: [],
+    connectors: [],
+  };
+}
+
+/**
+ * Bring a Twin payload up to the current schema. Used by the persist
+ * middleware migration and by importers. Additive only — never strips
+ * fields the current code can handle.
+ */
+export function normalizeTwin(input: unknown): Twin {
+  const t = (input ?? {}) as Partial<Twin> & Record<string, unknown>;
+  return {
+    schemaVersion: TWIN_SCHEMA_VERSION,
+    id: t.id ?? newTwinId(),
+    name: t.name ?? 'Untitled factory',
+    parentTwinId: (t.parentTwinId ?? null) as string | null,
+    isCanonical: t.isCanonical ?? true,
+    createdAt: t.createdAt ?? new Date().toISOString(),
+    modifiedAt: t.modifiedAt ?? new Date().toISOString(),
+    gridW: t.gridW ?? 36,
+    gridH: t.gridH ?? 28,
+    departments: t.departments ?? [],
+    workstations: t.workstations ?? [],
+    connectors: t.connectors ?? [],
+    notes: t.notes,
+  };
+}
+
+/**
+ * Build the "Pachyatap Demo Apparel Co." factory — a fully-populated canonical
+ * twin used to seed a fresh project so that the Builder and the Live Floor are
+ * never empty in a demo. Lays out a five-department T-shirt factory on a
+ * 36×26 grid: Storage, Cutting, QC at the top; Sewing line and Finishing
+ * across the bottom. Every sewing station is wired to a real op id from the
+ * built-in `tshirt` garment so the Operations lens reads correctly.
+ */
+export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
+  const now = new Date().toISOString();
+  const dStore  = newDeptId();
+  const dCut    = newDeptId();
+  const dQc     = newDeptId();
+  const dSew    = newDeptId();
+  const dFinish = newDeptId();
+
+  const departments: Department[] = [
+    { id: dStore,  name: 'Storage',     kind: 'Storage',   color: 'cream',  bounds: { x: 1,  y: 1, w: 8,  h: 6  }, notes: 'Inbound fabric rolls + finished-goods staging.' },
+    { id: dCut,    name: 'Cutting',     kind: 'Cutting',   color: 'green',  bounds: { x: 10, y: 1, w: 14, h: 6  }, notes: 'Spread + auto-cut + bundle.' },
+    { id: dQc,     name: 'QC Bay',      kind: 'QC',        color: 'red',    bounds: { x: 25, y: 1, w: 9,  h: 6  }, notes: '4-point fabric inspection + audit.' },
+    { id: dSew,    name: 'Sewing Line', kind: 'Sewing',    color: 'blue',   bounds: { x: 1,  y: 8, w: 23, h: 14 }, notes: 'T-shirt assembly · 8 stations · PBS.' },
+    { id: dFinish, name: 'Finishing',   kind: 'Finishing', color: 'yellow', bounds: { x: 25, y: 8, w: 9,  h: 14 }, notes: 'Press · pack · dispatch.' },
+  ];
+
+  type WsSeed = {
+    deptId: string;
+    catalogId: string;
+    position: Vec2;
+    name: string;
+    /** Optional Operations-lens binding to a tshirt op + bundle size. */
+    op?: { opId: string; bundleSize?: number };
+  };
+
+  const seeds: WsSeed[] = [
+    // ── STORAGE ────────────────────────────────────────────────────────────
+    { deptId: dStore, catalogId: 'a_fabric_rack', position: { x: 2, y: 2 }, name: 'Fabric Rack A' },
+    { deptId: dStore, catalogId: 'a_fabric_rack', position: { x: 2, y: 4 }, name: 'Fabric Rack B' },
+    { deptId: dStore, catalogId: 'mh_forklift',   position: { x: 7, y: 3 }, name: 'Forklift FL-01' },
+
+    // ── CUTTING ────────────────────────────────────────────────────────────
+    { deptId: dCut, catalogId: 'a_spread_auto',    position: { x: 11, y: 2 }, name: 'Auto Spreader SP-01' },
+    { deptId: dCut, catalogId: 'a_cnc_cutter',     position: { x: 11, y: 4 }, name: 'CNC Cutter CC-01' },
+    { deptId: dCut, catalogId: 'op_cutter',        position: { x: 17, y: 4 }, name: 'Cutter — Anu' },
+    { deptId: dCut, catalogId: 'a_bundle_trolley', position: { x: 19, y: 4 }, name: 'Bundle Trolley T-01' },
+    { deptId: dCut, catalogId: 'op_helper',        position: { x: 21, y: 4 }, name: 'Bundler — Ravi' },
+
+    // ── QC ─────────────────────────────────────────────────────────────────
+    { deptId: dQc, catalogId: 'a_inspect_table', position: { x: 26, y: 2 }, name: '4-Point Inspect IT-01' },
+    { deptId: dQc, catalogId: 'fx_qctab',        position: { x: 26, y: 4 }, name: 'Audit Table QT-01' },
+    { deptId: dQc, catalogId: 'op_qc',           position: { x: 29, y: 4 }, name: 'QC — Priya' },
+    { deptId: dQc, catalogId: 'buf_in',          position: { x: 31, y: 2 }, name: 'Cut-bundle IN' },
+    { deptId: dQc, catalogId: 'buf_out',         position: { x: 31, y: 4 }, name: 'Audit OUT' },
+
+    // ── SEWING — 8-station T-shirt line + buffers + iron + WIP racks ───────
+    { deptId: dSew, catalogId: 'buf_in',      position: { x: 1,  y: 9 },  name: 'Bundle IN' },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 4,  y: 9 },  name: 'Shoulder OL-01',     op: { opId: 'ts-07', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_snls',      position: { x: 6,  y: 9 },  name: 'Neck Rib Tack SN-01', op: { opId: 'ts-09', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 8,  y: 9 },  name: 'Neck Rib OL-02',     op: { opId: 'ts-10', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 10, y: 9 },  name: 'Sleeve Hem FL-01',   op: { opId: 'ts-17', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 12, y: 9 },  name: 'Sleeve OL-03',       op: { opId: 'ts-19', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 14, y: 9 },  name: 'Side Seam OL-04',    op: { opId: 'ts-21', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 16, y: 9 },  name: 'Body Hem FL-02',     op: { opId: 'ts-23', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_snls',      position: { x: 18, y: 9 },  name: 'Care Label SN-02',   op: { opId: 'ts-01', bundleSize: 20 } },
+    { deptId: dSew, catalogId: 'a_iron_inline', position: { x: 20, y: 9 }, name: 'Inline Iron IR-01' },
+    { deptId: dSew, catalogId: 'buf_out',     position: { x: 22, y: 9 },  name: 'Bundle OUT' },
+
+    // Operators in front of each machine
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 4,  y: 12 }, name: 'OPR-01 · Lakshmi' },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 6,  y: 12 }, name: 'OPR-02 · Suman' },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 8,  y: 12 }, name: 'OPR-03 · Geetha' },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 10, y: 12 }, name: 'OPR-04 · Kala' },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 12, y: 12 }, name: 'OPR-05 · Manju' },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 14, y: 12 }, name: 'OPR-06 · Devi' },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 16, y: 12 }, name: 'OPR-07 · Sita' },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 18, y: 12 }, name: 'OPR-08 · Roja' },
+    { deptId: dSew, catalogId: 'op_helper', position: { x: 20, y: 12 }, name: 'Iron — Mohan' },
+
+    // WIP racks behind operators
+    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 4,  y: 14 }, name: 'WIP Rack 1' },
+    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 10, y: 14 }, name: 'WIP Rack 2' },
+    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 16, y: 14 }, name: 'WIP Rack 3' },
+
+    // Conveyor along the bottom of the line
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 3,  y: 17 }, name: 'Conveyor C1' },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 7,  y: 17 }, name: 'Conveyor C2' },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 11, y: 17 }, name: 'Conveyor C3' },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 15, y: 17 }, name: 'Conveyor C4' },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 19, y: 17 }, name: 'Conveyor C5' },
+
+    { deptId: dSew, catalogId: 'op_super', position: { x: 12, y: 19 }, name: 'Supervisor — Arjun' },
+
+    // ── FINISHING ──────────────────────────────────────────────────────────
+    { deptId: dFinish, catalogId: 'a_iron_inline', position: { x: 26, y: 9 },  name: 'Press IR-A' },
+    { deptId: dFinish, catalogId: 'a_iron_inline', position: { x: 29, y: 9 },  name: 'Press IR-B' },
+    { deptId: dFinish, catalogId: 'op_sewer',      position: { x: 26, y: 11 }, name: 'Presser — Bala' },
+    { deptId: dFinish, catalogId: 'op_sewer',      position: { x: 29, y: 11 }, name: 'Presser — Hari' },
+    { deptId: dFinish, catalogId: 'fx_pack',       position: { x: 26, y: 13 }, name: 'Pack Bench P-1' },
+    { deptId: dFinish, catalogId: 'fx_pack',       position: { x: 26, y: 15 }, name: 'Pack Bench P-2' },
+    { deptId: dFinish, catalogId: 'op_helper',     position: { x: 30, y: 13 }, name: 'Packer — Vinod' },
+    { deptId: dFinish, catalogId: 'op_helper',     position: { x: 30, y: 15 }, name: 'Packer — Asha' },
+    { deptId: dFinish, catalogId: 'buf_out',       position: { x: 26, y: 17 }, name: 'Finished Goods OUT' },
+    { deptId: dFinish, catalogId: 'mh_forklift',   position: { x: 32, y: 17 }, name: 'Forklift FL-02' },
+  ];
+
+  const workstations: Workstation[] = seeds.map((s) => {
+    const w = makeWorkstation({
+      deptId: s.deptId,
+      catalogId: s.catalogId,
+      position: s.position,
+      name: s.name,
+    });
+    if (s.op) {
+      w.operation = {
+        ...w.operation,
+        opId: s.op.opId,
+        garmentId: 'tshirt',
+        bundleSize: s.op.bundleSize,
+      };
+    }
+    return w;
+  });
+
+  return {
+    schemaVersion: TWIN_SCHEMA_VERSION,
+    id: newTwinId(),
+    name,
+    parentTwinId: null,
+    isCanonical: true,
+    createdAt: now,
+    modifiedAt: now,
+    gridW: 36,
+    gridH: 26,
+    departments,
+    workstations,
+    connectors: [],
+    notes: 'Demo factory — T-shirt line, PBS, single shift. Use as a starting point.',
   };
 }
 
@@ -368,21 +559,38 @@ export function forkTwin(
     bounds: { ...d.bounds },
   }));
 
-  const workstations: Workstation[] = source.workstations.map((w) => ({
-    ...w,
-    id: newWorkstationId(),
-    deptId: deptIdMap.get(w.deptId) ?? w.deptId,
-    position: { ...w.position },
-    props: { ...w.props },
-    operation: { ...w.operation },
-    resources: {
-      ...w.resources,
-      materialsPerCycle: { ...w.resources.materialsPerCycle },
-    },
-    kpiTargets: { ...w.kpiTargets },
-    // Observed values do not survive a fork.
-    kpiObserved: undefined,
-  }));
+  // Map old → new workstation ids so connectors can be remapped.
+  const wsIdMap = new Map<string, string>();
+  const workstations: Workstation[] = source.workstations.map((w) => {
+    const newWsId = newWorkstationId();
+    wsIdMap.set(w.id, newWsId);
+    return {
+      ...w,
+      id: newWsId,
+      deptId: deptIdMap.get(w.deptId) ?? w.deptId,
+      position: { ...w.position },
+      props: { ...w.props },
+      operation: { ...w.operation },
+      resources: {
+        ...w.resources,
+        materialsPerCycle: { ...w.resources.materialsPerCycle },
+      },
+      kpiTargets: { ...w.kpiTargets },
+      // Observed values do not survive a fork.
+      kpiObserved: undefined,
+    };
+  });
+
+  const connectors: Connector[] = (source.connectors ?? [])
+    // Drop connectors whose endpoints didn't survive (shouldn't happen for a
+    // consistent twin, but be defensive against stale state).
+    .filter((c) => wsIdMap.has(c.fromWsId) && wsIdMap.has(c.toWsId))
+    .map((c) => ({
+      ...c,
+      id: newConnectorId(),
+      fromWsId: wsIdMap.get(c.fromWsId)!,
+      toWsId: wsIdMap.get(c.toWsId)!,
+    }));
 
   return {
     schemaVersion: TWIN_SCHEMA_VERSION,
@@ -396,6 +604,7 @@ export function forkTwin(
     gridH: source.gridH,
     departments,
     workstations,
+    connectors,
     notes: options.notes,
   };
 }
@@ -427,9 +636,10 @@ export function createScenario(input: {
  *  as "do not load this twin." */
 export function validateTwin(twin: Twin): string[] {
   const errs: string[] = [];
-  if (twin.schemaVersion !== TWIN_SCHEMA_VERSION) {
+  // v1 and v2 are both readable — older saves get normalized at load time.
+  if (twin.schemaVersion !== 1 && twin.schemaVersion !== TWIN_SCHEMA_VERSION) {
     errs.push(
-      `Unknown twin schemaVersion ${twin.schemaVersion}; expected ${TWIN_SCHEMA_VERSION}`,
+      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1 or ${TWIN_SCHEMA_VERSION}`,
     );
   }
   const deptIds = new Set(twin.departments.map((d) => d.id));
@@ -447,6 +657,15 @@ export function validateTwin(twin: Twin): string[] {
   for (const w of twin.workstations) {
     if (seen.has(w.id)) errs.push(`Duplicate id ${w.id} (workstation)`);
     seen.add(w.id);
+  }
+  const wsIds = new Set(twin.workstations.map((w) => w.id));
+  for (const c of twin.connectors ?? []) {
+    if (!wsIds.has(c.fromWsId)) {
+      errs.push(`Connector ${c.id} references missing source workstation ${c.fromWsId}`);
+    }
+    if (!wsIds.has(c.toWsId)) {
+      errs.push(`Connector ${c.id} references missing target workstation ${c.toWsId}`);
+    }
   }
   return errs;
 }
@@ -561,6 +780,7 @@ export function migrateLegacyFactoryToTwin(
     gridH: Math.max(28, cursorY),
     departments,
     workstations,
+    connectors: [],
     notes: 'Auto-migrated from legacy floors+lines structure',
   };
 }

@@ -6,6 +6,9 @@ import { SW_COLORS } from './design/tokens';
 import { SW_TWEAK_DEFAULTS, applyVibe } from './lib/vibe';
 import { TweaksPanel, TweakSection, TweakSlider, TweakRadio, useTweaks } from './tweaks';
 
+import { useTwin } from './store/twin';
+import { buildDemoTwin } from './domain/twin';
+
 import { MenuPage } from './pages/Menu';
 import { OrdersPage } from './pages/Orders';
 import { LiveSimPage } from './pages/LiveSim';
@@ -38,6 +41,20 @@ export default function App() {
     applyVibe(t.vibe as 'industrial' | 'workshop' | 'arcade');
     force();
   }, [t.vibe]);
+
+  // Seed the canonical twin with the demo factory the first time the app
+  // boots into an empty workspace. Existing edits are preserved — we only
+  // replace when departments + workstations + scenarios are all empty.
+  useEffect(() => {
+    const s = useTwin.getState();
+    if (
+      s.canonical.departments.length === 0 &&
+      s.canonical.workstations.length === 0 &&
+      s.scenarios.length === 0
+    ) {
+      s.loadCanonical(buildDemoTwin());
+    }
+  }, []);
 
   useEffect(() => {
     const speed = 0.4 + ((t.intensity as number) / 100) * 1.8;

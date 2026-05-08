@@ -41,7 +41,13 @@ import {
   selectActiveTwin,
   type DepartmentColorKey,
 } from '../store/twin';
-import type { Department, Workstation, Rect } from '../domain/twin';
+import type {
+  Department,
+  Workstation,
+  Rect,
+  Connector,
+  ConnectorKind,
+} from '../domain/twin';
 
 // ============================================================================
 // CONSTANTS
@@ -51,6 +57,8 @@ const ISO_TILE = 32;
 const ISO_THIN = ISO_TILE / 2;
 
 type Lens = 'operations' | 'resources' | 'kpis';
+/** Canvas render mode — iso 3D authoring surface or block-flow diagram. */
+type CanvasMode = 'iso' | 'logic';
 type DropTool =
   | { kind: 'none' }
   | { kind: 'dept'; preset: DeptPreset }
@@ -81,6 +89,21 @@ const DEPT_COLOR_HEX: Record<DepartmentColorKey, string> = {
   yellow: SW_COLORS.thread,
   green: SW_COLORS.fabric,
   cream: SW_COLORS.paperEdge,
+};
+
+/** Connector colours by kind. Flow is the brand red (the dominant arrow on a
+ *  factory drawing); operator + material are visually distinct so multiple
+ *  overlays don't blur together. */
+const CONNECTOR_HEX: Record<ConnectorKind, string> = {
+  flow: SW_COLORS.brand,
+  operator: SW_COLORS.bobbin,
+  material: SW_COLORS.thread,
+};
+
+const CONNECTOR_LABEL: Record<ConnectorKind, string> = {
+  flow: 'FLOW',
+  operator: 'OPERATOR',
+  material: 'MATERIAL',
 };
 
 /** Resolve a catalog id to its IsoFixture entry. Used to look up draw-fn,
@@ -173,6 +196,8 @@ export function BuilderPage() {
   const setOperation = useTwin((s) => s.setOperation);
   const setResources = useTwin((s) => s.setResources);
   const setKpiTargets = useTwin((s) => s.setKpiTargets);
+  const addConnector = useTwin((s) => s.addConnector);
+  const removeConnector = useTwin((s) => s.removeConnector);
   const renameActive = useTwin((s) => s.renameActive);
   const createScenarioFromCanonical = useTwin(
     (s) => s.createScenarioFromCanonical,
@@ -182,10 +207,19 @@ export function BuilderPage() {
 
   // ── Local UI state ─────────────────────────────────────────────────────────
   const [drop, setDrop] = useState<DropTool>({ kind: 'none' });
+  /** Connect-flow modal tool state. When `on` is true, clicking a workstation
+   *  picks the source (if `fromWsId` is null) or the target — at which point
+   *  a connector of `kind` is created. ESC clears. */
+  const [connect, setConnect] = useState<{
+    on: boolean;
+    kind: ConnectorKind;
+    fromWsId: string | null;
+  }>({ on: false, kind: 'flow', fromWsId: null });
   const [selected, setSelected] = useState<
     { kind: 'dept' | 'ws'; id: string } | null
   >(null);
   const [lens, setLens] = useState<Lens>('operations');
+  const [canvasMode, setCanvasMode] = useState<CanvasMode>('iso');
   const [paletteTab, setPaletteTab] = useState<'dept' | 'ws'>('dept');
   const [activeApparelCat, setActiveApparelCat] = useState<ApparelCategoryId>('sew_mach');
   const [paletteSearch, setPaletteSearch] = useState<string>('');
@@ -450,6 +484,7 @@ export function BuilderPage() {
       if (inField) return;
       if (e.key === 'Escape') {
         setDrop({ kind: 'none' });
+        setConnect((c) => (c.on ? { ...c, on: false, fromWsId: null } : c));
         return;
       }
       if (!selected) return;
@@ -584,8 +619,86 @@ export function BuilderPage() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Lens toggles */}
-        <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }}>
+        {/* Canvas-mode toggle — iso authoring vs block-flow logic diagram */}
+        <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }} title="Switch the canvas between iso authoring and a block-flow logic diagram">
+          {(['iso', 'logic'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setCanvasMode(m)}
+              style={{
+                background: canvasMode === m ? SW_COLORS.brand : 'transparent',
+                color: canvasMode === m ? '#fff' : SW_COLORS.steel,
+                border: 'none',
+                padding: '6px 12px',
+                fontFamily: SW_FONTS.display,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.08em',
+                cursor: 'pointer',
+                borderRadius: 4,
+              }}
+            >
+              {m === 'iso' ? '◈ ISO' : '⌬ LOGIC'}
+            </button>
+          ))}
+        </div>
+
+        {/* Connect-flow tool — modal: pick source ws, then target ws */}
+        <div
+          style={{
+            display: 'flex',
+            gap: 4,
+            background: SW_COLORS.paperDeep,
+            padding: 3,
+            borderRadius: 6,
+            border: `1px solid ${SW_COLORS.line}`,
+          }}
+          title="Draw a directed flow / operator / material link between two workstations"
+        >
+          <button
+            onClick={() => {
+              setDrop({ kind: 'none' });
+              setConnect((c) => ({ ...c, on: !c.on, fromWsId: null }));
+            }}
+            style={{
+              background: connect.on ? SW_COLORS.brand : 'transparent',
+              color: connect.on ? '#fff' : SW_COLORS.steel,
+              border: 'none',
+              padding: '6px 12px',
+              fontFamily: SW_FONTS.display,
+              fontSize: 10,
+              fontWeight: 900,
+              letterSpacing: '0.08em',
+              cursor: 'pointer',
+              borderRadius: 4,
+            }}
+          >
+            ➜ CONNECT
+          </button>
+          {connect.on && (
+            <select
+              value={connect.kind}
+              onChange={(e) =>
+                setConnect((c) => ({ ...c, kind: e.target.value as ConnectorKind }))
+              }
+              style={{
+                ...inputBase,
+                width: 110,
+                fontWeight: 800,
+                fontSize: 10,
+                fontFamily: SW_FONTS.display,
+                letterSpacing: '0.06em',
+              }}
+            >
+              <option value="flow">FLOW</option>
+              <option value="operator">OPERATOR</option>
+              <option value="material">MATERIAL</option>
+            </select>
+          )}
+        </div>
+
+        {/* Lens toggles — overlay choice for the iso canvas */}
+        <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}`, opacity: canvasMode === 'iso' ? 1 : 0.55 }}>
           {(['operations', 'resources', 'kpis'] as const).map((l) => (
             <button
               key={l}
@@ -677,6 +790,31 @@ export function BuilderPage() {
           </div>
         )}
 
+        {connect.on && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 12,
+              left: 12,
+              zIndex: 5,
+              padding: '8px 12px',
+              background: CONNECTOR_HEX[connect.kind],
+              color: '#fff',
+              fontFamily: SW_FONTS.display,
+              fontSize: 11,
+              fontWeight: 900,
+              letterSpacing: '0.06em',
+              borderRadius: 6,
+              boxShadow: '0 4px 14px rgba(0,0,0,0.18)',
+            }}
+          >
+            ➜ {connect.kind.toUpperCase()} ·{' '}
+            {connect.fromWsId === null
+              ? 'Click the SOURCE workstation'
+              : 'Click the TARGET (Esc to stop)'}
+          </div>
+        )}
+
         {/* Empty-state hint */}
         {twin.departments.length === 0 && drop.kind === 'none' && (
           <div
@@ -702,24 +840,55 @@ export function BuilderPage() {
         )}
 
         {/* Stage transform */}
-        <div
-          style={{
-            position: 'absolute',
-            inset: 0,
-            transformOrigin: '50% 50%',
-            transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
-          }}
-        >
-          <CanvasSVG
+        {canvasMode === 'iso' ? (
+          <div
+            style={{
+              position: 'absolute',
+              inset: 0,
+              transformOrigin: '50% 50%',
+              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+            }}
+          >
+            <CanvasSVG
+              twin={twin}
+              lens={lens}
+              hoverCell={hoverCell}
+              drop={drop}
+              selected={selected}
+              connect={connect}
+              onSelect={(s) => {
+                if (connect.on && s?.kind === 'ws') {
+                  if (connect.fromWsId === null) {
+                    setConnect((c) => ({ ...c, fromWsId: s.id }));
+                  } else if (connect.fromWsId !== s.id) {
+                    addConnector({
+                      kind: connect.kind,
+                      fromWsId: connect.fromWsId,
+                      toWsId: s.id,
+                    });
+                    // Chain: keep target as the next source so users can build
+                    // a sequential line quickly. ESC or button toggles off.
+                    setConnect((c) => ({ ...c, fromWsId: s.id }));
+                  }
+                  return;
+                }
+                setSelected(s);
+              }}
+              onRemoveConnector={removeConnector}
+              onStartDrag={(kind, id, e) => {
+                // Suppress drag while connecting so the click selects instead.
+                if (connect.on && kind === 'ws') return;
+                startEntityDrag(kind, id, e);
+              }}
+            />
+          </div>
+        ) : (
+          <BuilderLogicView
             twin={twin}
-            lens={lens}
-            hoverCell={hoverCell}
-            drop={drop}
             selected={selected}
-            onSelect={(s) => setSelected(s)}
-            onStartDrag={startEntityDrag}
+            onSelect={setSelected}
           />
-        </div>
+        )}
 
         {/* Zoom & view controls */}
         <div
@@ -816,6 +985,7 @@ export function BuilderPage() {
         onSetOperation={setOperation}
         onSetResources={setResources}
         onSetKpiTargets={setKpiTargets}
+        onRemoveConnector={removeConnector}
       />
     </div>
   );
@@ -1012,8 +1182,19 @@ interface CanvasSVGProps {
   hoverCell: { x: number; y: number } | null;
   drop: DropTool;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
+  connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null };
   onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
+  onRemoveConnector: (id: string) => void;
   onStartDrag: (kind: 'ws' | 'dept', id: string, e: React.MouseEvent) => void;
+}
+
+/** Footprint center of a workstation in screen coordinates. Used as the
+ *  arrow anchor when drawing connectors. */
+function workstationScreenCenter(ws: Workstation): { sx: number; sy: number } {
+  const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
+  const w = fixture?.w ?? 1;
+  const d = fixture?.d ?? 1;
+  return isoProj(ws.position.x + w / 2, ws.position.y + d / 2);
 }
 
 function CanvasSVG(props: CanvasSVGProps) {
@@ -1074,16 +1255,28 @@ function CanvasSVG(props: CanvasSVGProps) {
       {/* WORKSTATIONS — depth-sorted by x+y */}
       {[...twin.workstations]
         .sort((a, b) => a.position.x + a.position.y - (b.position.x + b.position.y))
-        .map((w) => (
-          <WorkstationSprite
-            key={w.id}
-            ws={w}
-            selected={selected?.kind === 'ws' && selected.id === w.id}
-            lens={lens}
-            onClick={() => props.onSelect({ kind: 'ws', id: w.id })}
-            onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
-          />
-        ))}
+        .map((w) => {
+          const isConnectSource =
+            props.connect.on && props.connect.fromWsId === w.id;
+          return (
+            <WorkstationSprite
+              key={w.id}
+              ws={w}
+              selected={selected?.kind === 'ws' && selected.id === w.id}
+              connectSource={isConnectSource}
+              lens={lens}
+              onClick={() => props.onSelect({ kind: 'ws', id: w.id })}
+              onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
+            />
+          );
+        })}
+
+      {/* CONNECTORS — drawn above stations so arrows aren't occluded */}
+      <ConnectorLayer
+        twin={twin}
+        connect={props.connect}
+        onRemove={props.onRemoveConnector}
+      />
 
       {/* HOVER PREVIEW */}
       {hoverCell && drop.kind !== 'none' && (
@@ -1154,12 +1347,14 @@ function DepartmentShape({
 function WorkstationSprite({
   ws,
   selected,
+  connectSource,
   lens,
   onClick,
   onMouseDown,
 }: {
   ws: Workstation;
   selected: boolean;
+  connectSource: boolean;
   lens: Lens;
   onClick: () => void;
   onMouseDown: (e: React.MouseEvent) => void;
@@ -1203,6 +1398,20 @@ function WorkstationSprite({
           stroke={SW_COLORS.brand}
           strokeWidth={2.5}
           strokeDasharray="4 3"
+        />
+      )}
+      {connectSource && (
+        <polygon
+          points={ptsToStr([
+            { sx: 0, sy: 0 },
+            { sx: tr.sx - tl.sx, sy: tr.sy - tl.sy },
+            { sx: br.sx - tl.sx, sy: br.sy - tl.sy },
+            { sx: bl.sx - tl.sx, sy: bl.sy - tl.sy },
+          ])}
+          fill="none"
+          stroke={SW_COLORS.brand}
+          strokeWidth={3.2}
+          strokeOpacity={0.9}
         />
       )}
       {fixture.draw({ w: fixture.w, d: fixture.d, h: fixture.h }) as ReactNode}
@@ -1261,6 +1470,111 @@ function heatColor(util: number): string {
   return SW_COLORS.alarm;
 }
 
+// ── CONNECTOR LAYER ───────────────────────────────────────────────────────────
+
+/**
+ * Draws every connector in the active twin as a directed arrow from source
+ * footprint center to target footprint center. One <defs> arrowhead marker
+ * per kind so flow / operator / material arrows can be tinted independently.
+ */
+function ConnectorLayer({
+  twin,
+  connect,
+  onRemove,
+}: {
+  twin: ReturnType<typeof selectActiveTwin>;
+  connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null };
+  onRemove: (id: string) => void;
+}) {
+  const wsById = new Map(twin.workstations.map((w) => [w.id, w] as const));
+  const dim = connect.on ? 0.35 : 1; // de-emphasise existing arrows while connecting
+
+  return (
+    <g>
+      <defs>
+        {(['flow', 'operator', 'material'] as ConnectorKind[]).map((k) => (
+          <marker
+            key={k}
+            id={`sw-arrow-${k}`}
+            viewBox="0 0 10 10"
+            refX={9}
+            refY={5}
+            markerWidth={6}
+            markerHeight={6}
+            orient="auto-start-reverse"
+          >
+            <path d="M 0 0 L 10 5 L 0 10 z" fill={CONNECTOR_HEX[k]} />
+          </marker>
+        ))}
+      </defs>
+
+      {(twin.connectors ?? []).map((c) => {
+        const a = wsById.get(c.fromWsId);
+        const b = wsById.get(c.toWsId);
+        if (!a || !b) return null;
+        const pa = workstationScreenCenter(a);
+        const pb = workstationScreenCenter(b);
+        const color = CONNECTOR_HEX[c.kind];
+        const mx = (pa.sx + pb.sx) / 2;
+        const my = (pa.sy + pb.sy) / 2 - 6;
+        const isFlow = c.kind === 'flow';
+        return (
+          <g key={c.id} style={{ pointerEvents: 'auto' }}>
+            <line
+              x1={pa.sx}
+              y1={pa.sy}
+              x2={pb.sx}
+              y2={pb.sy}
+              stroke={color}
+              strokeOpacity={dim}
+              strokeWidth={isFlow ? 2.4 : 1.8}
+              strokeDasharray={isFlow ? undefined : '6 4'}
+              markerEnd={`url(#sw-arrow-${c.kind})`}
+            />
+            {/* Click target — invisible thicker line for easier hit-testing */}
+            <line
+              x1={pa.sx}
+              y1={pa.sy}
+              x2={pb.sx}
+              y2={pb.sy}
+              stroke="transparent"
+              strokeWidth={14}
+              onClick={(e) => {
+                e.stopPropagation();
+                if (window.confirm(`Delete ${CONNECTOR_LABEL[c.kind]} connector?`)) {
+                  onRemove(c.id);
+                }
+              }}
+              style={{ cursor: 'pointer' }}
+            >
+              <title>{`${CONNECTOR_LABEL[c.kind]} · ${a.name} → ${b.name} (click to delete)`}</title>
+            </line>
+            {c.label && (
+              <text
+                x={mx}
+                y={my}
+                textAnchor="middle"
+                fontFamily={SW_FONTS.mono}
+                fontSize={9}
+                fontWeight={700}
+                fill={color}
+                opacity={dim}
+                style={{ pointerEvents: 'none', letterSpacing: '0.04em' }}
+              >
+                {c.label}
+              </text>
+            )}
+          </g>
+        );
+      })}
+
+      {/* In-progress preview: source → cursor isn't tracked here (it would
+       *  require pointer state lifted to BuilderPage). The source ring on the
+       *  selected workstation is enough of a visual cue for now. */}
+    </g>
+  );
+}
+
 // ── HOVER PREVIEW ─────────────────────────────────────────────────────────────
 
 function HoverPreview({ cell, drop }: { cell: { x: number; y: number }; drop: DropTool }) {
@@ -1304,6 +1618,305 @@ function HoverPreview({ cell, drop }: { cell: { x: number; y: number }; drop: Dr
 }
 
 // ============================================================================
+// BUILDER LOGIC VIEW — block-flow / schema diagram of the active twin
+// ============================================================================
+//
+// Replaces the iso canvas when the user toggles the LOGIC mode. Each dept
+// becomes a flow card showing its station count, station kinds, and links
+// to the next dept in the iso reading order. Clicking a card selects the
+// dept so the inspector populates — no authoring of geometry happens here,
+// since logic mode is for inspecting the *flow*, not the floor plan.
+
+interface BuilderLogicViewProps {
+  twin: ReturnType<typeof selectActiveTwin>;
+  selected: { kind: 'dept' | 'ws'; id: string } | null;
+  onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
+}
+
+function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
+  const ordered = [...twin.departments].sort((a, b) => {
+    if (a.bounds.y !== b.bounds.y) return a.bounds.y - b.bounds.y;
+    return a.bounds.x - b.bounds.x;
+  });
+
+  const W = 1280;
+  const H = 720;
+  const CARD_W = 230;
+  const CARD_H = 150;
+  const cols = 4;
+  const colStep = (W - 80 - CARD_W) / Math.max(1, cols - 1);
+  const rowStep = CARD_H + 80;
+
+  const positions = ordered.map((_, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    return { x: 40 + col * colStep, y: 70 + row * rowStep, col, row };
+  });
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        overflow: 'auto',
+        padding: 0,
+        background:
+          'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px), ' + SW_COLORS.paperDeep,
+        backgroundSize: '24px 24px',
+      }}
+      onClick={(e) => {
+        // Click on background clears selection
+        if (e.target === e.currentTarget) onSelect(null);
+      }}
+    >
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="xMidYMid meet"
+        style={{ width: '100%', height: '100%', display: 'block' }}
+        onClick={() => onSelect(null)}
+      >
+        <defs>
+          <marker
+            id="builder-logic-arrow"
+            viewBox="0 0 10 10"
+            refX={9}
+            refY={5}
+            markerWidth={6}
+            markerHeight={6}
+            orient="auto"
+          >
+            <path d="M0 0 L10 5 L0 10 z" fill={SW_COLORS.steel} />
+          </marker>
+        </defs>
+
+        {/* Title */}
+        <text
+          x={W / 2}
+          y={36}
+          textAnchor="middle"
+          fill={SW_COLORS.muted}
+          fontFamily={SW_FONTS.mono}
+          fontSize={12}
+          fontWeight={800}
+          letterSpacing="2px"
+        >
+          {twin.name.toUpperCase()} · LOGIC · BLOCK-FLOW DIAGRAM
+        </text>
+
+        {/* Flow arrows */}
+        {ordered.map((_, i) => {
+          if (i === ordered.length - 1) return null;
+          const a = positions[i];
+          const b = positions[i + 1];
+          const sx = a.x + CARD_W;
+          const sy = a.y + CARD_H / 2;
+          const ex = b.x;
+          const ey = b.y + CARD_H / 2;
+          let path: string;
+          if (a.row === b.row) {
+            path = `M ${sx} ${sy} L ${ex - 6} ${ey}`;
+          } else {
+            const midY = (a.y + CARD_H + b.y) / 2;
+            path = `M ${sx} ${sy} L ${sx + 24} ${sy} L ${sx + 24} ${midY} L ${b.x - 24} ${midY} L ${b.x - 24} ${ey} L ${ex - 6} ${ey}`;
+          }
+          return (
+            <path
+              key={`flow-${i}`}
+              d={path}
+              fill="none"
+              stroke={SW_COLORS.line.replace('30', '70')}
+              strokeWidth={2}
+              strokeDasharray="6 5"
+              markerEnd="url(#builder-logic-arrow)"
+              pointerEvents="none"
+            />
+          );
+        })}
+
+        {/* Department cards */}
+        {ordered.map((d, i) => {
+          const p = positions[i];
+          const stations = twin.workstations.filter((w) => w.deptId === d.id);
+          const accent = DEPT_COLOR_HEX[d.color];
+          const isSelected = selected?.kind === 'dept' && selected.id === d.id;
+
+          // Group stations by catalog id for a "what's in this dept" summary.
+          const byCatalog: Record<string, number> = {};
+          stations.forEach((w) => {
+            byCatalog[w.catalogId] = (byCatalog[w.catalogId] ?? 0) + 1;
+          });
+          const summary = Object.entries(byCatalog).slice(0, 3);
+
+          return (
+            <g
+              key={d.id}
+              transform={`translate(${p.x}, ${p.y})`}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect({ kind: 'dept', id: d.id });
+              }}
+              style={{ cursor: 'pointer' }}
+            >
+              <rect
+                x={0}
+                y={0}
+                width={CARD_W}
+                height={CARD_H}
+                rx={6}
+                fill={SW_COLORS.paper}
+                stroke={isSelected ? SW_COLORS.brand : accent}
+                strokeWidth={isSelected ? 2.5 : 1.5}
+              />
+              {/* Header strip */}
+              <rect x={0} y={0} width={CARD_W} height={28} rx={6} fill={accent} />
+              <rect x={0} y={22} width={CARD_W} height={6} fill={accent} />
+              <text
+                x={12}
+                y={18}
+                fontFamily={SW_FONTS.display}
+                fontSize={11}
+                fontWeight={900}
+                fill="#fff"
+                letterSpacing="0.1em"
+              >
+                {d.name.toUpperCase()}
+              </text>
+              <text
+                x={CARD_W - 12}
+                y={18}
+                textAnchor="end"
+                fontFamily={SW_FONTS.mono}
+                fontSize={9}
+                fontWeight={800}
+                fill="#ffffffcc"
+              >
+                {stations.length} STN
+              </text>
+
+              {/* Body — kind + bounds */}
+              <text
+                x={12}
+                y={50}
+                fontFamily={SW_FONTS.body}
+                fontSize={11}
+                fontWeight={700}
+                fill={SW_COLORS.steel}
+              >
+                {d.kind}
+              </text>
+              <text
+                x={CARD_W - 12}
+                y={50}
+                textAnchor="end"
+                fontFamily={SW_FONTS.mono}
+                fontSize={9}
+                fontWeight={700}
+                fill={SW_COLORS.muted}
+              >
+                {d.bounds.w}×{d.bounds.h}
+              </text>
+
+              {/* Workstation summary list */}
+              {summary.length === 0 ? (
+                <text
+                  x={CARD_W / 2}
+                  y={86}
+                  textAnchor="middle"
+                  fontFamily={SW_FONTS.body}
+                  fontSize={11}
+                  fontStyle="italic"
+                  fill={SW_COLORS.muted}
+                >
+                  no workstations
+                </text>
+              ) : (
+                summary.map(([catalogId, count], k) => {
+                  const fix = ISO_FIXTURE_CATALOG.find((f) => f.id === catalogId);
+                  const label = fix?.label ?? catalogId;
+                  return (
+                    <g key={catalogId} transform={`translate(0, ${72 + k * 16})`}>
+                      <text
+                        x={12}
+                        fontFamily={SW_FONTS.mono}
+                        fontSize={10}
+                        fontWeight={700}
+                        fill={SW_COLORS.ink}
+                      >
+                        × {count}
+                      </text>
+                      <text
+                        x={42}
+                        fontFamily={SW_FONTS.body}
+                        fontSize={11}
+                        fontWeight={500}
+                        fill={SW_COLORS.steel}
+                      >
+                        {label.length > 22 ? label.slice(0, 20) + '…' : label}
+                      </text>
+                    </g>
+                  );
+                })
+              )}
+              {Object.keys(byCatalog).length > 3 && (
+                <text
+                  x={12}
+                  y={CARD_H - 10}
+                  fontFamily={SW_FONTS.mono}
+                  fontSize={9}
+                  fontWeight={700}
+                  fill={SW_COLORS.muted}
+                >
+                  +{Object.keys(byCatalog).length - 3} more types
+                </text>
+              )}
+            </g>
+          );
+        })}
+
+        {/* Empty state */}
+        {ordered.length === 0 && (
+          <text
+            x={W / 2}
+            y={H / 2}
+            textAnchor="middle"
+            fontFamily={SW_FONTS.body}
+            fontSize={14}
+            fill={SW_COLORS.muted}
+          >
+            No departments authored yet — switch to ISO mode to drop one in.
+          </text>
+        )}
+
+        {/* Legend */}
+        <g transform={`translate(${W - 240}, ${H - 60})`}>
+          <rect width={220} height={44} fill={SW_COLORS.paper} stroke={SW_COLORS.line} rx={4} />
+          <text
+            x={12}
+            y={18}
+            fontFamily={SW_FONTS.mono}
+            fontSize={10}
+            fontWeight={900}
+            fill={SW_COLORS.ink}
+            letterSpacing="0.15em"
+          >
+            LOGIC LEGEND
+          </text>
+          <text
+            x={12}
+            y={34}
+            fontFamily={SW_FONTS.mono}
+            fontSize={9}
+            fill={SW_COLORS.muted}
+          >
+            ⬛ dept · → process flow · click → inspect
+          </text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+// ============================================================================
 // INSPECTOR (right)
 // ============================================================================
 
@@ -1318,6 +1931,7 @@ interface InspectorProps {
   onSetOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
   onSetResources: (wsId: string, patch: Partial<Workstation['resources']>) => void;
   onSetKpiTargets: (wsId: string, patch: Partial<Workstation['kpiTargets']>) => void;
+  onRemoveConnector: (id: string) => void;
 }
 
 function Inspector(props: InspectorProps) {
@@ -1525,6 +2139,121 @@ function Inspector(props: InspectorProps) {
           </div>
         )}
       </LensSection>
+
+      <FlowSection
+        ws={ws}
+        twin={props.twin}
+        onRemoveConnector={props.onRemoveConnector}
+      />
+    </div>
+  );
+}
+
+/** Flow-connections panel — lists every connector touching the selected
+ *  workstation (incoming + outgoing) and lets the user delete them inline. */
+function FlowSection({
+  ws,
+  twin,
+  onRemoveConnector,
+}: {
+  ws: Workstation;
+  twin: ReturnType<typeof selectActiveTwin>;
+  onRemoveConnector: (id: string) => void;
+}) {
+  const wsById = new Map(twin.workstations.map((w) => [w.id, w] as const));
+  const all = twin.connectors ?? [];
+  const incoming = all.filter((c) => c.toWsId === ws.id);
+  const outgoing = all.filter((c) => c.fromWsId === ws.id);
+
+  const row = (c: Connector, mode: 'in' | 'out') => {
+    const otherId = mode === 'in' ? c.fromWsId : c.toWsId;
+    const other = wsById.get(otherId);
+    return (
+      <div
+        key={c.id}
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '5px 7px',
+          marginTop: 4,
+          background: SW_COLORS.paper,
+          border: `1px solid ${SW_COLORS.line}`,
+          borderLeft: `3px solid ${CONNECTOR_HEX[c.kind]}`,
+          borderRadius: 4,
+          fontSize: 11,
+        }}
+      >
+        <span
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 9,
+            fontWeight: 800,
+            color: CONNECTOR_HEX[c.kind],
+            letterSpacing: '0.06em',
+            minWidth: 56,
+          }}
+        >
+          {mode === 'in' ? '←' : '→'} {CONNECTOR_LABEL[c.kind]}
+        </span>
+        <span
+          style={{
+            flex: 1,
+            color: SW_COLORS.steel,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+          }}
+          title={other?.name ?? otherId}
+        >
+          {other?.name ?? '— deleted'}
+        </span>
+        <button
+          onClick={() => onRemoveConnector(c.id)}
+          style={{
+            ...btnSec,
+            padding: '2px 6px',
+            fontSize: 9,
+            color: SW_COLORS.alarm,
+          }}
+          title="Remove this connector"
+        >
+          ✕
+        </button>
+      </div>
+    );
+  };
+
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: 10,
+        background: SW_COLORS.paperDeep,
+        borderRadius: 6,
+        border: `1px solid ${SW_COLORS.line}`,
+      }}
+    >
+      <div style={sectionLabel}>Flow connections</div>
+      {incoming.length === 0 && outgoing.length === 0 && (
+        <div style={{ fontSize: 11, color: SW_COLORS.muted, marginTop: 4 }}>
+          No connectors yet — turn on{' '}
+          <strong style={{ color: SW_COLORS.brand }}>➜ CONNECT</strong> in the
+          toolbar, then click this station and another.
+        </div>
+      )}
+      {incoming.length > 0 && (
+        <>
+          <div style={{ ...fieldLabel, marginTop: 6 }}>Incoming · {incoming.length}</div>
+          {incoming.map((c) => row(c, 'in'))}
+        </>
+      )}
+      {outgoing.length > 0 && (
+        <>
+          <div style={{ ...fieldLabel, marginTop: 8 }}>Outgoing · {outgoing.length}</div>
+          {outgoing.map((c) => row(c, 'out'))}
+        </>
+      )}
     </div>
   );
 }
