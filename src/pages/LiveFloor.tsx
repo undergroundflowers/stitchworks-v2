@@ -33,7 +33,7 @@ import type { Department, Workstation } from '../domain/twin';
 // SHARED HELPERS
 // ============================================================================
 
-type FloorView = 'iso' | 'top' | 'heat';
+type FloorView = 'iso' | 'top' | 'heat' | 'logic';
 
 const DEPT_COLOR_HEX: Record<DepartmentColorKey, string> = {
   fabric: SW_COLORS.fabric,
@@ -177,7 +177,7 @@ export function LiveFloorPage() {
 
         {/* View toggle */}
         <div style={{ display: 'flex', gap: 2, background: '#ffffff08', padding: 2, borderRadius: 6 }}>
-          {(['iso', 'top', 'heat'] as const).map((v) => (
+          {(['iso', 'top', 'heat', 'logic'] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -195,7 +195,7 @@ export function LiveFloorPage() {
                 textTransform: 'uppercase',
               }}
             >
-              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : 'HEAT'}
+              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : v === 'heat' ? 'HEAT' : 'LOGIC'}
             </button>
           ))}
         </div>
@@ -281,6 +281,15 @@ export function LiveFloorPage() {
                 />
               )}
               {view === 'heat' && <HeatView twin={twin} t={t} hotIds={hotIds} />}
+              {view === 'logic' && (
+                <LogicView
+                  twin={twin}
+                  t={t}
+                  hotIds={hotIds}
+                  selectedWs={selectedWs}
+                  onSelect={setSelectedWs}
+                />
+              )}
 
               {/* Event toasts */}
               <div
@@ -1057,6 +1066,332 @@ function HeatView({
           textAnchor="end"
         >
           critical
+        </text>
+      </g>
+    </svg>
+  );
+}
+
+// ============================================================================
+// LOGIC VIEW — AnyLogic-style block-flow / schema diagram
+// ============================================================================
+//
+// Each department becomes a flow card with its station count, average util,
+// and per-dept hot count. Cards are connected by directional flow arrows in
+// reading order (sorted by top-left iso position). Click a card → its first
+// workstation gets selected so the inspector populates.
+//
+// This is the same idea as STITCHWORKS.html's FloorLogicView, but driven by
+// the user-authored twin instead of a hard-coded zone list.
+
+interface LogicViewProps {
+  twin: ReturnType<typeof selectActiveTwin>;
+  t: number;
+  hotIds: Set<string>;
+  selectedWs: string | null;
+  onSelect: (id: string | null) => void;
+}
+
+function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
+  // Sort departments by their top-left position so the flow reads left→right,
+  // top→bottom — same convention as a process schematic.
+  const ordered = useMemo(
+    () =>
+      [...twin.departments].sort((a, b) => {
+        if (a.bounds.y !== b.bounds.y) return a.bounds.y - b.bounds.y;
+        return a.bounds.x - b.bounds.x;
+      }),
+    [twin.departments],
+  );
+
+  const W = 1280;
+  const H = 720;
+  const CARD_W = 220;
+  const CARD_H = 140;
+  const cols = 4;
+  const colStep = (W - 80 - CARD_W) / Math.max(1, cols - 1);
+  const rowStep = CARD_H + 80;
+
+  const positions = ordered.map((_, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    return { x: 40 + col * colStep, y: 60 + row * rowStep, col, row };
+  });
+
+  // Per-dept aggregates derived from each dept's workstations.
+  const aggregates = ordered.map((d) => {
+    const stations = twin.workstations.filter((w) => w.deptId === d.id);
+    const utils = stations.map((w) => w.kpiObserved?.utilizationPct ?? fakeUtil(w, t));
+    const avg = utils.length > 0 ? utils.reduce((a, b) => a + b, 0) / utils.length : 0;
+    const hot = stations.filter((w) => hotIds.has(w.id) || (w.kpiObserved?.utilizationPct ?? fakeUtil(w, t)) >= 90).length;
+    const wip = stations.length * 8 + Math.floor(Math.sin(t * 0.4 + d.bounds.x) * 6 + 6);
+    const pcsHr = Math.max(0, Math.round(avg * 1.6 + Math.sin(t * 0.3 + d.bounds.y) * 12));
+    return { d, stations, avg, hot, wip, pcsHr };
+  });
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="xMidYMid meet"
+      style={{ width: '100%', height: '100%', display: 'block' }}
+      onClick={() => onSelect(null)}
+    >
+      <defs>
+        <pattern id="lf-logic-grid" width={32} height={32} patternUnits="userSpaceOnUse">
+          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff06" strokeWidth={1} />
+        </pattern>
+        <marker
+          id="lf-logic-arrow"
+          viewBox="0 0 10 10"
+          refX={9}
+          refY={5}
+          markerWidth={6}
+          markerHeight={6}
+          orient="auto"
+        >
+          <path d="M0 0 L10 5 L0 10 z" fill="#ffffff80" />
+        </marker>
+      </defs>
+      <rect width={W} height={H} fill="#0d1219" />
+      <rect width={W} height={H} fill="url(#lf-logic-grid)" />
+
+      {/* Title */}
+      <text
+        x={W / 2}
+        y={32}
+        textAnchor="middle"
+        fill="#ffffff80"
+        fontFamily={SW_FONTS.mono}
+        fontSize={12}
+        fontWeight={800}
+        letterSpacing="2px"
+      >
+        {twin.name.toUpperCase()} · LOGIC · BLOCK-FLOW DIAGRAM
+      </text>
+
+      {/* Flow arrows (drawn first so cards sit on top) */}
+      {ordered.map((_, i) => {
+        if (i === ordered.length - 1) return null;
+        const a = positions[i];
+        const b = positions[i + 1];
+        const sx = a.x + CARD_W;
+        const sy = a.y + CARD_H / 2;
+        const ex = b.x;
+        const ey = b.y + CARD_H / 2;
+        // Same row → straight; otherwise step down-right.
+        let path: string;
+        if (a.row === b.row) {
+          path = `M ${sx} ${sy} L ${ex - 6} ${ey}`;
+        } else {
+          // Wrap from end of row down to start of next row
+          const midY = (a.y + CARD_H + b.y) / 2;
+          path = `M ${sx} ${sy} L ${sx + 24} ${sy} L ${sx + 24} ${midY} L ${b.x - 24} ${midY} L ${b.x - 24} ${ey} L ${ex - 6} ${ey}`;
+        }
+        return (
+          <g key={`flow-${i}`} pointerEvents="none">
+            <path
+              d={path}
+              fill="none"
+              stroke="#ffffff35"
+              strokeWidth={2}
+              strokeDasharray="6 5"
+              markerEnd="url(#lf-logic-arrow)"
+              style={{ animation: 'lf-march 0.9s linear infinite' }}
+            />
+          </g>
+        );
+      })}
+
+      {/* Department flow cards */}
+      {aggregates.map((agg, i) => {
+        const { d, stations, avg, hot, wip, pcsHr } = agg;
+        const p = positions[i];
+        const accent = DEPT_COLOR_HEX[d.color];
+        const utilCol = utilColor(avg);
+        const isSelected = stations.some((s) => s.id === selectedWs);
+        return (
+          <g
+            key={d.id}
+            transform={`translate(${p.x}, ${p.y})`}
+            onClick={(e) => {
+              e.stopPropagation();
+              if (stations[0]) onSelect(stations[0].id);
+            }}
+            style={{ cursor: 'pointer' }}
+          >
+            {/* Card frame */}
+            <rect
+              x={0}
+              y={0}
+              width={CARD_W}
+              height={CARD_H}
+              rx={6}
+              fill="#0a0d12"
+              stroke={isSelected ? SW_COLORS.brand : accent}
+              strokeWidth={isSelected ? 2.5 : 1.5}
+            />
+            {/* Color header strip */}
+            <rect x={0} y={0} width={CARD_W} height={26} rx={6} fill={accent} />
+            <rect x={0} y={20} width={CARD_W} height={6} fill={accent} />
+            <text
+              x={12}
+              y={17}
+              fontFamily={SW_FONTS.display}
+              fontSize={11}
+              fontWeight={900}
+              fill="#fff"
+              letterSpacing="0.1em"
+            >
+              {d.name.toUpperCase()}
+            </text>
+            <text
+              x={CARD_W - 12}
+              y={17}
+              textAnchor="end"
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={800}
+              fill="#ffffffcc"
+            >
+              {stations.length} STN
+            </text>
+
+            {/* Throughput hero number */}
+            <text
+              x={CARD_W / 2}
+              y={68}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.display}
+              fontSize={32}
+              fontWeight={900}
+              fill="#fff"
+              letterSpacing="-0.02em"
+            >
+              {pcsHr}
+            </text>
+            <text
+              x={CARD_W / 2}
+              y={84}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={700}
+              fill="#ffffff80"
+              letterSpacing="0.1em"
+            >
+              PCS/HR
+            </text>
+
+            {/* Util bar */}
+            <rect x={12} y={96} width={CARD_W - 24} height={4} rx={2} fill="#ffffff15" />
+            <rect
+              x={12}
+              y={96}
+              width={Math.max(0, ((CARD_W - 24) * Math.min(100, avg)) / 100)}
+              height={4}
+              rx={2}
+              fill={utilCol}
+            />
+            <text
+              x={12}
+              y={114}
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={700}
+              fill="#ffffff80"
+              letterSpacing="0.06em"
+            >
+              UTIL
+            </text>
+            <text
+              x={CARD_W - 12}
+              y={114}
+              textAnchor="end"
+              fontFamily={SW_FONTS.mono}
+              fontSize={10}
+              fontWeight={800}
+              fill={utilCol}
+            >
+              {avg.toFixed(0)}%
+            </text>
+
+            {/* Bottom row — WIP + hot count */}
+            <text
+              x={12}
+              y={130}
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={700}
+              fill="#ffffffaa"
+            >
+              WIP {wip}
+            </text>
+            <text
+              x={CARD_W - 12}
+              y={130}
+              textAnchor="end"
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={800}
+              fill={hot > 0 ? SW_COLORS.alarm : '#ffffff80'}
+            >
+              {hot > 0 ? `● ${hot} HOT` : '○ STABLE'}
+            </text>
+
+            {/* Animated flowing dots inside the card body */}
+            {stations.length > 0 && (
+              <>
+                {Array.from({ length: 4 }).map((_, k) => {
+                  const phase = ((t * 0.5 + k * 0.25 + i * 0.1) % 1 + 1) % 1;
+                  const dx = 14 + (CARD_W - 28) * phase;
+                  return (
+                    <circle
+                      key={`dot-${k}`}
+                      cx={dx}
+                      cy={92}
+                      r={1.6}
+                      fill={accent}
+                      opacity={0.55}
+                      pointerEvents="none"
+                    />
+                  );
+                })}
+              </>
+            )}
+          </g>
+        );
+      })}
+
+      {/* Empty-state hint */}
+      {ordered.length === 0 && (
+        <text
+          x={W / 2}
+          y={H / 2}
+          textAnchor="middle"
+          fill="#ffffff60"
+          fontFamily={SW_FONTS.body}
+          fontSize={14}
+        >
+          No departments yet — author the twin in Factory Builder.
+        </text>
+      )}
+
+      {/* Legend */}
+      <g transform={`translate(${W - 220}, ${H - 60})`}>
+        <rect width={200} height={44} fill="#0a0d12cc" stroke="#ffffff20" rx={4} />
+        <text
+          x={12}
+          y={18}
+          fill="#fff"
+          fontFamily={SW_FONTS.mono}
+          fontSize={10}
+          fontWeight={900}
+          letterSpacing="0.15em"
+        >
+          LOGIC LEGEND
+        </text>
+        <text x={12} y={34} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={9}>
+          ⬛ dept · → flow · ● bottleneck
         </text>
       </g>
     </svg>

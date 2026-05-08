@@ -24,7 +24,7 @@ import {
 import { useProject, useGarments } from '../store';
 import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade } from '../domain';
 
-type SimView = 'iso' | 'top' | 'heat';
+type SimView = 'iso' | 'top' | 'heat' | 'logic';
 
 const SHIFT_MIN_PER_DAY = 480;
 
@@ -115,7 +115,7 @@ export function LiveSimPage() {
         {/* View toggle */}
         <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
         <div style={{ display: 'flex', gap: 2, background: '#ffffff08', padding: 2, borderRadius: 6 }}>
-          {(['iso', 'top', 'heat'] as const).map((v) => (
+          {(['iso', 'top', 'heat', 'logic'] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -132,7 +132,7 @@ export function LiveSimPage() {
                 borderRadius: 4,
               }}
             >
-              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : 'HEAT'}
+              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : v === 'heat' ? 'HEAT' : 'LOGIC'}
             </button>
           ))}
         </div>
@@ -200,6 +200,14 @@ export function LiveSimPage() {
         )}
         {view === 'heat' && (
           <SimHeatView
+            stations={state.stations}
+            bottleneckOpIndex={state.bottleneckOpIndex}
+            garmentName={garment.name}
+            simTime={state.time}
+          />
+        )}
+        {view === 'logic' && (
+          <SimLogicView
             stations={state.stations}
             bottleneckOpIndex={state.bottleneckOpIndex}
             garmentName={garment.name}
@@ -1047,4 +1055,299 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName }: SimViewProps)
     </svg>
   );
 }
+
+// ============================================================================
+// LOGIC VIEW — block-flow / schema diagram (AnyLogic-style)
+// ============================================================================
+//
+// Each operation becomes a flow card with its OP code, SMV, queue length,
+// busy/total servers, and live throughput. Cards are connected in routing
+// order with marching arrows, so the user can see WHERE in the logical flow
+// the bottleneck sits — independent of physical layout.
+
+function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime }: SimViewProps) {
+  if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
+
+  const W = 1280;
+  const H = 720;
+  const CARD_W = 200;
+  const CARD_H = 130;
+  const cols = Math.min(stations.length, 6);
+  const colStep = (W - 80 - CARD_W) / Math.max(1, cols - 1);
+  const rowStep = CARD_H + 70;
+
+  const positions = stations.map((_, i) => {
+    const col = i % cols;
+    const row = Math.floor(i / cols);
+    return { x: 40 + col * colStep, y: 70 + row * rowStep, col, row };
+  });
+
+  // Per-card produced-rate estimate (pieces/hr at this station).
+  const totalBusyTime = simTime > 0 ? simTime : 1;
+  const stationsThroughput = stations.map((s) => {
+    if (totalBusyTime <= 0) return 0;
+    return Math.round((s.produced / totalBusyTime) * 60);
+  });
+
+  return (
+    <svg
+      viewBox={`0 0 ${W} ${H}`}
+      preserveAspectRatio="xMidYMid meet"
+      style={{ width: '100%', height: '100%', display: 'block' }}
+    >
+      <defs>
+        <pattern id="sim-logic-grid" width={32} height={32} patternUnits="userSpaceOnUse">
+          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff06" strokeWidth={1} />
+        </pattern>
+        <marker
+          id="sim-logic-arrow"
+          viewBox="0 0 10 10"
+          refX={9}
+          refY={5}
+          markerWidth={6}
+          markerHeight={6}
+          orient="auto"
+        >
+          <path d="M0 0 L10 5 L0 10 z" fill="#ffffff90" />
+        </marker>
+      </defs>
+      <rect width={W} height={H} fill="#0d1219" />
+      <rect width={W} height={H} fill="url(#sim-logic-grid)" />
+
+      <text
+        x={W / 2}
+        y={36}
+        textAnchor="middle"
+        fill="#ffffff80"
+        fontFamily={SW_FONTS.mono}
+        fontSize={12}
+        fontWeight={800}
+        letterSpacing="2px"
+      >
+        {garmentName.toUpperCase()} · LOGIC · OPERATION FLOW SCHEMA
+      </text>
+
+      {/* Flow arrows */}
+      {stations.map((_, i) => {
+        if (i === stations.length - 1) return null;
+        const a = positions[i];
+        const b = positions[i + 1];
+        const sx = a.x + CARD_W;
+        const sy = a.y + CARD_H / 2;
+        const ex = b.x;
+        const ey = b.y + CARD_H / 2;
+        let path: string;
+        if (a.row === b.row) {
+          path = `M ${sx} ${sy} L ${ex - 4} ${ey}`;
+        } else {
+          const midY = (a.y + CARD_H + b.y) / 2;
+          path = `M ${sx} ${sy} L ${sx + 18} ${sy} L ${sx + 18} ${midY} L ${b.x - 18} ${midY} L ${b.x - 18} ${ey} L ${ex - 4} ${ey}`;
+        }
+        return (
+          <path
+            key={`flow-${i}`}
+            d={path}
+            fill="none"
+            stroke="#ffffff35"
+            strokeWidth={2}
+            strokeDasharray="6 5"
+            markerEnd="url(#sim-logic-arrow)"
+            style={{ animation: 'sim-march 0.9s linear infinite' }}
+            pointerEvents="none"
+          />
+        );
+      })}
+
+      {/* Operation flow cards */}
+      {stations.map((s, i) => {
+        const p = positions[i];
+        const isHot = i === bottleneckOpIndex && s.queueLen > 0;
+        const occupancy = s.serversTotal > 0 ? s.busy / s.serversTotal : 0;
+        const utilCol = isHot ? SW_COLORS.alarm : occupancy >= 0.85 ? SW_COLORS.warn : SW_COLORS.ok;
+        const accent = isHot ? SW_COLORS.alarm : SW_COLORS.brand;
+        const pcsHr = stationsThroughput[i];
+
+        return (
+          <g key={s.opId} transform={`translate(${p.x}, ${p.y})`}>
+            <rect
+              x={0}
+              y={0}
+              width={CARD_W}
+              height={CARD_H}
+              rx={6}
+              fill="#0a0d12"
+              stroke={accent}
+              strokeWidth={isHot ? 2.5 : 1.5}
+            />
+            {/* Header strip */}
+            <rect x={0} y={0} width={CARD_W} height={26} rx={6} fill={accent} />
+            <rect x={0} y={20} width={CARD_W} height={6} fill={accent} />
+            <text
+              x={12}
+              y={17}
+              fontFamily={SW_FONTS.display}
+              fontSize={11}
+              fontWeight={900}
+              fill="#fff"
+              letterSpacing="0.08em"
+            >
+              {s.opCode ?? `OP-${i + 1}`}
+            </text>
+            <text
+              x={CARD_W - 12}
+              y={17}
+              textAnchor="end"
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={800}
+              fill="#ffffffcc"
+            >
+              {s.smv.toFixed(2)}m
+            </text>
+
+            {/* Op name */}
+            <text
+              x={CARD_W / 2}
+              y={44}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.body}
+              fontSize={10}
+              fontWeight={700}
+              fill="#ffffffcc"
+            >
+              {s.opName.length > 26 ? s.opName.slice(0, 24) + '…' : s.opName}
+            </text>
+
+            {/* Throughput hero */}
+            <text
+              x={CARD_W / 2}
+              y={72}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.display}
+              fontSize={26}
+              fontWeight={900}
+              fill="#fff"
+              letterSpacing="-0.02em"
+            >
+              {pcsHr}
+            </text>
+            <text
+              x={CARD_W / 2}
+              y={86}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.mono}
+              fontSize={8}
+              fontWeight={700}
+              fill="#ffffff80"
+              letterSpacing="0.1em"
+            >
+              PCS/HR
+            </text>
+
+            {/* Util bar */}
+            <rect x={12} y={94} width={CARD_W - 24} height={3} rx={1.5} fill="#ffffff15" />
+            <rect
+              x={12}
+              y={94}
+              width={Math.max(0, (CARD_W - 24) * occupancy)}
+              height={3}
+              rx={1.5}
+              fill={utilCol}
+            />
+
+            {/* Bottom row: queue + busy/total */}
+            <text
+              x={12}
+              y={114}
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={700}
+              fill={s.queueLen > 8 ? SW_COLORS.thread : '#ffffffaa'}
+            >
+              Q={s.queueLen}
+            </text>
+            <text
+              x={CARD_W / 2}
+              y={114}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={700}
+              fill="#ffffffaa"
+            >
+              {s.busy}/{s.serversTotal}
+            </text>
+            <text
+              x={CARD_W - 12}
+              y={114}
+              textAnchor="end"
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={800}
+              fill={isHot ? SW_COLORS.alarm : utilCol}
+            >
+              {Math.round(occupancy * 100)}%
+            </text>
+
+            {/* Animated travelling dot for the routing arrow's tail */}
+            {Array.from({ length: 3 }).map((_, k) => {
+              const phase = ((simTime * 0.04 + k * 0.33 + i * 0.1) % 1 + 1) % 1;
+              const dx = 14 + (CARD_W - 28) * phase;
+              return (
+                <circle
+                  key={`dot-${k}`}
+                  cx={dx}
+                  cy={88}
+                  r={1.5}
+                  fill={accent}
+                  opacity={0.6}
+                  pointerEvents="none"
+                />
+              );
+            })}
+
+            {/* Bottleneck flag */}
+            {isHot && (
+              <g transform={`translate(${CARD_W - 18}, ${CARD_H - 18})`} pointerEvents="none">
+                <circle r={6} fill={SW_COLORS.alarm}>
+                  <animate attributeName="r" values="6;9;6" dur="0.8s" repeatCount="indefinite" />
+                </circle>
+                <text
+                  textAnchor="middle"
+                  y={3}
+                  fontFamily={SW_FONTS.display}
+                  fontSize={9}
+                  fontWeight={900}
+                  fill="#fff"
+                >
+                  !
+                </text>
+              </g>
+            )}
+          </g>
+        );
+      })}
+
+      {/* Legend */}
+      <g transform={`translate(${W - 220}, ${H - 60})`}>
+        <rect width={200} height={44} fill="#0a0d12cc" stroke="#ffffff20" rx={4} />
+        <text
+          x={12}
+          y={18}
+          fill="#fff"
+          fontFamily={SW_FONTS.mono}
+          fontSize={10}
+          fontWeight={900}
+          letterSpacing="0.15em"
+        >
+          LOGIC LEGEND
+        </text>
+        <text x={12} y={34} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={9}>
+          ⬛ op · → routing · ● bottleneck
+        </text>
+      </g>
+    </svg>
+  );
+}
+
 
