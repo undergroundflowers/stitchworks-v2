@@ -39,6 +39,8 @@ import {
   type KpiObservedAttrs,
   type Connector,
   type ConnectorKind,
+  type CadUnderlay,
+  type CadUnderlayTransform,
   emptyTwin,
   forkTwin,
   newDeptId,
@@ -51,7 +53,7 @@ import {
   validateTwin,
 } from '../domain/twin';
 
-export const TWIN_STORE_SCHEMA_VERSION = 2 as const;
+export const TWIN_STORE_SCHEMA_VERSION = 4 as const;
 
 // ============================================================================
 // STATE SHAPE
@@ -109,6 +111,16 @@ export interface TwinState {
   updateConnector: (id: string, patch: Partial<Omit<Connector, 'id'>>) => void;
   /** Remove a connector by id. */
   removeConnector: (id: string) => void;
+
+  // ── CAD underlay (imported floor-plan, used as a tracing reference) ──────
+  /** Replace the active twin's CAD underlay with a freshly imported one,
+   *  or clear it (pass null). The transform should already be sized so the
+   *  drawing roughly fits the grid; the user nudges from the canvas
+   *  controls. */
+  setCadUnderlay: (underlay: CadUnderlay | null) => void;
+  /** Patch the placement of the CAD underlay on the active twin (no-op if
+   *  there is no underlay). */
+  updateCadTransform: (patch: Partial<CadUnderlayTransform>) => void;
 
   // ── Lens-attribute writes (sugar over updateWorkstation) ─────────────────
   setOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
@@ -376,6 +388,39 @@ export const useTwin = create<TwinState>()(
           })),
         ),
 
+      // ── CAD underlay ───────────────────────────────────────────────────────
+      setCadUnderlay: (underlay) =>
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            cadUnderlay: underlay
+              ? {
+                  ...underlay,
+                  transform: { ...underlay.transform },
+                  viewBox: [...underlay.viewBox] as [number, number, number, number],
+                  regions: underlay.regions.map((r) => ({
+                    ...r,
+                    bbox: [...r.bbox] as [number, number, number, number],
+                  })),
+                }
+              : null,
+          })),
+        ),
+
+      updateCadTransform: (patch) =>
+        set((s) =>
+          updateActive(s, (twin) => {
+            if (!twin.cadUnderlay) return twin;
+            return {
+              ...twin,
+              cadUnderlay: {
+                ...twin.cadUnderlay,
+                transform: { ...twin.cadUnderlay.transform, ...patch },
+              },
+            };
+          }),
+        ),
+
       // ── Lens-attribute sugar ───────────────────────────────────────────────
       setOperation: (wsId, patch) =>
         set((s) =>
@@ -564,6 +609,8 @@ export const useTwin = create<TwinState>()(
           addConnector: get().addConnector,
           updateConnector: get().updateConnector,
           removeConnector: get().removeConnector,
+          setCadUnderlay: get().setCadUnderlay,
+          updateCadTransform: get().updateCadTransform,
           setOperation: get().setOperation,
           setResources: get().setResources,
           setKpiTargets: get().setKpiTargets,
@@ -616,14 +663,18 @@ export const useTwin = create<TwinState>()(
         activeScenarioId: state.activeScenarioId,
       }),
       // v1 → v2: add `connectors: []` to canonical and every scenario's twin.
-      // Existing factory data is otherwise unchanged.
+      // v2 → v3: add `cadUnderlay: null` (handled by normalizeTwin).
+      // v3 → v4: add `regions: []` to existing CAD underlays (also handled
+      // by normalizeTwin). Auto-Extract is unavailable on pre-v4 underlays
+      // until the user re-imports.
+      // All upgrades are pure additions; existing factory data is unchanged.
       migrate: (persisted, fromVersion) => {
         const s = (persisted ?? {}) as {
           canonical?: unknown;
           scenarios?: Array<{ twin?: unknown; runs?: unknown[] } & Record<string, unknown>>;
           activeScenarioId?: string | null;
         };
-        if (fromVersion < 2) {
+        if (fromVersion < TWIN_STORE_SCHEMA_VERSION) {
           return {
             schemaVersion: TWIN_STORE_SCHEMA_VERSION,
             canonical: normalizeTwin(s.canonical),

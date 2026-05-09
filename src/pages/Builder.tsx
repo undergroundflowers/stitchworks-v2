@@ -44,10 +44,12 @@ import {
 import type {
   Department,
   Workstation,
-  Rect,
   Connector,
   ConnectorKind,
+  CadUnderlay,
+  DetectedRegion,
 } from '../domain/twin';
+import { importCadFile, regionToWorldRect } from '../lib/cadImport';
 
 // ============================================================================
 // CONSTANTS
@@ -110,6 +112,18 @@ const CONNECTOR_LABEL: Record<ConnectorKind, string> = {
  *  footprint, and label from ids that live in the apparel palette. */
 function resolveFixture(catalogId: string): IsoFixture | undefined {
   return ISO_FIXTURE_CATALOG.find((f) => f.id === catalogId);
+}
+
+/** Effective footprint for a workstation. Per-ws `size` override wins over
+ *  the catalog fixture's defaults, so two SNLS machines can be different
+ *  sizes. Values are decimal (no integer rounding). */
+function wsFootprint(ws: Workstation): { w: number; d: number; h: number } {
+  const fix = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
+  return {
+    w: ws.size?.w ?? fix?.w ?? 1,
+    d: ws.size?.d ?? fix?.d ?? 1,
+    h: ws.size?.h ?? fix?.h ?? 1,
+  };
 }
 
 // ============================================================================
@@ -198,6 +212,8 @@ export function BuilderPage() {
   const setKpiTargets = useTwin((s) => s.setKpiTargets);
   const addConnector = useTwin((s) => s.addConnector);
   const removeConnector = useTwin((s) => s.removeConnector);
+  const setCadUnderlay = useTwin((s) => s.setCadUnderlay);
+  const updateCadTransform = useTwin((s) => s.updateCadTransform);
   const renameActive = useTwin((s) => s.renameActive);
   const createScenarioFromCanonical = useTwin(
     (s) => s.createScenarioFromCanonical,
@@ -228,8 +244,12 @@ export function BuilderPage() {
   const [hoverCell, setHoverCell] = useState<{ x: number; y: number } | null>(null);
   const [spacePan, setSpacePan] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
+  /** When true the Auto-Extract modal is open over the canvas. Reads its
+   *  candidate list from the active twin's CAD underlay. */
+  const [extractOpen, setExtractOpen] = useState(false);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
+  const cadFileInputRef = useRef<HTMLInputElement | null>(null);
   const panRef = useRef(pan);
   panRef.current = pan;
   const spacePanRef = useRef(false);
@@ -513,6 +533,30 @@ export function BuilderPage() {
     };
   }, [selected, rotateWorkstation, removeWorkstation, removeDepartment, duplicateWorkstation, resetView]);
 
+  // ── CAD import ─────────────────────────────────────────────────────────────
+  const onImportCadClick = useCallback(() => {
+    cadFileInputRef.current?.click();
+  }, []);
+
+  const onCadFileChosen = useCallback(
+    async (e: React.ChangeEvent<HTMLInputElement>) => {
+      const file = e.target.files?.[0];
+      // Reset the input so re-importing the same file fires onChange again.
+      e.target.value = '';
+      if (!file) return;
+      const result = await importCadFile(file, {
+        gridW: twin.gridW,
+        gridH: twin.gridH,
+      });
+      if (!result.ok) {
+        window.alert(`Could not import CAD file.\n\n${result.reason}`);
+        return;
+      }
+      setCadUnderlay(result.underlay);
+    },
+    [twin.gridW, twin.gridH, setCadUnderlay],
+  );
+
   // ── Export JSON ────────────────────────────────────────────────────────────
   const onExportJson = useCallback(() => {
     const data = JSON.stringify(twin, null, 2);
@@ -721,6 +765,20 @@ export function BuilderPage() {
           ))}
         </div>
 
+        <button
+          onClick={onImportCadClick}
+          style={btnSec}
+          title="Import a DXF or SVG floor plan as a tracing reference"
+        >
+          ⌂ IMPORT CAD
+        </button>
+        <input
+          ref={cadFileInputRef}
+          type="file"
+          accept=".dxf,.svg,.dwg,image/svg+xml"
+          onChange={onCadFileChosen}
+          style={{ display: 'none' }}
+        />
         <button onClick={onExportJson} style={btnSec} title="Download the active twin as JSON">
           ⤓ EXPORT JSON
         </button>
@@ -856,6 +914,7 @@ export function BuilderPage() {
               drop={drop}
               selected={selected}
               connect={connect}
+              zoom={zoom}
               onSelect={(s) => {
                 if (connect.on && s?.kind === 'ws') {
                   if (connect.fromWsId === null) {
@@ -887,6 +946,46 @@ export function BuilderPage() {
             twin={twin}
             selected={selected}
             onSelect={setSelected}
+          />
+        )}
+
+        {/* CAD-underlay control strip — only shown when an underlay exists */}
+        {twin.cadUnderlay && (
+          <CadUnderlayControls
+            underlay={twin.cadUnderlay}
+            onPatch={updateCadTransform}
+            onRemove={() => {
+              if (window.confirm('Remove the CAD underlay from this twin?')) {
+                setCadUnderlay(null);
+              }
+            }}
+            onExtract={() => setExtractOpen(true)}
+          />
+        )}
+
+        {/* CAD Auto-Extract modal — closed shapes → Departments */}
+        {extractOpen && twin.cadUnderlay && (
+          <CadExtractModal
+            underlay={twin.cadUnderlay}
+            gridW={twin.gridW}
+            gridH={twin.gridH}
+            existingDeptCount={twin.departments.length}
+            onCancel={() => setExtractOpen(false)}
+            onConfirm={(rows) => {
+              for (const row of rows) {
+                const rect = regionToWorldRect(row.region, twin.cadUnderlay!, {
+                  gridW: twin.gridW,
+                  gridH: twin.gridH,
+                });
+                addDepartment({
+                  name: row.name,
+                  kind: row.preset.kind,
+                  color: row.preset.color,
+                  bounds: rect,
+                });
+              }
+              setExtractOpen(false);
+            }}
           />
         )}
 
@@ -1183,6 +1282,9 @@ interface CanvasSVGProps {
   drop: DropTool;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
   connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null };
+  /** Current canvas zoom — used to choose grid subdivision density so the
+   *  grid divides further when the user zooms in. */
+  zoom: number;
   onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
   onRemoveConnector: (id: string) => void;
   onStartDrag: (kind: 'ws' | 'dept', id: string, e: React.MouseEvent) => void;
@@ -1191,14 +1293,18 @@ interface CanvasSVGProps {
 /** Footprint center of a workstation in screen coordinates. Used as the
  *  arrow anchor when drawing connectors. */
 function workstationScreenCenter(ws: Workstation): { sx: number; sy: number } {
-  const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
-  const w = fixture?.w ?? 1;
-  const d = fixture?.d ?? 1;
+  const { w, d } = wsFootprint(ws);
   return isoProj(ws.position.x + w / 2, ws.position.y + d / 2);
 }
 
 function CanvasSVG(props: CanvasSVGProps) {
-  const { twin, lens, hoverCell, drop, selected } = props;
+  const { twin, lens, hoverCell, drop, selected, zoom } = props;
+
+  // Grid subdivision density. As the user zooms in, each integer cell is
+  // divided into more sub-cells (powers of 2). Steps are tuned so the next
+  // tier kicks in just after the previous one becomes too coarse to track
+  // sub-cell sizing in the inspector.
+  const subdivisions = zoom < 0.9 ? 1 : zoom < 1.6 ? 2 : zoom < 2.4 ? 4 : 8;
 
   // Compute SVG viewBox from grid extents.
   const cornerTL = isoProj(0, 0);
@@ -1229,7 +1335,53 @@ function CanvasSVG(props: CanvasSVGProps) {
         strokeWidth={1}
       />
 
-      {/* Grid lines */}
+      {/* CAD UNDERLAY — projected onto the iso ground plane between the floor
+          and the grid so the user can trace it with departments. Hidden when
+          the underlay is invisible; pointer-events suppressed always so it
+          never steals clicks from layout entities. */}
+      {twin.cadUnderlay && twin.cadUnderlay.transform.visible && (
+        <CadUnderlayLayer underlay={twin.cadUnderlay} />
+      )}
+
+      {/* Grid lines — sub-cell tier first (drawn under the integer tier so
+          the cell boundaries stay visually dominant). Sub-cell density grows
+          with zoom; at zoom 1× there are none. */}
+      {subdivisions > 1 &&
+        Array.from({ length: twin.gridW * subdivisions + 1 }, (_, i) => {
+          if (i % subdivisions === 0) return null;
+          const x = i / subdivisions;
+          const a = isoProj(x, 0);
+          const b = isoProj(x, twin.gridH);
+          return (
+            <line
+              key={`vs-${i}`}
+              x1={a.sx}
+              y1={a.sy}
+              x2={b.sx}
+              y2={b.sy}
+              stroke="#0F141908"
+              strokeWidth={0.3}
+            />
+          );
+        })}
+      {subdivisions > 1 &&
+        Array.from({ length: twin.gridH * subdivisions + 1 }, (_, i) => {
+          if (i % subdivisions === 0) return null;
+          const y = i / subdivisions;
+          const a = isoProj(0, y);
+          const b = isoProj(twin.gridW, y);
+          return (
+            <line
+              key={`hs-${i}`}
+              x1={a.sx}
+              y1={a.sy}
+              x2={b.sx}
+              y2={b.sy}
+              stroke="#0F141908"
+              strokeWidth={0.3}
+            />
+          );
+        })}
       {Array.from({ length: twin.gridW + 1 }, (_, i) => {
         const a = isoProj(i, 0);
         const b = isoProj(i, twin.gridH);
@@ -1363,6 +1515,7 @@ function WorkstationSprite({
   if (!fixture) return null;
 
   const origin = isoProj(ws.position.x, ws.position.y);
+  const { w: fw, d: fd, h: fh } = wsFootprint(ws);
 
   // KPI heat tint (lens=kpis only) — based on observed.utilizationPct.
   const heat =
@@ -1372,9 +1525,9 @@ function WorkstationSprite({
 
   // Compute footprint bounds for the selection ring.
   const tl = isoProj(ws.position.x, ws.position.y);
-  const tr = isoProj(ws.position.x + fixture.w, ws.position.y);
-  const br = isoProj(ws.position.x + fixture.w, ws.position.y + fixture.d);
-  const bl = isoProj(ws.position.x, ws.position.y + fixture.d);
+  const tr = isoProj(ws.position.x + fw, ws.position.y);
+  const br = isoProj(ws.position.x + fw, ws.position.y + fd);
+  const bl = isoProj(ws.position.x, ws.position.y + fd);
 
   return (
     <g
@@ -1414,7 +1567,7 @@ function WorkstationSprite({
           strokeOpacity={0.9}
         />
       )}
-      {fixture.draw({ w: fixture.w, d: fixture.d, h: fixture.h }) as ReactNode}
+      {fixture.draw({ w: fw, d: fd, h: fh }) as ReactNode}
 
       {/* KPI heat overlay */}
       {heat && (
@@ -1468,6 +1621,549 @@ function heatColor(util: number): string {
   if (util < 60) return SW_COLORS.ok;
   if (util < 85) return SW_COLORS.warn;
   return SW_COLORS.alarm;
+}
+
+// ── CAD UNDERLAY ─────────────────────────────────────────────────────────────
+
+/**
+ * Render an imported floor plan onto the iso ground plane.
+ *
+ * Coordinate stack, outermost first:
+ *   1. Iso projection: map world (x, y) → screen (sx, sy).
+ *   2. Translate to the underlay's center in world cells.
+ *   3. Rotate by the user-set angle.
+ *   4. Scale source-units → world-cells.
+ *   5. Translate so the source viewBox is centred at the origin.
+ *
+ * `vector-effect: non-scaling-stroke` keeps the trace lines visually thin no
+ * matter how aggressively the user scales the underlay. `pointer-events: none`
+ * means the underlay never steals clicks from departments / workstations.
+ */
+function CadUnderlayLayer({ underlay }: { underlay: CadUnderlay }) {
+  const [vbX, vbY, vbW, vbH] = underlay.viewBox;
+  const cxSrc = vbX + vbW / 2;
+  const cySrc = vbY + vbH / 2;
+  const t = underlay.transform;
+
+  const isoMatrix = `matrix(${ISO_TILE} ${ISO_THIN} ${-ISO_TILE} ${ISO_THIN} 0 0)`;
+  const place =
+    `translate(${t.cx} ${t.cy}) ` +
+    `rotate(${t.rotation}) ` +
+    `scale(${t.scale}) ` +
+    `translate(${-cxSrc} ${-cySrc})`;
+
+  return (
+    <g
+      data-cad-underlay="true"
+      transform={isoMatrix}
+      opacity={t.opacity}
+      style={{ pointerEvents: 'none' }}
+    >
+      <g transform={place}>
+        <g
+          stroke={SW_COLORS.ink}
+          strokeWidth={1.5}
+          fill="none"
+          style={{ vectorEffect: 'non-scaling-stroke' } as CSSProperties}
+          // Inner content was emitted by the importer; safe because we never
+          // accept anything other than the user's own DXF/SVG file.
+          dangerouslySetInnerHTML={{ __html: underlay.svg }}
+        />
+      </g>
+    </g>
+  );
+}
+
+/**
+ * Floating control strip for the CAD underlay. Mirrors the visual language of
+ * the zoom strip (paper background, hairline border) so it doesn't compete
+ * with the toolbar; lives just above the count chips.
+ */
+function CadUnderlayControls({
+  underlay,
+  onPatch,
+  onRemove,
+  onExtract,
+}: {
+  underlay: CadUnderlay;
+  onPatch: (patch: Partial<CadUnderlay['transform']>) => void;
+  onRemove: () => void;
+  onExtract: () => void;
+}) {
+  const t = underlay.transform;
+  const tinyBtn: CSSProperties = {
+    ...btnSec,
+    padding: '4px 8px',
+    minWidth: 28,
+    fontSize: 11,
+  };
+  const labelStyle: CSSProperties = {
+    fontFamily: SW_FONTS.display,
+    fontSize: 9,
+    fontWeight: 900,
+    letterSpacing: '0.08em',
+    color: SW_COLORS.muted,
+  };
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        bottom: 60,
+        right: 14,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 6,
+        background: SW_COLORS.paper,
+        padding: '8px 10px',
+        borderRadius: 6,
+        border: `1px solid ${SW_COLORS.line}`,
+        zIndex: 5,
+        minWidth: 240,
+        boxShadow: '0 4px 14px rgba(0,0,0,0.06)',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <span
+          style={{
+            fontFamily: SW_FONTS.display,
+            fontSize: 10,
+            fontWeight: 900,
+            letterSpacing: '0.1em',
+            color: SW_COLORS.ink,
+          }}
+        >
+          ⌂ CAD
+        </span>
+        <span
+          title={underlay.name}
+          style={{
+            fontFamily: SW_FONTS.body,
+            fontSize: 11,
+            color: SW_COLORS.steel,
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            maxWidth: 110,
+          }}
+        >
+          {underlay.name}
+        </span>
+        <span style={{ ...labelStyle, marginLeft: 'auto' }}>
+          {underlay.format.toUpperCase()}
+        </span>
+      </div>
+
+      {/* Visibility · Lock · Remove */}
+      <div style={{ display: 'flex', gap: 4 }}>
+        <button
+          onClick={() => onPatch({ visible: !t.visible })}
+          style={{
+            ...tinyBtn,
+            background: t.visible ? SW_COLORS.brand : 'transparent',
+            color: t.visible ? '#fff' : SW_COLORS.steel,
+            borderColor: t.visible ? SW_COLORS.brand : SW_COLORS.line,
+          }}
+          title={t.visible ? 'Hide underlay' : 'Show underlay'}
+        >
+          {t.visible ? '◉ SHOW' : '○ HIDE'}
+        </button>
+        <button
+          onClick={() => onPatch({ locked: !t.locked })}
+          style={{
+            ...tinyBtn,
+            background: t.locked ? SW_COLORS.ink : 'transparent',
+            color: t.locked ? '#fff' : SW_COLORS.steel,
+            borderColor: t.locked ? SW_COLORS.ink : SW_COLORS.line,
+          }}
+          title="When locked, controls are dimmed and accidental nudges are prevented"
+        >
+          {t.locked ? '🔒 LOCKED' : '🔓 LOCK'}
+        </button>
+        <button
+          onClick={onRemove}
+          style={{
+            ...tinyBtn,
+            color: SW_COLORS.alarm,
+            borderColor: SW_COLORS.alarm + '60',
+            marginLeft: 'auto',
+          }}
+          title="Remove the underlay"
+        >
+          ✕
+        </button>
+      </div>
+
+      {/* Auto-extract — promote detected closed shapes into Departments */}
+      <button
+        onClick={onExtract}
+        disabled={underlay.regions.length === 0}
+        style={{
+          ...tinyBtn,
+          width: '100%',
+          marginTop: 2,
+          background: underlay.regions.length > 0 ? SW_COLORS.ink : 'transparent',
+          color: underlay.regions.length > 0 ? '#fff' : SW_COLORS.muted,
+          borderColor: underlay.regions.length > 0 ? SW_COLORS.ink : SW_COLORS.line,
+          cursor: underlay.regions.length > 0 ? 'pointer' : 'not-allowed',
+          fontFamily: SW_FONTS.display,
+          letterSpacing: '0.08em',
+          fontSize: 10,
+        }}
+        title={
+          underlay.regions.length > 0
+            ? `Promote ${underlay.regions.length} detected region${underlay.regions.length === 1 ? '' : 's'} into Departments`
+            : 'No closed shapes were detected in this drawing'
+        }
+      >
+        🪄 AUTO-EXTRACT ({underlay.regions.length})
+      </button>
+
+      {/* Opacity slider */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: t.locked ? 0.5 : 1 }}>
+        <span style={{ ...labelStyle, width: 56 }}>OPACITY</span>
+        <input
+          type="range"
+          min={0.1}
+          max={1}
+          step={0.05}
+          value={t.opacity}
+          disabled={t.locked}
+          onChange={(e) => onPatch({ opacity: parseFloat(e.target.value) })}
+          style={{ flex: 1 }}
+        />
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, width: 30, textAlign: 'right', color: SW_COLORS.steel }}>
+          {Math.round(t.opacity * 100)}%
+        </span>
+      </div>
+
+      {/* Scale */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: t.locked ? 0.5 : 1 }}>
+        <span style={{ ...labelStyle, width: 56 }}>SCALE</span>
+        <button onClick={() => onPatch({ scale: t.scale / 1.1 })} style={tinyBtn} disabled={t.locked} title="Smaller">−</button>
+        <button onClick={() => onPatch({ scale: t.scale * 1.1 })} style={tinyBtn} disabled={t.locked} title="Larger">+</button>
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.steel, marginLeft: 'auto' }}>
+          {t.scale.toExponential(1)}
+        </span>
+      </div>
+
+      {/* Rotate */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: t.locked ? 0.5 : 1 }}>
+        <span style={{ ...labelStyle, width: 56 }}>ROTATE</span>
+        <button onClick={() => onPatch({ rotation: t.rotation - 15 })} style={tinyBtn} disabled={t.locked} title="Rotate −15°">⟲</button>
+        <button onClick={() => onPatch({ rotation: t.rotation + 15 })} style={tinyBtn} disabled={t.locked} title="Rotate +15°">⟳</button>
+        <button onClick={() => onPatch({ rotation: 0 })} style={tinyBtn} disabled={t.locked} title="Reset rotation">0°</button>
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.steel, marginLeft: 'auto' }}>
+          {Math.round(t.rotation)}°
+        </span>
+      </div>
+
+      {/* Nudge position — moves the underlay center in world cells */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: t.locked ? 0.5 : 1 }}>
+        <span style={{ ...labelStyle, width: 56 }}>NUDGE</span>
+        <button onClick={() => onPatch({ cx: t.cx - 1 })} style={tinyBtn} disabled={t.locked} title="Move left 1 cell">←</button>
+        <button onClick={() => onPatch({ cy: t.cy - 1 })} style={tinyBtn} disabled={t.locked} title="Move up 1 cell">↑</button>
+        <button onClick={() => onPatch({ cy: t.cy + 1 })} style={tinyBtn} disabled={t.locked} title="Move down 1 cell">↓</button>
+        <button onClick={() => onPatch({ cx: t.cx + 1 })} style={tinyBtn} disabled={t.locked} title="Move right 1 cell">→</button>
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.steel, marginLeft: 'auto' }}>
+          {Math.round(t.cx)},{Math.round(t.cy)}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+// ── CAD AUTO-EXTRACT MODAL ───────────────────────────────────────────────────
+
+interface ExtractRow {
+  region: DetectedRegion;
+  /** User-editable name; defaults to "Region 1", "Region 2", … */
+  name: string;
+  /** Department preset (kind + colour + label). */
+  preset: DeptPreset;
+  /** When false the row is skipped on confirm. */
+  include: boolean;
+}
+
+/**
+ * Modal that lists every closed shape detected in the underlay, lets the user
+ * pick a Department kind for each, and creates them in one go. The user can:
+ *   • Toggle individual rows on/off (top-K by area are pre-selected).
+ *   • Edit the name and the preset (kind + colour) per row.
+ *   • Use Select-all / Select-none for bulk action.
+ *
+ * The modal computes each region's world-cell footprint live so the user can
+ * sanity-check that "this big shape" maps to "a 24×16 cell rectangle" before
+ * committing. Once confirmed, the parent runs `addDepartment` per row.
+ */
+function CadExtractModal({
+  underlay,
+  gridW,
+  gridH,
+  existingDeptCount,
+  onCancel,
+  onConfirm,
+}: {
+  underlay: CadUnderlay;
+  gridW: number;
+  gridH: number;
+  existingDeptCount: number;
+  onCancel: () => void;
+  onConfirm: (rows: ExtractRow[]) => void;
+}) {
+  // Pre-select the top-N largest regions; everything else starts unchecked.
+  // Anything tinier than 0.05% of the drawing's bbox area is almost certainly
+  // a fixture, not a room — leave it off by default.
+  const PRE_SELECT_TOP = 6;
+  const drawingArea = (() => {
+    const [, , w, h] = underlay.viewBox;
+    return Math.max(1, w * h);
+  })();
+  const initialRows = useMemo<ExtractRow[]>(
+    () =>
+      underlay.regions.map((r, i) => ({
+        region: r,
+        name: `Region ${existingDeptCount + i + 1}`,
+        preset: DEPT_PRESETS[DEPT_PRESETS.length - 1], // default "Custom"
+        include:
+          i < PRE_SELECT_TOP && r.area / drawingArea >= 0.0005,
+      })),
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+    [underlay.regions],
+  );
+  const [rows, setRows] = useState<ExtractRow[]>(initialRows);
+
+  const setRow = (idx: number, patch: Partial<ExtractRow>) =>
+    setRows((rs) => rs.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
+
+  const selectedCount = rows.filter((r) => r.include).length;
+
+  return (
+    <div
+      role="dialog"
+      aria-label="Auto-extract Departments from CAD"
+      onClick={onCancel}
+      style={{
+        position: 'absolute',
+        inset: 0,
+        background: 'rgba(15, 20, 25, 0.4)',
+        zIndex: 20,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(720px, 92%)',
+          maxHeight: '88%',
+          background: SW_COLORS.paper,
+          borderRadius: 8,
+          border: `1px solid ${SW_COLORS.line}`,
+          boxShadow: '0 18px 50px rgba(0,0,0,0.25)',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        {/* Header */}
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            padding: '14px 18px',
+            borderBottom: `1px solid ${SW_COLORS.line}`,
+          }}
+        >
+          <div
+            style={{
+              fontFamily: SW_FONTS.display,
+              fontSize: 14,
+              fontWeight: 900,
+              letterSpacing: '0.04em',
+              color: SW_COLORS.ink,
+            }}
+          >
+            🪄 AUTO-EXTRACT DEPARTMENTS
+          </div>
+          <div style={{ fontFamily: SW_FONTS.body, fontSize: 12, color: SW_COLORS.muted }}>
+            from <strong style={{ color: SW_COLORS.steel }}>{underlay.name}</strong>
+            {' · '}
+            {underlay.regions.length} closed shape{underlay.regions.length === 1 ? '' : 's'} detected
+          </div>
+          <button onClick={onCancel} style={{ ...btnSec, marginLeft: 'auto' }} title="Close">
+            ✕
+          </button>
+        </div>
+
+        {/* Bulk actions */}
+        <div
+          style={{
+            display: 'flex',
+            gap: 8,
+            padding: '8px 18px',
+            borderBottom: `1px solid ${SW_COLORS.line}`,
+            background: SW_COLORS.paperDeep,
+          }}
+        >
+          <button
+            onClick={() => setRows((rs) => rs.map((r) => ({ ...r, include: true })))}
+            style={btnSec}
+          >
+            ☑ Select all
+          </button>
+          <button
+            onClick={() => setRows((rs) => rs.map((r) => ({ ...r, include: false })))}
+            style={btnSec}
+          >
+            ☐ Select none
+          </button>
+          <span
+            style={{
+              marginLeft: 'auto',
+              alignSelf: 'center',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              color: SW_COLORS.steel,
+            }}
+          >
+            {selectedCount} / {rows.length} selected
+          </span>
+        </div>
+
+        {/* Body — scrollable list */}
+        <div style={{ overflowY: 'auto', padding: '4px 0' }}>
+          {rows.map((row, idx) => {
+            const rect = regionToWorldRect(row.region, underlay, { gridW, gridH });
+            const [bx0, by0, bx1, by1] = row.region.bbox;
+            const srcW = (bx1 - bx0).toFixed(0);
+            const srcH = (by1 - by0).toFixed(0);
+            return (
+              <div
+                key={row.region.id}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '32px 64px 1fr 130px 130px 100px',
+                  alignItems: 'center',
+                  gap: 12,
+                  padding: '10px 18px',
+                  borderBottom: `1px solid ${SW_COLORS.line}`,
+                  opacity: row.include ? 1 : 0.55,
+                }}
+              >
+                <input
+                  type="checkbox"
+                  checked={row.include}
+                  onChange={(e) => setRow(idx, { include: e.target.checked })}
+                  style={{ width: 18, height: 18, cursor: 'pointer' }}
+                />
+                {/* Tiny preview of the region's bbox proportions */}
+                <RegionThumb region={row.region} />
+                <input
+                  type="text"
+                  value={row.name}
+                  onChange={(e) => setRow(idx, { name: e.target.value })}
+                  style={{ ...inputBase, width: '100%' }}
+                />
+                <select
+                  value={row.preset.kind}
+                  onChange={(e) => {
+                    const next = DEPT_PRESETS.find((p) => p.kind === e.target.value);
+                    if (next) setRow(idx, { preset: next });
+                  }}
+                  style={{ ...inputBase, width: '100%' }}
+                >
+                  {DEPT_PRESETS.map((p) => (
+                    <option key={p.kind} value={p.kind}>
+                      {p.label}
+                    </option>
+                  ))}
+                </select>
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 10,
+                    color: SW_COLORS.muted,
+                    whiteSpace: 'nowrap',
+                  }}
+                  title={`Source: ${srcW} × ${srcH} units · ${row.region.source}`}
+                >
+                  src {srcW}×{srcH}
+                </span>
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 10,
+                    color: SW_COLORS.steel,
+                    whiteSpace: 'nowrap',
+                  }}
+                >
+                  {rect.w}×{rect.h} cells
+                </span>
+              </div>
+            );
+          })}
+          {rows.length === 0 && (
+            <div style={{ padding: 24, textAlign: 'center', color: SW_COLORS.muted, fontFamily: SW_FONTS.body, fontSize: 13 }}>
+              No closed shapes were detected. Try tracing on top of the underlay by hand.
+            </div>
+          )}
+        </div>
+
+        {/* Footer */}
+        <div
+          style={{
+            display: 'flex',
+            gap: 8,
+            padding: '12px 18px',
+            borderTop: `1px solid ${SW_COLORS.line}`,
+            justifyContent: 'flex-end',
+            background: SW_COLORS.paperDeep,
+          }}
+        >
+          <button onClick={onCancel} style={btnSec}>
+            CANCEL
+          </button>
+          <button
+            onClick={() => onConfirm(rows.filter((r) => r.include))}
+            disabled={selectedCount === 0}
+            style={{
+              ...btnPrim,
+              opacity: selectedCount === 0 ? 0.45 : 1,
+              cursor: selectedCount === 0 ? 'not-allowed' : 'pointer',
+            }}
+          >
+            CREATE {selectedCount} DEPARTMENT{selectedCount === 1 ? '' : 'S'}
+          </button>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Tiny SVG thumbnail of a region's source bbox shape — gives the modal a
+ *  visual cue that "this row is wide" or "this row is square" at a glance. */
+function RegionThumb({ region }: { region: DetectedRegion }) {
+  const [x0, y0, x1, y1] = region.bbox;
+  const w = Math.max(1e-6, x1 - x0);
+  const h = Math.max(1e-6, y1 - y0);
+  const max = Math.max(w, h);
+  const tw = (w / max) * 32;
+  const th = (h / max) * 32;
+  return (
+    <svg width={48} height={36} viewBox="-24 -18 48 36" style={{ display: 'block' }}>
+      <rect
+        x={-tw / 2}
+        y={-th / 2}
+        width={tw}
+        height={th}
+        fill={SW_COLORS.brand + '22'}
+        stroke={SW_COLORS.brand}
+        strokeWidth={1.4}
+      />
+    </svg>
+  );
 }
 
 // ── CONNECTOR LAYER ───────────────────────────────────────────────────────────
@@ -2004,10 +2700,10 @@ function Inspector(props: InspectorProps) {
         <div style={{ height: 14 }} />
         <div style={sectionLabel}>Bounds (cells)</div>
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-          <NumField label="x"   value={dept.bounds.x} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, x: v } })} />
-          <NumField label="y"   value={dept.bounds.y} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, y: v } })} />
-          <NumField label="w"   value={dept.bounds.w} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, w: v } })} />
-          <NumField label="h"   value={dept.bounds.h} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, h: v } })} />
+          <NumField label="x" step={0.1} value={dept.bounds.x} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, x: v } })} />
+          <NumField label="y" step={0.1} value={dept.bounds.y} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, y: v } })} />
+          <NumField label="w" step={0.1} value={dept.bounds.w} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, w: v } })} />
+          <NumField label="h" step={0.1} value={dept.bounds.h} onChange={(v) => props.onUpdateDept(dept.id, { bounds: { ...dept.bounds, h: v } })} />
         </div>
 
         <div style={{ height: 14 }} />
@@ -2045,10 +2741,47 @@ function Inspector(props: InspectorProps) {
       </div>
 
       <div style={{ height: 12 }} />
+      <div style={sectionLabel}>Position (cells)</div>
       <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-        <NumField label="x" value={ws.position.x} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, x: v } })} />
-        <NumField label="y" value={ws.position.y} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, y: v } })} />
+        <NumField label="x" step={0.1} value={ws.position.x} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, x: v } })} />
+        <NumField label="y" step={0.1} value={ws.position.y} onChange={(v) => props.onUpdateWs(ws.id, { position: { ...ws.position, y: v } })} />
       </div>
+
+      {(() => {
+        // Effective size = per-ws override ?? catalogue default. Inspector
+        // edits always write the override so the workstation diverges from
+        // the catalogue size. Decimal stepping (0.1) lets the user dial in
+        // sub-cell dimensions.
+        const eff = {
+          w: ws.size?.w ?? fixture?.w ?? 1,
+          d: ws.size?.d ?? fixture?.d ?? 1,
+          h: ws.size?.h ?? fixture?.h ?? 1,
+        };
+        const writeSize = (patch: Partial<{ w: number; d: number; h: number }>) =>
+          props.onUpdateWs(ws.id, { size: { ...eff, ...patch } });
+        return (
+          <>
+            <div style={{ height: 12 }} />
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+              <div style={sectionLabel}>Size (cells)</div>
+              {ws.size && (
+                <button
+                  onClick={() => props.onUpdateWs(ws.id, { size: undefined })}
+                  style={{ ...btnSec, padding: '2px 7px', fontSize: 9 }}
+                  title="Restore the catalogue's default size"
+                >
+                  RESET
+                </button>
+              )}
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', gap: 6 }}>
+              <NumField label="w" step={0.1} value={eff.w} onChange={(v) => writeSize({ w: v })} />
+              <NumField label="d" step={0.1} value={eff.d} onChange={(v) => writeSize({ d: v })} />
+              <NumField label="h" step={0.1} value={eff.h} onChange={(v) => writeSize({ h: v })} />
+            </div>
+          </>
+        );
+      })()}
 
       <div style={{ height: 14 }} />
       <LensSection
