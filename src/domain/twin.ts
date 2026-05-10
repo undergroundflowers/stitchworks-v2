@@ -30,12 +30,13 @@ import {
   defaultPropsFor,
   type IsoFixtureProps,
 } from './iso';
+import { pmlKindFromFixtureId, type PmlBlockOverride } from './pml';
 
 // ============================================================================
 // SCHEMA
 // ============================================================================
 
-export const TWIN_SCHEMA_VERSION = 4 as const;
+export const TWIN_SCHEMA_VERSION = 6 as const;
 export type TwinSchemaVersion = typeof TWIN_SCHEMA_VERSION;
 
 // ============================================================================
@@ -239,6 +240,14 @@ export interface Connector {
   toWsId: string;
   /** Optional caption shown on the arrow. */
   label?: string;
+  /** Specific OUTPUT port id on the source block this wire leaves from
+   *  (e.g. `'out'`, `'pass'`, `'fail'`). When omitted, renderers + the
+   *  sim engine fall back to the source block's first output port. */
+  fromPort?: string;
+  /** Specific INPUT port id on the target block this wire enters
+   *  (e.g. `'in'`, `'in1'`). When omitted, falls back to the target
+   *  block's first input port. */
+  toPort?: string;
 }
 
 // ============================================================================
@@ -273,6 +282,14 @@ export interface Workstation {
   /** Populated by the simulation engine after each run; absent until the
    *  first run or after the twin is forked into a fresh scenario. */
   kpiObserved?: KpiObservedAttrs;
+
+  /** Optional Process Modeling Library block override. When present, the
+   *  block kind + ports replace the catalog-default that would otherwise
+   *  be inferred from `catalogId`. Authored from the Inspector's PROCESS
+   *  BLOCK section. Resolve via `getBlockSpec(ws)` from `domain/pml.ts`
+   *  rather than reading this field directly — that helper handles the
+   *  fallback to the catalog default in one place. */
+  block?: PmlBlockOverride;
 }
 
 // ============================================================================
@@ -603,6 +620,11 @@ export function makeWorkstation(input: {
   const powerKw =
     typeof seedProps.power_kw === 'number' ? (seedProps.power_kw as number) : undefined;
 
+  // If the fixture is a PML primitive (`pml_*` id), auto-stamp the matching
+  // block kind so the new workstation lands as e.g. a real Source / Queue /
+  // SelectOutput on first drop — no Inspector round-trip needed.
+  const pmlKind = pmlKindFromFixtureId(input.catalogId);
+
   return {
     id: newWorkstationId(),
     deptId: input.deptId,
@@ -620,6 +642,7 @@ export function makeWorkstation(input: {
       powerKw,
     },
     kpiTargets: {},
+    block: pmlKind ? { kind: pmlKind } : undefined,
   };
 }
 
@@ -669,6 +692,16 @@ export function forkTwin(
       kpiTargets: { ...w.kpiTargets },
       // Observed values do not survive a fork.
       kpiObserved: undefined,
+      // Block overrides DO travel — a forked scenario should keep the
+      // user's authored block kind / port topology / sim params.
+      block: w.block
+        ? {
+            kind: w.block.kind,
+            inputs: w.block.inputs ? w.block.inputs.map((p) => ({ ...p })) : undefined,
+            outputs: w.block.outputs ? w.block.outputs.map((p) => ({ ...p })) : undefined,
+            params: w.block.params ? { ...w.block.params } : undefined,
+          }
+        : undefined,
     };
   });
 
@@ -741,13 +774,13 @@ export function createScenario(input: {
  *  as "do not load this twin." */
 export function validateTwin(twin: Twin): string[] {
   const errs: string[] = [];
-  // v1, v2, v3, and the current version are all readable — older saves get
-  // normalized at load time. Cast to number so the union-narrowed literal
-  // type doesn't make the equality check tautological at compile time.
+  // All shipped versions are readable — older saves get normalized at load
+  // time. Cast to number so the union-narrowed literal type doesn't make
+  // the equality check tautological at compile time.
   const ver = twin.schemaVersion as number;
-  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== (TWIN_SCHEMA_VERSION as number)) {
+  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== 4 && ver !== 5 && ver !== (TWIN_SCHEMA_VERSION as number)) {
     errs.push(
-      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, or ${TWIN_SCHEMA_VERSION}`,
+      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, or ${TWIN_SCHEMA_VERSION}`,
     );
   }
   const deptIds = new Set(twin.departments.map((d) => d.id));

@@ -17,6 +17,7 @@
 
 import {
   useEffect,
+  useLayoutEffect,
   useState,
   useMemo,
   useRef,
@@ -49,7 +50,27 @@ import type {
   CadUnderlay,
   DetectedRegion,
 } from '../domain/twin';
+import {
+  getBlockSpec,
+  getBlockParams,
+  apparelRoleFor,
+  inferBlockKindFromCatalog,
+  pmlFixtureId,
+  PML_BLOCK_LIBRARY,
+  PML_CATEGORIES,
+  PARAM_FIELDS_BY_KIND,
+  SELECTABLE_BLOCK_KINDS,
+  type ParamFieldSpec,
+  type PmlBlock,
+  type PmlBlockKind,
+  type PmlBlockOverride,
+  type PmlBlockParams,
+  type PmlCategory,
+  type PmlPort,
+} from '../domain/pml';
 import { importCadFile, regionToWorldRect } from '../lib/cadImport';
+import { runPmlOnTwin } from '../simulation/pml-runner';
+import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
 
 // ============================================================================
 // CONSTANTS
@@ -59,8 +80,12 @@ const ISO_TILE = 32;
 const ISO_THIN = ISO_TILE / 2;
 
 type Lens = 'operations' | 'resources' | 'kpis';
-/** Canvas render mode — iso 3D authoring surface or block-flow diagram. */
-type CanvasMode = 'iso' | 'logic';
+/** Canvas render mode:
+ *  • iso     — isometric 3D-feel authoring surface (default).
+ *  • logic   — dept-level block-flow summary.
+ *  • process — workstation-level PML diagram with explicit input/output ports
+ *              (every entity is a Process Modeling Library block). */
+type CanvasMode = 'iso' | 'logic' | 'process';
 type DropTool =
   | { kind: 'none' }
   | { kind: 'dept'; preset: DeptPreset }
@@ -210,6 +235,8 @@ export function BuilderPage() {
   const setOperation = useTwin((s) => s.setOperation);
   const setResources = useTwin((s) => s.setResources);
   const setKpiTargets = useTwin((s) => s.setKpiTargets);
+  const setKpiObserved = useTwin((s) => s.setKpiObserved);
+  const setBlock = useTwin((s) => s.setBlock);
   const addConnector = useTwin((s) => s.addConnector);
   const removeConnector = useTwin((s) => s.removeConnector);
   const setCadUnderlay = useTwin((s) => s.setCadUnderlay);
@@ -223,20 +250,59 @@ export function BuilderPage() {
 
   // ── Local UI state ─────────────────────────────────────────────────────────
   const [drop, setDrop] = useState<DropTool>({ kind: 'none' });
-  /** Connect-flow modal tool state. When `on` is true, clicking a workstation
-   *  picks the source (if `fromWsId` is null) or the target — at which point
-   *  a connector of `kind` is created. ESC clears. */
+  /** Connect-flow modal tool state. When `on` is true:
+   *    • In ISO mode, clicking a workstation picks the source (if
+   *      `fromWsId` is null) or the target — fromPort/toPort default
+   *      to the first output / first input of the respective block.
+   *    • In PROCESS mode, clicking a specific output port dot picks
+   *      `(fromWsId, fromPort)`; clicking a specific input port dot
+   *      picks `(toWsId, toPort)` and creates the connector.
+   *  ESC clears. */
   const [connect, setConnect] = useState<{
     on: boolean;
     kind: ConnectorKind;
     fromWsId: string | null;
-  }>({ on: false, kind: 'flow', fromWsId: null });
+    fromPort: string | null;
+  }>({ on: false, kind: 'flow', fromWsId: null, fromPort: null });
   const [selected, setSelected] = useState<
     { kind: 'dept' | 'ws'; id: string } | null
   >(null);
   const [lens, setLens] = useState<Lens>('operations');
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('iso');
-  const [paletteTab, setPaletteTab] = useState<'dept' | 'ws'>('dept');
+
+  // Dev-time escape hatch — exposes the live useTwin hook on `window` so
+  // browser-console tests / e2e harnesses can mutate the same store
+  // instance the React tree is mounted against. Vite's dev module graph
+  // can otherwise hand out separate instances for different import paths,
+  // making it impossible to drive the UI from a side script. Stripped
+  // from production builds by the `import.meta.env.DEV` guard.
+  useEffect(() => {
+    if (!import.meta.env.DEV) return;
+    (window as unknown as { __swUseTwin?: typeof useTwin }).__swUseTwin = useTwin;
+  }, []);
+  /** Which simulation engine the ▶ RUN SIM button uses.
+   *  • pml    — graph-driven DES over the twin's PML blocks + connectors
+   *  • legacy — opens the operation-list LiveSim page (current behaviour) */
+  const [engineMode, setEngineMode] = useState<'pml' | 'legacy'>('pml');
+  /** Last PML run summary, shown as a small toast under the toolbar. */
+  const [lastRun, setLastRun] = useState<{
+    text: string;
+    warnings: string[];
+    at: number;
+  } | null>(null);
+  /** When true the pre-flight validation list is expanded under the chip. */
+  const [issuesOpen, setIssuesOpen] = useState(false);
+
+  // Live graph validation — recomputed on every twin change. Cheap, runs
+  // the same pure validator the engine uses post-run for consistency.
+  const pmlIssues = useMemo<PmlIssue[]>(
+    () => (engineMode === 'pml' ? validatePmlGraph(twin) : []),
+    [engineMode, twin],
+  );
+  const errorCount = pmlIssues.filter((i) => i.level === 'error').length;
+  const warnCount = pmlIssues.filter((i) => i.level === 'warn').length;
+  const infoCount = pmlIssues.filter((i) => i.level === 'info').length;
+  const [paletteTab, setPaletteTab] = useState<'dept' | 'ws' | 'pml'>('dept');
   const [activeApparelCat, setActiveApparelCat] = useState<ApparelCategoryId>('sew_mach');
   const [paletteSearch, setPaletteSearch] = useState<string>('');
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -244,6 +310,10 @@ export function BuilderPage() {
   const [hoverCell, setHoverCell] = useState<{ x: number; y: number } | null>(null);
   const [spacePan, setSpacePan] = useState(false);
   const [isPanning, setIsPanning] = useState(false);
+  /** Live stage element size in CSS pixels. Drives the SVG viewBox so the
+   *  canvas user-space matches stage pixels 1:1 — required for the cursor
+   *  → world projection to be exact regardless of element aspect ratio. */
+  const [stageSize, setStageSize] = useState({ w: 1200, h: 800 });
   /** When true the Auto-Extract modal is open over the canvas. Reads its
    *  candidate list from the active twin's CAD underlay. */
   const [extractOpen, setExtractOpen] = useState(false);
@@ -258,6 +328,24 @@ export function BuilderPage() {
   const ZOOM_MIN = 0.3;
   const ZOOM_MAX = 3;
   const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
+  // Track the stage element's pixel size. The SVG inside uses a viewBox
+  // sized to match — `[-w/2, -h/2, w, h]` — so 1 user-space unit equals
+  // 1 stage pixel and (0,0) sits at the element centre. That makes the
+  // cursor → world math (which divides client-coords by zoom and feeds the
+  // result to `unproject`) exact at any aspect ratio or zoom level.
+  useLayoutEffect(() => {
+    const el = stageRef.current;
+    if (!el) return;
+    const sync = () => {
+      const r = el.getBoundingClientRect();
+      setStageSize({ w: r.width, h: r.height });
+    };
+    sync();
+    const ro = new ResizeObserver(sync);
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
 
   const resetView = useCallback(() => {
     setPan({ x: 0, y: 0 });
@@ -304,17 +392,19 @@ export function BuilderPage() {
     (e: React.MouseEvent<HTMLDivElement>) => {
       if (!stageRef.current) return;
       const rect = stageRef.current.getBoundingClientRect();
+      // Stage pixel offset from element centre, undone by the wrapper's
+      // CSS transform (`translate(pan) scale(zoom)`). Because the SVG's
+      // viewBox is `[-w/2, -h/2, w, h]`, the result is the exact iso
+      // projected coordinate of the cursor in SVG user-space — no
+      // viewBox-to-viewport fit factor to compensate for. The canvas is
+      // unbounded, so we accept any cell (negative or beyond the original
+      // gridW/gridH) and let the placement land where the cursor is.
       const sx = (e.clientX - rect.left - rect.width / 2 - pan.x) / zoom;
       const sy = (e.clientY - rect.top - rect.height / 2 - pan.y) / zoom;
       const w = unproject(sx, sy);
-      const cell = { x: Math.floor(w.x), y: Math.floor(w.y) };
-      if (cell.x >= 0 && cell.x < twin.gridW && cell.y >= 0 && cell.y < twin.gridH) {
-        setHoverCell(cell);
-      } else {
-        setHoverCell(null);
-      }
+      setHoverCell({ x: Math.floor(w.x), y: Math.floor(w.y) });
     },
-    [pan, zoom, twin.gridW, twin.gridH],
+    [pan, zoom],
   );
 
   const onCanvasClick = useCallback(() => {
@@ -504,7 +594,7 @@ export function BuilderPage() {
       if (inField) return;
       if (e.key === 'Escape') {
         setDrop({ kind: 'none' });
-        setConnect((c) => (c.on ? { ...c, on: false, fromWsId: null } : c));
+        setConnect((c) => (c.on ? { ...c, on: false, fromWsId: null, fromPort: null } : c));
         return;
       }
       if (!selected) return;
@@ -663,9 +753,9 @@ export function BuilderPage() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Canvas-mode toggle — iso authoring vs block-flow logic diagram */}
-        <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }} title="Switch the canvas between iso authoring and a block-flow logic diagram">
-          {(['iso', 'logic'] as const).map((m) => (
+        {/* Canvas-mode toggle — iso authoring vs dept-flow logic vs PML block diagram */}
+        <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }} title="Switch the canvas: ISO authoring · LOGIC dept-flow · PROCESS PML block diagram with input/output ports">
+          {(['iso', 'logic', 'process'] as const).map((m) => (
             <button
               key={m}
               onClick={() => setCanvasMode(m)}
@@ -682,7 +772,7 @@ export function BuilderPage() {
                 borderRadius: 4,
               }}
             >
-              {m === 'iso' ? '◈ ISO' : '⌬ LOGIC'}
+              {m === 'iso' ? '◈ ISO' : m === 'logic' ? '⌬ LOGIC' : '⚙ PROCESS'}
             </button>
           ))}
         </div>
@@ -702,7 +792,7 @@ export function BuilderPage() {
           <button
             onClick={() => {
               setDrop({ kind: 'none' });
-              setConnect((c) => ({ ...c, on: !c.on, fromWsId: null }));
+              setConnect((c) => ({ ...c, on: !c.on, fromWsId: null, fromPort: null }));
             }}
             style={{
               background: connect.on ? SW_COLORS.brand : 'transparent',
@@ -782,10 +872,211 @@ export function BuilderPage() {
         <button onClick={onExportJson} style={btnSec} title="Download the active twin as JSON">
           ⤓ EXPORT JSON
         </button>
-        <button onClick={() => navigate('/sim')} style={btnPrim}>
+
+        {/* Engine toggle — PML graph-driven DES vs. legacy operation-list sim.
+            PML is opt-in for v1 so legacy runs keep working unchanged. */}
+        <div
+          style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }}
+          title="Pick which simulation engine ▶ RUN SIM uses. PML runs the wired block-graph in-place; LEGACY opens the operation-list LiveSim page."
+        >
+          {(['pml', 'legacy'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setEngineMode(m)}
+              style={{
+                background: engineMode === m ? SW_COLORS.ink : 'transparent',
+                color: engineMode === m ? '#fff' : SW_COLORS.steel,
+                border: 'none',
+                padding: '6px 10px',
+                fontFamily: SW_FONTS.display,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.06em',
+                cursor: 'pointer',
+                borderRadius: 4,
+              }}
+            >
+              {m === 'pml' ? '⚙ PML' : '▤ LEGACY'}
+            </button>
+          ))}
+        </div>
+
+        {/* Pre-flight graph health chip — only shown in PML mode. Click to
+            expand the issue list. Errors block a useful run; warns / infos
+            are hints. */}
+        {engineMode === 'pml' && (
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setIssuesOpen((v) => !v)}
+              title={
+                pmlIssues.length === 0
+                  ? 'Graph passes pre-flight checks — ready to run.'
+                  : 'Click to expand the pre-flight issue list.'
+              }
+              style={{
+                ...btnSec,
+                background:
+                  errorCount > 0
+                    ? '#FFE5E5'
+                    : warnCount > 0
+                      ? '#FFF6E0'
+                      : pmlIssues.length === 0
+                        ? '#E7F7EE'
+                        : SW_COLORS.paperDeep,
+                borderColor:
+                  errorCount > 0
+                    ? SW_COLORS.alarm
+                    : warnCount > 0
+                      ? SW_COLORS.thread
+                      : SW_COLORS.line,
+                color:
+                  errorCount > 0 ? SW_COLORS.alarm : warnCount > 0 ? SW_COLORS.steel : SW_COLORS.steel,
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                fontWeight: 800,
+              }}
+            >
+              {errorCount > 0
+                ? `⨯ ${errorCount} ERR${warnCount + infoCount > 0 ? ` · ${warnCount + infoCount} HINT` : ''}`
+                : warnCount > 0
+                  ? `⚠ ${warnCount} WARN${infoCount > 0 ? ` · ${infoCount}` : ''}`
+                  : infoCount > 0
+                    ? `✓ READY · ${infoCount} HINT`
+                    : '✓ READY'}
+            </button>
+            {issuesOpen && pmlIssues.length > 0 && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 4px)',
+                  right: 0,
+                  zIndex: 10,
+                  width: 360,
+                  maxHeight: 320,
+                  overflowY: 'auto',
+                  background: SW_COLORS.paper,
+                  border: `1px solid ${SW_COLORS.line}`,
+                  borderRadius: 6,
+                  boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
+                  padding: 8,
+                }}
+              >
+                <div style={{ ...sectionLabel, marginBottom: 6 }}>
+                  Pre-flight · {pmlIssues.length} issue{pmlIssues.length === 1 ? '' : 's'}
+                </div>
+                {pmlIssues.map((iss, i) => {
+                  const tone =
+                    iss.level === 'error'
+                      ? SW_COLORS.alarm
+                      : iss.level === 'warn'
+                        ? SW_COLORS.thread
+                        : SW_COLORS.muted;
+                  const glyph =
+                    iss.level === 'error' ? '⨯' : iss.level === 'warn' ? '⚠' : '·';
+                  return (
+                    <div
+                      key={i}
+                      onClick={() => {
+                        if (iss.wsId) setSelected({ kind: 'ws', id: iss.wsId });
+                      }}
+                      style={{
+                        padding: '6px 8px',
+                        borderLeft: `3px solid ${tone}`,
+                        background: SW_COLORS.paperDeep,
+                        borderRadius: 3,
+                        marginBottom: 4,
+                        fontSize: 11,
+                        lineHeight: 1.4,
+                        color: SW_COLORS.steel,
+                        cursor: iss.wsId ? 'pointer' : 'default',
+                      }}
+                      title={iss.wsId ? 'Click to select this block in the inspector' : undefined}
+                    >
+                      <strong style={{ color: tone, fontFamily: SW_FONTS.mono, marginRight: 6 }}>
+                        {glyph} {iss.level.toUpperCase()}
+                      </strong>
+                      {iss.message}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
+        )}
+
+        <button
+          onClick={() => {
+            if (engineMode === 'legacy') {
+              navigate('/sim');
+              return;
+            }
+            const r = runPmlOnTwin(twin, { writeKpiObserved: setKpiObserved });
+            setLastRun({
+              text:
+                `Ran in ${r.wallMs.toFixed(0)} ms · ` +
+                `${r.totalProduced} produced · ` +
+                `${r.throughputPerHr}/hr · ` +
+                `lead ${r.meanLeadTimeMin.toFixed(1)} min` +
+                (r.bottleneckName ? ` · ⚠ ${r.bottleneckName}` : ''),
+              warnings: r.warnings,
+              at: Date.now(),
+            });
+          }}
+          style={btnPrim}
+          title={
+            engineMode === 'pml'
+              ? 'Run the PML block-graph sim against the active twin and write per-block KPIs.'
+              : 'Open the legacy operation-list LiveSim page.'
+          }
+        >
           ▶ RUN SIM
         </button>
       </div>
+
+      {/* PML run toast — appears under the toolbar after a run completes.
+          Click to dismiss. Auto-dismisses are deliberately omitted so
+          warnings stay visible. */}
+      {lastRun && engineMode === 'pml' && (
+        <div
+          onClick={() => setLastRun(null)}
+          title="Click to dismiss"
+          style={{
+            gridColumn: '2',
+            gridRow: '2',
+            position: 'absolute',
+            top: 56,
+            right: 16,
+            zIndex: 6,
+            padding: '8px 12px',
+            background: SW_COLORS.ink,
+            color: '#fff',
+            fontFamily: SW_FONTS.mono,
+            fontSize: 11,
+            fontWeight: 700,
+            borderRadius: 6,
+            boxShadow: '0 6px 16px rgba(0,0,0,0.22)',
+            maxWidth: 460,
+            cursor: 'pointer',
+            borderLeft: `4px solid ${SW_COLORS.brand}`,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <span style={{ fontFamily: SW_FONTS.display, fontSize: 10, letterSpacing: '0.1em', color: SW_COLORS.brand }}>
+              ⚙ PML RUN
+            </span>
+            <span>{lastRun.text}</span>
+          </div>
+          {lastRun.warnings.length > 0 && (
+            <ul style={{ margin: '6px 0 0', padding: '0 0 0 18px', lineHeight: 1.4 }}>
+              {lastRun.warnings.map((w, i) => (
+                <li key={i} style={{ color: SW_COLORS.thread }}>
+                  {w}
+                </li>
+              ))}
+            </ul>
+          )}
+        </div>
+      )}
 
       {/* LEFT PALETTE */}
       <Palette
@@ -868,8 +1159,12 @@ export function BuilderPage() {
           >
             ➜ {connect.kind.toUpperCase()} ·{' '}
             {connect.fromWsId === null
-              ? 'Click the SOURCE workstation'
-              : 'Click the TARGET (Esc to stop)'}
+              ? canvasMode === 'process'
+                ? 'Click an OUTPUT port (●) to start'
+                : 'Click the SOURCE workstation'
+              : canvasMode === 'process'
+                ? `from ${connect.fromPort ?? 'out'} → click an INPUT port (◯)`
+                : 'Click the TARGET (Esc to stop)'}
           </div>
         )}
 
@@ -897,14 +1192,17 @@ export function BuilderPage() {
           </div>
         )}
 
-        {/* Stage transform */}
+        {/* Stage transform — pan/zoom is applied inside the SVG (see the
+            inner <g> in CanvasSVG) so the SVG itself always fills the stage
+            at 100%. If we instead CSS-scaled this wrapper, zooming out would
+            shrink the SVG into a small island and let the stage background
+            bleed through; doing it inside the SVG keeps the floor + grid
+            covering the whole viewport at any zoom. */}
         {canvasMode === 'iso' ? (
           <div
             style={{
               position: 'absolute',
               inset: 0,
-              transformOrigin: '50% 50%',
-              transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
             }}
           >
             <CanvasSVG
@@ -915,19 +1213,30 @@ export function BuilderPage() {
               selected={selected}
               connect={connect}
               zoom={zoom}
+              pan={pan}
+              stageSize={stageSize}
               onSelect={(s) => {
                 if (connect.on && s?.kind === 'ws') {
                   if (connect.fromWsId === null) {
-                    setConnect((c) => ({ ...c, fromWsId: s.id }));
+                    // Default fromPort to the source block's first output —
+                    // overridden if the user authors via the PROCESS canvas.
+                    const src = twin.workstations.find((w) => w.id === s.id);
+                    const fromPort = src ? getBlockSpec(src).outputs[0]?.id ?? null : null;
+                    setConnect((c) => ({ ...c, fromWsId: s.id, fromPort }));
                   } else if (connect.fromWsId !== s.id) {
+                    const tgt = twin.workstations.find((w) => w.id === s.id);
+                    const toPort = tgt ? getBlockSpec(tgt).inputs[0]?.id : undefined;
                     addConnector({
                       kind: connect.kind,
                       fromWsId: connect.fromWsId,
                       toWsId: s.id,
+                      fromPort: connect.fromPort ?? undefined,
+                      toPort,
                     });
                     // Chain: keep target as the next source so users can build
                     // a sequential line quickly. ESC or button toggles off.
-                    setConnect((c) => ({ ...c, fromWsId: s.id }));
+                    const nextFromPort = tgt ? getBlockSpec(tgt).outputs[0]?.id ?? null : null;
+                    setConnect((c) => ({ ...c, fromWsId: s.id, fromPort: nextFromPort }));
                   }
                   return;
                 }
@@ -941,11 +1250,37 @@ export function BuilderPage() {
               }}
             />
           </div>
-        ) : (
+        ) : canvasMode === 'logic' ? (
           <BuilderLogicView
             twin={twin}
             selected={selected}
             onSelect={setSelected}
+          />
+        ) : (
+          <BuilderProcessView
+            twin={twin}
+            selected={selected}
+            onSelect={setSelected}
+            connect={connect}
+            onPickFromPort={(wsId, portId) =>
+              setConnect((c) => ({ ...c, fromWsId: wsId, fromPort: portId }))
+            }
+            onPickToPort={(wsId, portId) => {
+              if (!connect.fromWsId || connect.fromWsId === wsId) return;
+              addConnector({
+                kind: connect.kind,
+                fromWsId: connect.fromWsId,
+                toWsId: wsId,
+                fromPort: connect.fromPort ?? undefined,
+                toPort: portId,
+              });
+              // Chain: leave the target as the next source on its first
+              // output, so users can extend the wire down the line by
+              // clicking input ports without re-picking the source.
+              const tgt = twin.workstations.find((w) => w.id === wsId);
+              const nextFromPort = tgt ? getBlockSpec(tgt).outputs[0]?.id ?? null : null;
+              setConnect((c) => ({ ...c, fromWsId: wsId, fromPort: nextFromPort }));
+            }}
           />
         )}
 
@@ -1084,6 +1419,7 @@ export function BuilderPage() {
         onSetOperation={setOperation}
         onSetResources={setResources}
         onSetKpiTargets={setKpiTargets}
+        onSetBlock={setBlock}
         onRemoveConnector={removeConnector}
       />
     </div>
@@ -1095,8 +1431,8 @@ export function BuilderPage() {
 // ============================================================================
 
 interface PaletteProps {
-  tab: 'dept' | 'ws';
-  onTab: (t: 'dept' | 'ws') => void;
+  tab: 'dept' | 'ws' | 'pml';
+  onTab: (t: 'dept' | 'ws' | 'pml') => void;
   activeApparelCat: ApparelCategoryId;
   onActiveApparelCat: (c: ApparelCategoryId) => void;
   filteredApparelCatalog: IsoFixture[];
@@ -1123,8 +1459,8 @@ function Palette(props: PaletteProps) {
       <div style={{ padding: '10px 12px', borderBottom: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.display, fontSize: 12, fontWeight: 900, letterSpacing: '2px', color: SW_COLORS.ink }}>
         PALETTE
       </div>
-      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', borderBottom: `1px solid ${SW_COLORS.line}` }}>
-        {(['dept', 'ws'] as const).map((t) => (
+      <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr 1fr', borderBottom: `1px solid ${SW_COLORS.line}` }}>
+        {(['dept', 'ws', 'pml'] as const).map((t) => (
           <button
             key={t}
             onClick={() => props.onTab(t)}
@@ -1135,17 +1471,17 @@ function Palette(props: PaletteProps) {
               cursor: 'pointer',
               padding: '10px 0',
               fontFamily: SW_FONTS.display,
-              fontSize: 11,
+              fontSize: 10,
               fontWeight: 900,
               letterSpacing: '0.08em',
             }}
           >
-            {t === 'dept' ? 'DEPARTMENTS' : 'WORKSTATIONS'}
+            {t === 'dept' ? 'DEPTS' : t === 'ws' ? 'STATIONS' : '⚙ PROCESS'}
           </button>
         ))}
       </div>
 
-      {props.tab === 'dept' ? (
+      {props.tab === 'dept' && (
         <div style={{ flex: 1, overflow: 'auto', padding: 10, display: 'flex', flexDirection: 'column', gap: 8 }}>
           <div style={sectionLabel}>Drop a zoned region</div>
           {DEPT_PRESETS.map((preset) => {
@@ -1188,7 +1524,8 @@ function Palette(props: PaletteProps) {
             );
           })}
         </div>
-      ) : (
+      )}
+      {props.tab === 'ws' && (
         <>
           <div style={{ display: 'grid', gridTemplateColumns: `repeat(${APPAREL_CATEGORIES.length}, 1fr)`, borderBottom: `1px solid ${SW_COLORS.line}` }}>
             {APPAREL_CATEGORIES.map((c) => {
@@ -1267,6 +1604,142 @@ function Palette(props: PaletteProps) {
           </div>
         </>
       )}
+
+      {props.tab === 'pml' && <PmlPalettePane drop={props.drop} onPickWs={props.onPickWs} />}
+    </div>
+  );
+}
+
+/** PROCESS palette pane — pure PML primitives, grouped by category. Each
+ *  card drops a workstation that auto-stamps `block.kind` to match the
+ *  fixture id (see `makeWorkstation` in domain/twin.ts). */
+function PmlPalettePane({
+  drop,
+  onPickWs,
+}: {
+  drop: DropTool;
+  onPickWs: (catalogId: string) => void;
+}) {
+  // Group block specs by PML category, preserving the canonical category order.
+  const byCategory = useMemo(() => {
+    const map = new Map<PmlCategory, typeof PML_BLOCK_LIBRARY[PmlBlockKind][]>();
+    for (const cat of PML_CATEGORIES) map.set(cat.id, []);
+    for (const spec of Object.values(PML_BLOCK_LIBRARY)) {
+      map.get(spec.category)?.push(spec);
+    }
+    return map;
+  }, []);
+
+  return (
+    <div style={{ flex: 1, overflow: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
+      <div
+        style={{
+          padding: '6px 8px',
+          background: SW_COLORS.paperDeep,
+          border: `1px dashed ${SW_COLORS.line}`,
+          borderRadius: 4,
+          fontSize: 11,
+          color: SW_COLORS.steel,
+          lineHeight: 1.4,
+        }}
+      >
+        Drop a pure PML primitive. Each block lands with its kind + ports
+        pre-stamped — wire them in the <strong>PROCESS</strong> canvas
+        view by clicking port dots.
+      </div>
+
+      {PML_CATEGORIES.map((cat) => {
+        const specs = byCategory.get(cat.id) ?? [];
+        if (specs.length === 0) return null;
+        return (
+          <div key={cat.id}>
+            <div
+              style={{
+                ...sectionLabel,
+                marginBottom: 4,
+                display: 'flex',
+                justifyContent: 'space-between',
+                alignItems: 'baseline',
+              }}
+            >
+              <span>{cat.label}</span>
+              <span style={{ fontSize: 9, color: SW_COLORS.muted, fontWeight: 700 }}>
+                {specs.length}
+              </span>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
+              {specs.map((spec) => {
+                const fixtureId = pmlFixtureId(spec.kind);
+                const armed = drop.kind === 'ws' && drop.catalogId === fixtureId;
+                const tint = PML_CATEGORY_TINT[spec.category];
+                return (
+                  <button
+                    key={spec.kind}
+                    onClick={() => onPickWs(fixtureId)}
+                    title={`${spec.label} — ${spec.blurb}\n${spec.inputs.length} in / ${spec.outputs.length} out`}
+                    style={{
+                      background: armed ? SW_COLORS.brandLite : tint.fill,
+                      border: `1px solid ${armed ? SW_COLORS.brand : tint.stroke}`,
+                      borderLeft: `4px solid ${tint.stroke}`,
+                      borderRadius: 6,
+                      padding: '8px 6px',
+                      cursor: 'pointer',
+                      display: 'flex',
+                      flexDirection: 'column',
+                      alignItems: 'flex-start',
+                      gap: 4,
+                      textAlign: 'left',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
+                      <span
+                        style={{
+                          fontFamily: SW_FONTS.mono,
+                          fontSize: 16,
+                          fontWeight: 900,
+                          color: tint.stroke,
+                          width: 20,
+                          textAlign: 'center',
+                          lineHeight: 1,
+                        }}
+                      >
+                        {spec.glyph}
+                      </span>
+                      <span
+                        style={{
+                          fontFamily: SW_FONTS.display,
+                          fontSize: 11,
+                          fontWeight: 800,
+                          color: SW_COLORS.ink,
+                          flex: 1,
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {spec.label}
+                      </span>
+                    </div>
+                    <div
+                      style={{
+                        fontFamily: SW_FONTS.mono,
+                        fontSize: 9,
+                        fontWeight: 700,
+                        color: SW_COLORS.muted,
+                        letterSpacing: '0.06em',
+                      }}
+                    >
+                      {spec.inputs.length} IN · {spec.outputs.length} OUT
+                      {spec.usesResources && ' · ⚡'}
+                    </div>
+                  </button>
+                );
+              })}
+            </div>
+          </div>
+        );
+      })}
     </div>
   );
 }
@@ -1285,6 +1758,13 @@ interface CanvasSVGProps {
   /** Current canvas zoom — used to choose grid subdivision density so the
    *  grid divides further when the user zooms in. */
   zoom: number;
+  /** Current pan offset in stage pixels. Drives the visible-region
+   *  computation that keeps the floor + grid centred on what the user is
+   *  actually looking at, so the canvas feels infinite at any pan. */
+  pan: { x: number; y: number };
+  /** Live size of the stage element in CSS pixels. Used to set a centred,
+   *  1:1 viewBox and to compute which cells are currently on screen. */
+  stageSize: { w: number; h: number };
   onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
   onRemoveConnector: (id: string) => void;
   onStartDrag: (kind: 'ws' | 'dept', id: string, e: React.MouseEvent) => void;
@@ -1298,7 +1778,7 @@ function workstationScreenCenter(ws: Workstation): { sx: number; sy: number } {
 }
 
 function CanvasSVG(props: CanvasSVGProps) {
-  const { twin, lens, hoverCell, drop, selected, zoom } = props;
+  const { twin, lens, hoverCell, drop, selected, zoom, pan, stageSize } = props;
 
   // Grid subdivision density. As the user zooms in, each integer cell is
   // divided into more sub-cells (powers of 2). Steps are tuned so the next
@@ -1306,33 +1786,89 @@ function CanvasSVG(props: CanvasSVGProps) {
   // sub-cell sizing in the inspector.
   const subdivisions = zoom < 0.9 ? 1 : zoom < 1.6 ? 2 : zoom < 2.4 ? 4 : 8;
 
-  // Compute SVG viewBox from grid extents.
-  const cornerTL = isoProj(0, 0);
-  const cornerTR = isoProj(twin.gridW, 0);
-  const cornerBR = isoProj(twin.gridW, twin.gridH);
-  const cornerBL = isoProj(0, twin.gridH);
-  const minX = Math.min(cornerTL.sx, cornerBL.sx) - 60;
-  const maxX = Math.max(cornerTR.sx, cornerBR.sx) + 60;
-  const minY = Math.min(cornerTL.sy, cornerTR.sy) - 60;
-  const maxY = Math.max(cornerBL.sy, cornerBR.sy) + 60;
-  const vbW = maxX - minX;
-  const vbH = maxY - minY;
+  // Centred 1:1 viewBox — SVG user-space units == stage CSS pixels, with
+  // (0,0) at the element centre. The cursor handler in the parent relies
+  // on this to map clientX/Y → world cells without an aspect-ratio fudge.
+  const W = Math.max(1, stageSize.w);
+  const H = Math.max(1, stageSize.h);
+  const vbMinX = -W / 2;
+  const vbMinY = -H / 2;
+
+  // Compute the visible cell range from the four screen corners. With a
+  // CSS transform of `translate(pan) scale(zoom)` on the wrapper, the
+  // pre-transform user-space coord under a screen corner offset
+  // `(cx, cy)` (from element centre) is `((cx - pan.x)/zoom, (cy - pan.y)/zoom)`.
+  // Inverting iso projection at those four corners gives the cell bounds
+  // currently in view; we render the floor + grid over that span (plus a
+  // small pad) so the canvas feels infinite at any pan.
+  const screenCorners: Array<[number, number]> = [
+    [-W / 2, -H / 2],
+    [ W / 2, -H / 2],
+    [ W / 2,  H / 2],
+    [-W / 2,  H / 2],
+  ];
+  let visMinX = Infinity, visMaxX = -Infinity;
+  let visMinY = Infinity, visMaxY = -Infinity;
+  for (const [cx, cy] of screenCorners) {
+    const sx = (cx - pan.x) / zoom;
+    const sy = (cy - pan.y) / zoom;
+    const cell = unproject(sx, sy);
+    if (cell.x < visMinX) visMinX = cell.x;
+    if (cell.x > visMaxX) visMaxX = cell.x;
+    if (cell.y < visMinY) visMinY = cell.y;
+    if (cell.y > visMaxY) visMaxY = cell.y;
+  }
+  const PAD = 4;
+  const gMinX = Math.floor(visMinX) - PAD;
+  const gMaxX = Math.ceil(visMaxX) + PAD;
+  const gMinY = Math.floor(visMinY) - PAD;
+  const gMaxY = Math.ceil(visMaxY) + PAD;
+
+  const floorTL = isoProj(gMinX, gMinY);
+  const floorTR = isoProj(gMaxX, gMinY);
+  const floorBR = isoProj(gMaxX, gMaxY);
+  const floorBL = isoProj(gMinX, gMaxY);
+
+  // Ghost outline of the original factory footprint — keeps the user
+  // oriented while still allowing drops anywhere outside it.
+  const factoryTL = isoProj(0, 0);
+  const factoryTR = isoProj(twin.gridW, 0);
+  const factoryBR = isoProj(twin.gridW, twin.gridH);
+  const factoryBL = isoProj(0, twin.gridH);
 
   return (
     <svg
       width="100%"
       height="100%"
-      viewBox={`${minX} ${minY} ${vbW} ${vbH}`}
+      viewBox={`${vbMinX} ${vbMinY} ${W} ${H}`}
       preserveAspectRatio="xMidYMid meet"
       style={{ display: 'block', userSelect: 'none' }}
     >
-      {/* Floor base — full grid quad */}
+      {/* Stage-filling background — catches pan-drag clicks anywhere the
+          floor doesn't reach (paranoid safeguard; the floor below already
+          covers the visible cell range). Same hue as the stage so the seam
+          is invisible. */}
+      <rect
+        data-canvas-bg="true"
+        x={vbMinX}
+        y={vbMinY}
+        width={W}
+        height={H}
+        fill="#FAF8F2"
+      />
+      {/* Pan/zoom transform — applied in SVG-space rather than via CSS on
+          the wrapper, so the SVG keeps filling the stage at 100% even when
+          the user zooms out. Everything below this <g> is in iso-projected
+          user-space (1 unit = 1 pre-zoom stage pixel). */}
+      <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
+      {/* Floor base — covers the visible cell range so the surface feels
+          infinite. Marked as canvas background so panning ignores entity
+          clicks but accepts background drags. */}
       <polygon
         data-canvas-bg="true"
-        points={ptsToStr([cornerTL, cornerTR, cornerBR, cornerBL])}
+        points={ptsToStr([floorTL, floorTR, floorBR, floorBL])}
         fill="#F2EEE3"
-        stroke="#0F141920"
-        strokeWidth={1}
+        stroke="none"
       />
 
       {/* CAD UNDERLAY — projected onto the iso ground plane between the floor
@@ -1345,53 +1881,76 @@ function CanvasSVG(props: CanvasSVGProps) {
 
       {/* Grid lines — sub-cell tier first (drawn under the integer tier so
           the cell boundaries stay visually dominant). Sub-cell density grows
-          with zoom; at zoom 1× there are none. */}
+          with zoom; at zoom 1× there are none. Range tracks the visible
+          cell bounds rather than the original grid. */}
       {subdivisions > 1 &&
-        Array.from({ length: twin.gridW * subdivisions + 1 }, (_, i) => {
-          if (i % subdivisions === 0) return null;
-          const x = i / subdivisions;
-          const a = isoProj(x, 0);
-          const b = isoProj(x, twin.gridH);
-          return (
-            <line
-              key={`vs-${i}`}
-              x1={a.sx}
-              y1={a.sy}
-              x2={b.sx}
-              y2={b.sy}
-              stroke="#0F141908"
-              strokeWidth={0.3}
-            />
-          );
-        })}
+        Array.from(
+          { length: (gMaxX - gMinX) * subdivisions + 1 },
+          (_, i) => {
+            if (i % subdivisions === 0) return null;
+            const x = gMinX + i / subdivisions;
+            const a = isoProj(x, gMinY);
+            const b = isoProj(x, gMaxY);
+            return (
+              <line
+                key={`vs-${i}`}
+                x1={a.sx}
+                y1={a.sy}
+                x2={b.sx}
+                y2={b.sy}
+                stroke="#0F141908"
+                strokeWidth={0.3}
+              />
+            );
+          },
+        )}
       {subdivisions > 1 &&
-        Array.from({ length: twin.gridH * subdivisions + 1 }, (_, i) => {
-          if (i % subdivisions === 0) return null;
-          const y = i / subdivisions;
-          const a = isoProj(0, y);
-          const b = isoProj(twin.gridW, y);
-          return (
-            <line
-              key={`hs-${i}`}
-              x1={a.sx}
-              y1={a.sy}
-              x2={b.sx}
-              y2={b.sy}
-              stroke="#0F141908"
-              strokeWidth={0.3}
-            />
-          );
-        })}
-      {Array.from({ length: twin.gridW + 1 }, (_, i) => {
-        const a = isoProj(i, 0);
-        const b = isoProj(i, twin.gridH);
-        return <line key={`v-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#0F141910" strokeWidth={0.6} />;
+        Array.from(
+          { length: (gMaxY - gMinY) * subdivisions + 1 },
+          (_, i) => {
+            if (i % subdivisions === 0) return null;
+            const y = gMinY + i / subdivisions;
+            const a = isoProj(gMinX, y);
+            const b = isoProj(gMaxX, y);
+            return (
+              <line
+                key={`hs-${i}`}
+                x1={a.sx}
+                y1={a.sy}
+                x2={b.sx}
+                y2={b.sy}
+                stroke="#0F141908"
+                strokeWidth={0.3}
+              />
+            );
+          },
+        )}
+      {Array.from({ length: gMaxX - gMinX + 1 }, (_, i) => {
+        const x = gMinX + i;
+        const a = isoProj(x, gMinY);
+        const b = isoProj(x, gMaxY);
+        return <line key={`v-${x}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#0F141910" strokeWidth={0.6} />;
       })}
-      {Array.from({ length: twin.gridH + 1 }, (_, i) => {
-        const a = isoProj(0, i);
-        const b = isoProj(twin.gridW, i);
-        return <line key={`h-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#0F141910" strokeWidth={0.6} />;
+      {Array.from({ length: gMaxY - gMinY + 1 }, (_, i) => {
+        const y = gMinY + i;
+        const a = isoProj(gMinX, y);
+        const b = isoProj(gMaxX, y);
+        return <line key={`h-${y}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#0F141910" strokeWidth={0.6} />;
       })}
+
+      {/* Original factory footprint — drawn as a faint outline so the user
+          retains a "you are here" reference inside the otherwise infinite
+          surface. Pointer-events disabled so the floor underneath still
+          receives canvas-background clicks for panning. */}
+      <polygon
+        points={ptsToStr([factoryTL, factoryTR, factoryBR, factoryBL])}
+        fill="none"
+        stroke="#0F141930"
+        strokeWidth={1.2}
+        strokeDasharray="6 4"
+        style={{ pointerEvents: 'none' }}
+      />
+
 
       {/* DEPARTMENTS — drawn first so they sit under workstations */}
       {twin.departments.map((d) => (
@@ -1434,6 +1993,7 @@ function CanvasSVG(props: CanvasSVGProps) {
       {hoverCell && drop.kind !== 'none' && (
         <HoverPreview cell={hoverCell} drop={drop} />
       )}
+      </g>
     </svg>
   );
 }
@@ -2613,6 +3173,659 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
 }
 
 // ============================================================================
+// BUILDER PROCESS VIEW — workstation-level PML block diagram
+// ============================================================================
+//
+// Renders every workstation as a PML block (Source / Queue / Service /
+// Delay / SelectOutput / Sink / Conveyor / ResourcePool / …) with explicit
+// input + output port dots. Connectors in the twin are drawn as wires
+// from a source block's output port to a target block's input port.
+//
+// Layout: each Department is a horizontal swim lane. Within a lane,
+// blocks are sorted by their iso-canvas x position so the PML diagram
+// reads left-to-right in the same order the floor reads left-to-right.
+// ResourcePool blocks (operators / mechanics) are pulled out into a
+// dedicated bottom lane — they have no flow ports; they are *referenced*
+// by Service blocks, not wired into the flow.
+
+interface BuilderProcessViewProps {
+  twin: ReturnType<typeof selectActiveTwin>;
+  selected: { kind: 'dept' | 'ws'; id: string } | null;
+  onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
+  /** Active CONNECT-tool state. When `on` is true, port dots become
+   *  clickable and the cursor switches to crosshair. */
+  connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null; fromPort: string | null };
+  /** Called when the user clicks an OUTPUT port dot in CONNECT mode. */
+  onPickFromPort: (wsId: string, portId: string) => void;
+  /** Called when the user clicks an INPUT port dot in CONNECT mode and
+   *  the source is already chosen. Implementations should call
+   *  addConnector and then advance the connect chain. */
+  onPickToPort: (wsId: string, portId: string) => void;
+}
+
+/** Layout result for a single workstation block. */
+interface ProcessNode {
+  ws: Workstation;
+  block: PmlBlock;
+  /** Top-left in SVG coordinates. */
+  x: number;
+  y: number;
+  w: number;
+  h: number;
+  /** Department this block belongs to (already resolved from ws.deptId). */
+  dept: Department | undefined;
+}
+
+/** Tints by PML category — keeps the diagram visually parseable at a glance. */
+const PML_CATEGORY_TINT: Record<string, { fill: string; stroke: string }> = {
+  lifecycle: { fill: '#FFF7E6', stroke: '#F2C12E' },
+  buffer:    { fill: '#EEF3FF', stroke: '#3D6EE5' },
+  service:   { fill: '#FFEBEC', stroke: '#E63946' },
+  routing:   { fill: '#F0FBF4', stroke: '#1FB36B' },
+  batch:     { fill: '#F4ECFF', stroke: '#7E5BEF' },
+  movement:  { fill: '#FDF1E0', stroke: '#C8915E' },
+};
+
+/** Returns the SVG-space center of a port on a node. Inputs are spread
+ *  along the left edge, outputs along the right edge. */
+function portPosition(
+  node: ProcessNode,
+  port: PmlPort,
+  side: 'in' | 'out',
+): { x: number; y: number } {
+  const ports = side === 'in' ? node.block.inputs : node.block.outputs;
+  const idx = Math.max(0, ports.findIndex((p) => p.id === port.id));
+  const slot = (idx + 1) / (ports.length + 1);
+  return {
+    x: side === 'in' ? node.x : node.x + node.w,
+    y: node.y + node.h * slot,
+  };
+}
+
+function BuilderProcessView({
+  twin,
+  selected,
+  onSelect,
+  connect,
+  onPickFromPort,
+  onPickToPort,
+}: BuilderProcessViewProps) {
+  const BLOCK_W = 168;
+  const BLOCK_H = 80;
+  const GAP_X = 28;
+  const LANE_GAP = 28;
+  const LANE_PAD_TOP = 28;
+  const LANE_LABEL_W = 140;
+  const PAD_X = 24 + LANE_LABEL_W;
+  const PAD_TOP = 64;
+
+  // Resolve PML block for every workstation, then split into flow vs resource pools.
+  const allNodes = twin.workstations.map<{ ws: Workstation; block: PmlBlock; isPool: boolean }>(
+    (ws) => {
+      const block = getBlockSpec(ws);
+      return { ws, block, isPool: block.kind === 'ResourcePool' };
+    },
+  );
+  const flowNodes = allNodes.filter((n) => !n.isPool);
+  const poolNodes = allNodes.filter((n) => n.isPool);
+
+  // Departments in reading order (top-left first).
+  const ordered = [...twin.departments].sort((a, b) => {
+    if (a.bounds.y !== b.bounds.y) return a.bounds.y - b.bounds.y;
+    return a.bounds.x - b.bounds.x;
+  });
+
+  // Layout each department lane, then a final pool lane.
+  const positions = new Map<string, ProcessNode>();
+  let cursorY = PAD_TOP;
+  let maxBlocksInLane = 1;
+
+  ordered.forEach((d) => {
+    const dBlocks = flowNodes
+      .filter((n) => n.ws.deptId === d.id)
+      .sort((a, b) => a.ws.position.x - b.ws.position.x || a.ws.position.y - b.ws.position.y);
+    if (dBlocks.length === 0) {
+      // Still render the lane label so empty depts are visible.
+      cursorY += BLOCK_H + LANE_GAP;
+      return;
+    }
+    maxBlocksInLane = Math.max(maxBlocksInLane, dBlocks.length);
+    dBlocks.forEach((n, idx) => {
+      positions.set(n.ws.id, {
+        ws: n.ws,
+        block: n.block,
+        x: PAD_X + idx * (BLOCK_W + GAP_X),
+        y: cursorY + LANE_PAD_TOP,
+        w: BLOCK_W,
+        h: BLOCK_H,
+        dept: d,
+      });
+    });
+    cursorY += BLOCK_H + LANE_PAD_TOP + LANE_GAP;
+  });
+
+  // Workstations whose dept didn't make it into `ordered` (defensive — shouldn't
+  // happen; would mean a dangling deptId).
+  const orphanFlow = flowNodes.filter(
+    (n) => !ordered.find((d) => d.id === n.ws.deptId),
+  );
+  if (orphanFlow.length > 0) {
+    orphanFlow.forEach((n, idx) => {
+      positions.set(n.ws.id, {
+        ws: n.ws,
+        block: n.block,
+        x: PAD_X + idx * (BLOCK_W + GAP_X),
+        y: cursorY + LANE_PAD_TOP,
+        w: BLOCK_W,
+        h: BLOCK_H,
+        dept: undefined,
+      });
+    });
+    cursorY += BLOCK_H + LANE_PAD_TOP + LANE_GAP;
+    maxBlocksInLane = Math.max(maxBlocksInLane, orphanFlow.length);
+  }
+
+  // Resource-pool lane.
+  const poolY = cursorY + LANE_PAD_TOP;
+  poolNodes.forEach((n, idx) => {
+    positions.set(n.ws.id, {
+      ws: n.ws,
+      block: n.block,
+      x: PAD_X + idx * (BLOCK_W + GAP_X),
+      y: poolY,
+      w: BLOCK_W,
+      h: BLOCK_H,
+      dept: twin.departments.find((d) => d.id === n.ws.deptId),
+    });
+  });
+  if (poolNodes.length > 0) {
+    maxBlocksInLane = Math.max(maxBlocksInLane, poolNodes.length);
+    cursorY += BLOCK_H + LANE_PAD_TOP + LANE_GAP;
+  }
+
+  const W = Math.max(1280, PAD_X + maxBlocksInLane * (BLOCK_W + GAP_X) + 40);
+  const H = Math.max(640, cursorY + 60);
+
+  // Pre-resolve connector wire endpoints. Honour the connector's named
+  // `fromPort` / `toPort` when set; otherwise default to the source's
+  // first output and the target's first input.
+  const wires = twin.connectors
+    .map((c) => {
+      const from = positions.get(c.fromWsId);
+      const to = positions.get(c.toWsId);
+      if (!from || !to) return null;
+      const outPort =
+        (c.fromPort ? from.block.outputs.find((p) => p.id === c.fromPort) : null) ??
+        from.block.outputs[0];
+      const inPort =
+        (c.toPort ? to.block.inputs.find((p) => p.id === c.toPort) : null) ??
+        to.block.inputs[0];
+      if (!outPort || !inPort) return null;
+      const a = portPosition(from, outPort, 'out');
+      const b = portPosition(to, inPort, 'in');
+      return { c, a, b, outPortLabel: outPort.label, inPortLabel: inPort.label };
+    })
+    .filter(Boolean) as {
+      c: Connector;
+      a: { x: number; y: number };
+      b: { x: number; y: number };
+      outPortLabel: string;
+      inPortLabel: string;
+    }[];
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        overflow: 'auto',
+        background:
+          'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px), ' + SW_COLORS.paperDeep,
+        backgroundSize: '24px 24px',
+      }}
+      onClick={(e) => {
+        if (e.target === e.currentTarget) onSelect(null);
+      }}
+    >
+      <svg
+        viewBox={`0 0 ${W} ${H}`}
+        preserveAspectRatio="xMinYMin meet"
+        width={W}
+        height={H}
+        style={{ display: 'block' }}
+        onClick={() => onSelect(null)}
+      >
+        <defs>
+          <marker
+            id="builder-process-arrow"
+            viewBox="0 0 10 10"
+            refX={9}
+            refY={5}
+            markerWidth={6}
+            markerHeight={6}
+            orient="auto"
+          >
+            <path d="M0 0 L10 5 L0 10 z" fill={SW_COLORS.brand} />
+          </marker>
+        </defs>
+
+        {/* Title strip */}
+        <text
+          x={W / 2}
+          y={32}
+          textAnchor="middle"
+          fill={SW_COLORS.muted}
+          fontFamily={SW_FONTS.mono}
+          fontSize={12}
+          fontWeight={800}
+          letterSpacing="2px"
+        >
+          {twin.name.toUpperCase()} · PROCESS · PML BLOCKS WITH I/O PORTS
+        </text>
+
+        {/* Swim-lane backgrounds + dept labels */}
+        {(() => {
+          let y = PAD_TOP;
+          const lanes: ReactNode[] = [];
+          ordered.forEach((d) => {
+            const blocksInLane = flowNodes.filter((n) => n.ws.deptId === d.id);
+            const laneH = BLOCK_H + LANE_PAD_TOP + LANE_GAP;
+            const accent = DEPT_COLOR_HEX[d.color];
+            lanes.push(
+              <g key={`lane-${d.id}`} transform={`translate(0, ${y})`}>
+                <rect
+                  x={LANE_LABEL_W}
+                  y={4}
+                  width={W - LANE_LABEL_W - 16}
+                  height={laneH - 12}
+                  fill={accent + '0a'}
+                  stroke={accent + '40'}
+                  strokeDasharray="2 4"
+                  strokeWidth={1}
+                  rx={4}
+                />
+                <rect x={12} y={LANE_PAD_TOP} width={6} height={BLOCK_H} fill={accent} rx={2} />
+                <text
+                  x={26}
+                  y={LANE_PAD_TOP + 16}
+                  fontFamily={SW_FONTS.display}
+                  fontSize={11}
+                  fontWeight={900}
+                  fill={SW_COLORS.ink}
+                  letterSpacing="0.1em"
+                >
+                  {d.name.toUpperCase()}
+                </text>
+                <text
+                  x={26}
+                  y={LANE_PAD_TOP + 32}
+                  fontFamily={SW_FONTS.mono}
+                  fontSize={9}
+                  fontWeight={700}
+                  fill={SW_COLORS.muted}
+                >
+                  {blocksInLane.length} BLOCK{blocksInLane.length === 1 ? '' : 'S'}
+                </text>
+                <text
+                  x={26}
+                  y={LANE_PAD_TOP + 48}
+                  fontFamily={SW_FONTS.mono}
+                  fontSize={9}
+                  fontWeight={500}
+                  fill={SW_COLORS.muted}
+                >
+                  {d.kind}
+                </text>
+              </g>,
+            );
+            y += laneH;
+          });
+          return lanes;
+        })()}
+
+        {/* Resource-pool lane label */}
+        {poolNodes.length > 0 && (
+          <g transform={`translate(0, ${poolY - LANE_PAD_TOP})`}>
+            <rect
+              x={LANE_LABEL_W}
+              y={4}
+              width={W - LANE_LABEL_W - 16}
+              height={BLOCK_H + 8}
+              fill={SW_COLORS.steel + '0a'}
+              stroke={SW_COLORS.steel + '40'}
+              strokeDasharray="2 4"
+              strokeWidth={1}
+              rx={4}
+            />
+            <rect x={12} y={LANE_PAD_TOP} width={6} height={BLOCK_H} fill={SW_COLORS.steel} rx={2} />
+            <text
+              x={26}
+              y={LANE_PAD_TOP + 16}
+              fontFamily={SW_FONTS.display}
+              fontSize={11}
+              fontWeight={900}
+              fill={SW_COLORS.ink}
+              letterSpacing="0.1em"
+            >
+              RESOURCE POOLS
+            </text>
+            <text
+              x={26}
+              y={LANE_PAD_TOP + 32}
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={700}
+              fill={SW_COLORS.muted}
+            >
+              {poolNodes.length} POOL{poolNodes.length === 1 ? '' : 'S'}
+            </text>
+            <text
+              x={26}
+              y={LANE_PAD_TOP + 48}
+              fontFamily={SW_FONTS.mono}
+              fontSize={9}
+              fontWeight={500}
+              fill={SW_COLORS.muted}
+            >
+              referenced by Services
+            </text>
+          </g>
+        )}
+
+        {/* Connector wires (drawn before blocks so blocks sit on top) */}
+        {wires.map(({ c, a, b }) => {
+          const dx = b.x - a.x;
+          const cx1 = a.x + Math.max(28, dx / 2);
+          const cx2 = b.x - Math.max(28, dx / 2);
+          const path = `M ${a.x} ${a.y} C ${cx1} ${a.y}, ${cx2} ${b.y}, ${b.x} ${b.y}`;
+          return (
+            <g key={c.id}>
+              <path
+                d={path}
+                fill="none"
+                stroke={CONNECTOR_HEX[c.kind]}
+                strokeWidth={2}
+                strokeOpacity={0.85}
+                markerEnd="url(#builder-process-arrow)"
+                pointerEvents="none"
+              />
+            </g>
+          );
+        })}
+
+        {/* Block cards */}
+        {Array.from(positions.values()).map((n) => {
+          const isSelected = selected?.kind === 'ws' && selected.id === n.ws.id;
+          const tint = PML_CATEGORY_TINT[n.block.spec.category] ?? {
+            fill: SW_COLORS.paper,
+            stroke: SW_COLORS.line,
+          };
+          const role = apparelRoleFor(n.ws);
+          return (
+            <g
+              key={n.ws.id}
+              transform={`translate(${n.x}, ${n.y})`}
+              style={{ cursor: 'pointer' }}
+              onClick={(e) => {
+                e.stopPropagation();
+                onSelect({ kind: 'ws', id: n.ws.id });
+              }}
+            >
+              {/* Card body */}
+              <rect
+                x={0}
+                y={0}
+                width={n.w}
+                height={n.h}
+                rx={6}
+                fill={tint.fill}
+                stroke={isSelected ? SW_COLORS.brand : tint.stroke}
+                strokeWidth={isSelected ? 2.5 : 1.5}
+              />
+              {/* Header strip */}
+              <rect x={0} y={0} width={n.w} height={22} rx={6} fill={tint.stroke} />
+              <rect x={0} y={16} width={n.w} height={6} fill={tint.stroke} />
+              <text
+                x={10}
+                y={15}
+                fontFamily={SW_FONTS.mono}
+                fontSize={10}
+                fontWeight={900}
+                fill="#fff"
+                letterSpacing="0.08em"
+              >
+                {n.block.spec.glyph} {n.block.spec.label.toUpperCase()}
+              </text>
+              <text
+                x={n.w - 8}
+                y={15}
+                textAnchor="end"
+                fontFamily={SW_FONTS.mono}
+                fontSize={9}
+                fontWeight={800}
+                fill="#ffffffcc"
+              >
+                {n.block.inputs.length}/{n.block.outputs.length}
+              </text>
+
+              {/* Body — apparel role + ws name */}
+              <text
+                x={10}
+                y={40}
+                fontFamily={SW_FONTS.body}
+                fontSize={11}
+                fontWeight={800}
+                fill={SW_COLORS.ink}
+              >
+                {role.length > 22 ? role.slice(0, 21) + '…' : role}
+              </text>
+              <text
+                x={10}
+                y={56}
+                fontFamily={SW_FONTS.mono}
+                fontSize={9}
+                fontWeight={500}
+                fill={SW_COLORS.muted}
+              >
+                {n.ws.name.length > 26 ? n.ws.name.slice(0, 24) + '…' : n.ws.name}
+              </text>
+              {n.block.spec.usesResources && !n.ws.kpiObserved && (
+                <text
+                  x={n.w - 8}
+                  y={n.h - 6}
+                  textAnchor="end"
+                  fontFamily={SW_FONTS.mono}
+                  fontSize={8}
+                  fontWeight={800}
+                  fill={SW_COLORS.muted}
+                  letterSpacing="0.1em"
+                >
+                  ⚡ RESOURCE
+                </text>
+              )}
+
+              {/* Observed-throughput badge — renders along the bottom of the
+                  block when the active twin has KPIs from a recent PML run.
+                  Shows "X /hr" plus utilisation %. Bottleneck blocks get a
+                  red ◆. */}
+              {n.ws.kpiObserved && (
+                <g transform={`translate(8, ${n.h - 16})`}>
+                  <rect
+                    x={0}
+                    y={0}
+                    width={n.w - 16}
+                    height={14}
+                    rx={3}
+                    fill={n.ws.kpiObserved.bottleneck ? SW_COLORS.alarm : tint.stroke}
+                    fillOpacity={0.92}
+                  />
+                  <text
+                    x={6}
+                    y={10}
+                    fontFamily={SW_FONTS.mono}
+                    fontSize={9}
+                    fontWeight={900}
+                    fill="#fff"
+                    letterSpacing="0.04em"
+                  >
+                    {n.ws.kpiObserved.bottleneck && '◆ '}
+                    {Math.round(n.ws.kpiObserved.capacityPerHr)} /hr
+                    {n.block.spec.usesResources && ` · ${Math.round(n.ws.kpiObserved.utilizationPct)}% util`}
+                  </text>
+                </g>
+              )}
+
+              {/* Input port dots — left edge. Clickable in CONNECT mode
+                  once a source has been picked. */}
+              {n.block.inputs.map((p, i) => {
+                const slot = (i + 1) / (n.block.inputs.length + 1);
+                const py = n.h * slot;
+                const armed = connect.on && connect.fromWsId !== null && connect.fromWsId !== n.ws.id;
+                return (
+                  <g
+                    key={`in-${p.id}`}
+                    transform={`translate(0, ${py})`}
+                    style={{ cursor: armed ? 'crosshair' : 'default' }}
+                    onClick={(e) => {
+                      if (!armed) return;
+                      e.stopPropagation();
+                      onPickToPort(n.ws.id, p.id);
+                    }}
+                  >
+                    {/* Larger transparent hit area so the click target is
+                        comfortable even though the visible dot is small. */}
+                    <circle cx={0} cy={0} r={12} fill="transparent" />
+                    <circle
+                      cx={0}
+                      cy={0}
+                      r={armed ? 6 : 5}
+                      fill={SW_COLORS.paper}
+                      stroke={armed ? SW_COLORS.brand : tint.stroke}
+                      strokeWidth={armed ? 2.5 : 2}
+                    />
+                    <circle cx={0} cy={0} r={1.8} fill={armed ? SW_COLORS.brand : tint.stroke} />
+                    {n.block.inputs.length > 1 && (
+                      <text
+                        x={9}
+                        y={3}
+                        fontFamily={SW_FONTS.mono}
+                        fontSize={8}
+                        fontWeight={700}
+                        fill={SW_COLORS.steel}
+                        pointerEvents="none"
+                      >
+                        {p.label}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+
+              {/* Output port dots — right edge. Clickable in CONNECT mode
+                  to set the source `(wsId, portId)`. The currently-selected
+                  fromPort is highlighted with a brand-coloured halo. */}
+              {n.block.outputs.map((p, i) => {
+                const slot = (i + 1) / (n.block.outputs.length + 1);
+                const py = n.h * slot;
+                const armed = connect.on;
+                const isFrom =
+                  connect.on &&
+                  connect.fromWsId === n.ws.id &&
+                  connect.fromPort === p.id;
+                return (
+                  <g
+                    key={`out-${p.id}`}
+                    transform={`translate(${n.w}, ${py})`}
+                    style={{ cursor: armed ? 'crosshair' : 'default' }}
+                    onClick={(e) => {
+                      if (!armed) return;
+                      e.stopPropagation();
+                      onPickFromPort(n.ws.id, p.id);
+                    }}
+                  >
+                    <circle cx={0} cy={0} r={12} fill="transparent" />
+                    {isFrom && (
+                      <circle
+                        cx={0}
+                        cy={0}
+                        r={9}
+                        fill="none"
+                        stroke={SW_COLORS.brand}
+                        strokeWidth={2}
+                        strokeDasharray="2 2"
+                      />
+                    )}
+                    <circle
+                      cx={0}
+                      cy={0}
+                      r={isFrom ? 6 : 5}
+                      fill={isFrom ? SW_COLORS.brand : tint.stroke}
+                      stroke={isFrom ? SW_COLORS.brand : tint.stroke}
+                      strokeWidth={2}
+                    />
+                    <circle cx={0} cy={0} r={1.8} fill="#fff" />
+                    {n.block.outputs.length > 1 && (
+                      <text
+                        x={-9}
+                        y={3}
+                        textAnchor="end"
+                        fontFamily={SW_FONTS.mono}
+                        fontSize={8}
+                        fontWeight={700}
+                        fill={SW_COLORS.steel}
+                        pointerEvents="none"
+                      >
+                        {p.label}
+                      </text>
+                    )}
+                  </g>
+                );
+              })}
+            </g>
+          );
+        })}
+
+        {/* Empty state */}
+        {twin.workstations.length === 0 && (
+          <text
+            x={W / 2}
+            y={H / 2}
+            textAnchor="middle"
+            fontFamily={SW_FONTS.body}
+            fontSize={14}
+            fill={SW_COLORS.muted}
+          >
+            No workstations yet — switch to ISO mode to drop one in. Each fixture you place becomes a PML block.
+          </text>
+        )}
+
+        {/* Legend */}
+        <g transform={`translate(${W - 320}, ${H - 76})`}>
+          <rect width={300} height={62} fill={SW_COLORS.paper} stroke={SW_COLORS.line} rx={4} />
+          <text
+            x={12}
+            y={18}
+            fontFamily={SW_FONTS.mono}
+            fontSize={10}
+            fontWeight={900}
+            fill={SW_COLORS.ink}
+            letterSpacing="0.15em"
+          >
+            PML LEGEND
+          </text>
+          <text x={12} y={34} fontFamily={SW_FONTS.mono} fontSize={9} fill={SW_COLORS.muted}>
+            ◯ input port (left) · ● output port (right)
+          </text>
+          <text x={12} y={48} fontFamily={SW_FONTS.mono} fontSize={9} fill={SW_COLORS.muted}>
+            → connector · header = block kind · click → inspect
+          </text>
+        </g>
+      </svg>
+    </div>
+  );
+}
+
+// ============================================================================
 // INSPECTOR (right)
 // ============================================================================
 
@@ -2627,6 +3840,8 @@ interface InspectorProps {
   onSetOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
   onSetResources: (wsId: string, patch: Partial<Workstation['resources']>) => void;
   onSetKpiTargets: (wsId: string, patch: Partial<Workstation['kpiTargets']>) => void;
+  /** Set or clear the workstation's PML block override. */
+  onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
   onRemoveConnector: (id: string) => void;
 }
 
@@ -2784,6 +3999,12 @@ function Inspector(props: InspectorProps) {
       })()}
 
       <div style={{ height: 14 }} />
+      <BlockSection
+        ws={ws}
+        onSetBlock={props.onSetBlock}
+      />
+
+      <div style={{ height: 14 }} />
       <LensSection
         title="Operations"
         active={props.lens === 'operations'}
@@ -2882,6 +4103,379 @@ function Inspector(props: InspectorProps) {
   );
 }
 
+/** PROCESS BLOCK panel — lets the user inspect and override the PML block
+ *  kind for the selected workstation. The default is inferred from the
+ *  fixture's `catalogId` (e.g. a sewing machine → Service, a buffer pad →
+ *  Queue); the user can override per-station to model non-default
+ *  semantics (a generic table tagged as a Hold or Match block). */
+function BlockSection({
+  ws,
+  onSetBlock,
+}: {
+  ws: Workstation;
+  onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
+}) {
+  const block = getBlockSpec(ws);
+  const defaultKind = inferBlockKindFromCatalog(ws.catalogId);
+  const role = apparelRoleFor(ws);
+
+  const onPickKind = (next: PmlBlockKind | 'auto') => {
+    if (next === 'auto') {
+      onSetBlock(ws.id, null);
+      return;
+    }
+    if (next === defaultKind) {
+      // Picking the catalog default explicitly = drop the override; same
+      // outcome as 'auto', but the dropdown reflects the user's intent.
+      onSetBlock(ws.id, null);
+      return;
+    }
+    onSetBlock(ws.id, { kind: next });
+  };
+
+  // Tint to match the PROCESS view category palette so the section visually
+  // ties to the canvas card style.
+  const catTint = PML_CATEGORY_TINT[block.spec.category] ?? {
+    fill: SW_COLORS.paper,
+    stroke: SW_COLORS.line,
+  };
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <div style={sectionLabel}>Process block</div>
+        {block.overridden && (
+          <button
+            onClick={() => onSetBlock(ws.id, null)}
+            style={{ ...btnSec, padding: '2px 7px', fontSize: 9 }}
+            title="Drop the override and fall back to the catalog-default block kind"
+          >
+            RESET
+          </button>
+        )}
+      </div>
+
+      {/* Header chip: glyph · kind · role */}
+      <div
+        style={{
+          marginTop: 6,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 8,
+          padding: '8px 10px',
+          background: catTint.fill,
+          border: `1px solid ${catTint.stroke}`,
+          borderLeft: `4px solid ${catTint.stroke}`,
+          borderRadius: 6,
+        }}
+      >
+        <div
+          style={{
+            width: 26,
+            height: 26,
+            display: 'grid',
+            placeItems: 'center',
+            background: catTint.stroke,
+            color: '#fff',
+            fontFamily: SW_FONTS.mono,
+            fontWeight: 900,
+            fontSize: 14,
+            borderRadius: 4,
+          }}
+        >
+          {block.spec.glyph}
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
+          <div
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 900,
+              letterSpacing: '0.08em',
+              color: SW_COLORS.ink,
+            }}
+          >
+            {block.spec.label.toUpperCase()}
+            <span
+              style={{
+                marginLeft: 6,
+                fontSize: 9,
+                fontWeight: 700,
+                color: block.overridden ? SW_COLORS.alarm : SW_COLORS.muted,
+              }}
+            >
+              {block.overridden ? 'OVERRIDE' : 'AUTO'}
+            </span>
+          </div>
+          <div style={{ fontSize: 11, color: SW_COLORS.steel, fontWeight: 700 }}>
+            {role}
+          </div>
+        </div>
+      </div>
+
+      <div style={{ marginTop: 6, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4 }}>
+        {block.spec.blurb}
+      </div>
+
+      {/* Kind picker */}
+      <div style={{ height: 8 }} />
+      <label style={fieldLabel}>Kind</label>
+      <select
+        value={block.overridden ? block.kind : 'auto'}
+        onChange={(e) => onPickKind(e.target.value as PmlBlockKind | 'auto')}
+        style={{ ...inputBase, width: '100%', fontFamily: SW_FONTS.mono, fontWeight: 700 }}
+      >
+        <option value="auto">
+          ◇ Auto · {PML_BLOCK_LIBRARY[defaultKind].label} (catalog default)
+        </option>
+        {SELECTABLE_BLOCK_KINDS.map((k) => {
+          const spec = PML_BLOCK_LIBRARY[k];
+          return (
+            <option key={k} value={k}>
+              {spec.glyph} {spec.label}
+              {k === defaultKind ? ' · default' : ''}
+            </option>
+          );
+        })}
+      </select>
+
+      {/* Port summary */}
+      <div style={{ height: 10 }} />
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: 8,
+        }}
+      >
+        <PortList side="in"  label="Inputs"  ports={block.inputs}  tint={catTint} />
+        <PortList side="out" label="Outputs" ports={block.outputs} tint={catTint} />
+      </div>
+
+      {/* Authored sim parameters — only shown when the block kind has any. */}
+      <BlockParamFields ws={ws} block={block} onSetBlock={onSetBlock} />
+
+      {block.spec.usesResources && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: '6px 8px',
+            background: SW_COLORS.paperDeep,
+            border: `1px dashed ${SW_COLORS.line}`,
+            borderRadius: 4,
+            fontSize: 11,
+            color: SW_COLORS.steel,
+          }}
+        >
+          ⚡ Draws on a ResourcePool · Seize → Delay → Release
+        </div>
+      )}
+    </div>
+  );
+}
+
+/** Per-kind authored simulation parameters editor. Renders the fields
+ *  declared in `PARAM_FIELDS_BY_KIND` for the block's resolved kind.
+ *  Inputs are seeded from the live resolved value (override → catalog →
+ *  default) so the user can see what the engine will use even when no
+ *  explicit override has been set. */
+function BlockParamFields({
+  ws,
+  block,
+  onSetBlock,
+}: {
+  ws: Workstation;
+  block: PmlBlock;
+  onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
+}) {
+  const fields = PARAM_FIELDS_BY_KIND[block.kind];
+  if (!fields || fields.length === 0) return null;
+
+  const resolved = getBlockParams(ws);
+  const authored = ws.block?.params ?? {};
+
+  /** Persist a single param edit. Always materialises a `block` override
+   *  (with the current kind) so simply setting a param implicitly opts
+   *  into the override — the user doesn't need to flip the kind picker
+   *  first. */
+  const setParam = (id: ParamFieldSpec['id'], rawValue: number) => {
+    // Pass% is shown as 0..100 in the UI but stored as 0..1.
+    const stored = id === 'passProb' ? rawValue / 100 : rawValue;
+    const nextParams: PmlBlockParams = { ...authored, [id]: stored };
+    onSetBlock(ws.id, {
+      kind: block.kind,
+      inputs: ws.block?.inputs,
+      outputs: ws.block?.outputs,
+      params: nextParams,
+    });
+  };
+
+  const clearParam = (id: ParamFieldSpec['id']) => {
+    const next: PmlBlockParams = { ...authored };
+    delete next[id];
+    const hasAny = Object.keys(next).length > 0;
+    // If no overrides remain AND the kind matches the catalog default,
+    // drop the whole block override so the workstation goes back to AUTO.
+    const isAuto = !block.overridden && !hasAny;
+    onSetBlock(
+      ws.id,
+      isAuto
+        ? null
+        : {
+            kind: block.kind,
+            inputs: ws.block?.inputs,
+            outputs: ws.block?.outputs,
+            params: hasAny ? next : undefined,
+          },
+    );
+  };
+
+  return (
+    <>
+      <div style={{ height: 10 }} />
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 9,
+          fontWeight: 800,
+          color: SW_COLORS.muted,
+          letterSpacing: '0.12em',
+          marginBottom: 4,
+        }}
+      >
+        BLOCK PARAMETERS
+      </div>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+        {fields.map((f) => {
+          const isAuthored = authored[f.id] !== undefined;
+          const live = f.resolveDefault(resolved);
+          return (
+            <div key={f.id}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <span style={{ ...fieldLabel, marginBottom: 0, flex: 1 }}>
+                  {f.label} <span style={{ color: SW_COLORS.muted, fontWeight: 500 }}>{f.unit.trim()}</span>
+                </span>
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 9,
+                    fontWeight: 700,
+                    color: isAuthored ? SW_COLORS.brand : SW_COLORS.muted,
+                  }}
+                >
+                  {isAuthored ? 'SET' : 'auto'}
+                </span>
+                {isAuthored && (
+                  <button
+                    onClick={() => clearParam(f.id)}
+                    style={{ ...btnSec, padding: '1px 6px', fontSize: 9 }}
+                    title="Drop this override and fall back to the catalog default"
+                  >
+                    ✕
+                  </button>
+                )}
+              </div>
+              <input
+                type="number"
+                value={live}
+                step={f.step}
+                onChange={(e) => {
+                  const v = parseFloat(e.target.value);
+                  if (isFinite(v)) setParam(f.id, v);
+                }}
+                style={{ ...inputBase, fontFamily: SW_FONTS.mono, fontWeight: 700 }}
+              />
+              <div style={{ marginTop: 2, fontSize: 10, color: SW_COLORS.muted }}>
+                {f.hint}
+              </div>
+            </div>
+          );
+        })}
+      </div>
+    </>
+  );
+}
+
+/** Compact list of named ports — one chip per port. Used by BlockSection
+ *  for the Inputs / Outputs preview. */
+function PortList({
+  side,
+  label,
+  ports,
+  tint,
+}: {
+  side: 'in' | 'out';
+  label: string;
+  ports: PmlPort[];
+  tint: { fill: string; stroke: string };
+}) {
+  return (
+    <div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 9,
+          fontWeight: 800,
+          color: SW_COLORS.muted,
+          letterSpacing: '0.12em',
+          marginBottom: 4,
+        }}
+      >
+        {label.toUpperCase()} · {ports.length}
+      </div>
+      {ports.length === 0 ? (
+        <div
+          style={{
+            padding: '6px 8px',
+            border: `1px dashed ${SW_COLORS.line}`,
+            borderRadius: 4,
+            fontSize: 10,
+            color: SW_COLORS.muted,
+            fontStyle: 'italic',
+          }}
+        >
+          none
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          {ports.map((p) => (
+            <div
+              key={p.id}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '4px 6px',
+                background: SW_COLORS.paper,
+                border: `1px solid ${SW_COLORS.line}`,
+                borderRadius: 3,
+                fontSize: 11,
+              }}
+            >
+              <span
+                style={{
+                  width: 8,
+                  height: 8,
+                  borderRadius: '50%',
+                  background: side === 'in' ? SW_COLORS.paper : tint.stroke,
+                  border: `2px solid ${tint.stroke}`,
+                  flexShrink: 0,
+                }}
+              />
+              <strong style={{ color: SW_COLORS.ink, fontFamily: SW_FONTS.mono }}>{p.label}</strong>
+              {p.kind === 'resource' && (
+                <span style={{ marginLeft: 'auto', fontSize: 9, color: SW_COLORS.muted, fontWeight: 700 }}>
+                  RES
+                </span>
+              )}
+            </div>
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Flow-connections panel — lists every connector touching the selected
  *  workstation (incoming + outgoing) and lets the user delete them inline. */
 function FlowSection({
@@ -2898,9 +4492,36 @@ function FlowSection({
   const incoming = all.filter((c) => c.toWsId === ws.id);
   const outgoing = all.filter((c) => c.fromWsId === ws.id);
 
+  /** Render the port label for an endpoint. Falls back to the block's
+   *  first port when the connector doesn't pin a specific port. */
+  const portLabelFor = (
+    targetWsId: string,
+    portId: string | undefined,
+    side: 'in' | 'out',
+  ): string => {
+    const target = wsById.get(targetWsId);
+    if (!target) return portId ?? '?';
+    const block = getBlockSpec(target);
+    const list = side === 'in' ? block.inputs : block.outputs;
+    if (portId) {
+      return list.find((p) => p.id === portId)?.label ?? portId;
+    }
+    return list[0]?.label ?? (side === 'in' ? 'in' : 'out');
+  };
+
   const row = (c: Connector, mode: 'in' | 'out') => {
     const otherId = mode === 'in' ? c.fromWsId : c.toWsId;
     const other = wsById.get(otherId);
+    // For an INCOMING wire on `ws`: we are the target → our port is the
+    // INPUT side, peer's port is the OUTPUT side. And vice-versa.
+    const myPort =
+      mode === 'in'
+        ? portLabelFor(ws.id, c.toPort, 'in')
+        : portLabelFor(ws.id, c.fromPort, 'out');
+    const otherPort =
+      mode === 'in'
+        ? portLabelFor(otherId, c.fromPort, 'out')
+        : portLabelFor(otherId, c.toPort, 'in');
     return (
       <div
         key={c.id}
@@ -2937,8 +4558,19 @@ function FlowSection({
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
           }}
-          title={other?.name ?? otherId}
+          title={`${mode === 'in' ? otherPort : myPort} → ${mode === 'in' ? myPort : otherPort}\n${other?.name ?? otherId}`}
         >
+          <span
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 9,
+              fontWeight: 800,
+              color: SW_COLORS.muted,
+              marginRight: 6,
+            }}
+          >
+            {mode === 'in' ? `${otherPort}→${myPort}` : `${myPort}→${otherPort}`}
+          </span>
           {other?.name ?? '— deleted'}
         </span>
         <button

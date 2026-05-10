@@ -22,6 +22,7 @@ import { DeptInteriorPage } from './pages/DeptInterior';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { BuilderPage } from './pages/Builder';
 import { LiveFloorPage } from './pages/LiveFloor';
+import { AssetsGalleryPage } from './pages/AssetsGallery';
 
 /**
  * App shell: top bar + route outlet, vibe-driven theming, the floating
@@ -124,6 +125,7 @@ export default function App() {
           <Route path="/iso" element={<BuilderPage />} />
           <Route path="/dept/:deptId" element={<DeptInteriorPage />} />
           <Route path="/workstation/:deptId/:wsId" element={<WorkstationDetailPage />} />
+          <Route path="/assets" element={<AssetsGalleryPage />} />
         </Routes>
       </div>
 

@@ -17,7 +17,7 @@
  * /builder, KPIs live in /kpi.
  */
 
-import { useEffect, useMemo, useState, type ReactNode } from 'react';
+import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { useTwin, selectActiveTwin, type DepartmentColorKey } from '../store/twin';
@@ -76,6 +76,15 @@ export function LiveFloorPage() {
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
   const [selectedWs, setSelectedWs] = useState<string | null>(null);
+  const [panning, setPanning] = useState(false);
+  const dragRef = useRef<{
+    startX: number;
+    startY: number;
+    panX: number;
+    panY: number;
+    moved: boolean;
+  } | null>(null);
+  const justDraggedRef = useRef(false);
 
   // Animation tick
   useEffect(() => {
@@ -248,11 +257,55 @@ export function LiveFloorPage() {
           style={{
             position: 'relative',
             overflow: 'hidden',
-            background: 'radial-gradient(ellipse at 50% 30%, #182231 0%, #0a0d12 100%)',
+            background: '#0b2a4a',
+            cursor: panning ? 'grabbing' : 'grab',
+            touchAction: 'none',
           }}
           onWheel={(e) => {
             e.preventDefault();
             setZoom((z) => Math.max(0.4, Math.min(2.5, z * (e.deltaY < 0 ? 1.08 : 0.93))));
+          }}
+          onPointerDown={(e) => {
+            if (e.button !== 0 && e.button !== 1) return;
+            (e.currentTarget as HTMLDivElement).setPointerCapture(e.pointerId);
+            dragRef.current = {
+              startX: e.clientX,
+              startY: e.clientY,
+              panX: pan.x,
+              panY: pan.y,
+              moved: false,
+            };
+          }}
+          onPointerMove={(e) => {
+            const d = dragRef.current;
+            if (!d) return;
+            const dx = e.clientX - d.startX;
+            const dy = e.clientY - d.startY;
+            if (!d.moved && dx * dx + dy * dy < 16) return;
+            if (!d.moved) {
+              d.moved = true;
+              setPanning(true);
+            }
+            setPan({ x: d.panX + dx, y: d.panY + dy });
+          }}
+          onPointerUp={(e) => {
+            const d = dragRef.current;
+            (e.currentTarget as HTMLDivElement).releasePointerCapture(e.pointerId);
+            dragRef.current = null;
+            if (d?.moved) {
+              justDraggedRef.current = true;
+              setPanning(false);
+            }
+          }}
+          onPointerCancel={() => {
+            dragRef.current = null;
+            setPanning(false);
+          }}
+          onClickCapture={(e) => {
+            if (justDraggedRef.current) {
+              justDraggedRef.current = false;
+              e.stopPropagation();
+            }
           }}
         >
           {empty ? (
@@ -412,7 +465,7 @@ export function LiveFloorPage() {
             letterSpacing: '0.06em',
           }}
         >
-          SCROLL zoom · CLICK workstation to inspect
+          SCROLL zoom · DRAG pan · CLICK workstation to inspect
         </span>
         <button
           onClick={() => navigate('/sim')}

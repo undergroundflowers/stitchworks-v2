@@ -10,6 +10,9 @@ import {
 } from '../domain';
 import { buildSimConfig, efficiencyFromSkillMatrix, runReplications, type AggregateKpis } from '../simulation';
 import { useProject, useGarments } from '../store';
+import { useTwin, selectActiveTwin } from '../store/twin';
+import { runPmlOnTwin } from '../simulation/pml-runner';
+import { getBlockSpec, apparelRoleFor } from '../domain/pml';
 
 interface DonutSlice {
   v: number;
@@ -111,6 +114,41 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const utilization = agg.utilization.mean;
   const wipBundles = agg.wipBundles.mean;
 
+  // ── PML run section data ────────────────────────────────────────────────
+  const pmlTwin = useTwin(selectActiveTwin);
+  const setKpiObserved = useTwin((s) => s.setKpiObserved);
+  /** Force re-render after RUN — selectActiveTwin returns the same Twin
+   *  reference on observed-only edits so we need a tick. */
+  const [pmlRunBump, setPmlRunBump] = useState(0);
+
+  const pmlBlocks = useMemo(() => {
+    void pmlRunBump; // trigger memo on run
+    return pmlTwin.workstations
+      .filter((w) => w.kpiObserved && w.kpiObserved.capacityPerHr > 0)
+      .map((w) => {
+        const spec = getBlockSpec(w);
+        return {
+          ws: w,
+          kind: spec.kind,
+          role: apparelRoleFor(w),
+          throughput: w.kpiObserved!.capacityPerHr,
+          util: w.kpiObserved!.utilizationPct,
+          bottleneck: w.kpiObserved!.bottleneck,
+        };
+      })
+      .sort((a, b) => b.throughput - a.throughput);
+  }, [pmlTwin, pmlRunBump]);
+
+  const pmlSinkThroughput = useMemo(
+    () =>
+      pmlTwin.workstations
+        .filter((w) => getBlockSpec(w).kind === 'Sink')
+        .reduce((s, w) => s + (w.kpiObserved?.capacityPerHr ?? 0), 0),
+    [pmlTwin, pmlRunBump],
+  );
+  const pmlBottleneck = pmlBlocks.find((b) => b.bottleneck) ?? null;
+  const pmlAnyObserved = pmlBlocks.length > 0;
+
   return (
     <div style={embedded
       ? { width:'100%', background: SW_COLORS.paperDeep, padding: 24 }
@@ -172,6 +210,112 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           </div>
         }
       />
+
+      {/* ── PML simulation report ───────────────────────────────────────
+          Reads observed KPIs that the Builder's PML runner wrote onto
+          each workstation. Lets the user re-run from this page so they
+          don't have to bounce back to Builder for a quick check. */}
+      <Card padding={20} style={{ marginBottom: 20, borderLeft: `4px solid ${SW_COLORS.brand}` }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap' }}>
+          <div>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>
+              ⚙ PML SIMULATION
+            </div>
+            <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 2 }}>
+              Block-graph DES over the active twin · {pmlTwin.workstations.length} blocks · {pmlTwin.connectors.length} connectors
+            </div>
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button
+              variant="primary"
+              size="sm"
+              icon="▶"
+              onClick={() => {
+                runPmlOnTwin(pmlTwin, { writeKpiObserved: setKpiObserved });
+                setPmlRunBump((n) => n + 1);
+              }}
+            >
+              Run PML
+            </Button>
+            <Button variant="ghost" size="sm" onClick={() => navigate('/builder')}>
+              Open Builder
+            </Button>
+          </div>
+        </div>
+
+        {!pmlAnyObserved ? (
+          <div
+            style={{
+              padding: '14px 16px',
+              border: `1px dashed ${SW_COLORS.line}`,
+              borderRadius: 6,
+              fontSize: 12,
+              color: SW_COLORS.muted,
+            }}
+          >
+            No PML run on this twin yet. Click <strong style={{ color: SW_COLORS.brand }}>▶ Run PML</strong> to simulate the wired graph and populate per-block KPIs.
+          </div>
+        ) : (
+          <>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 12 }}>
+              <Stat label="SINK THROUGHPUT" value={Math.round(pmlSinkThroughput).toLocaleString()} unit="pcs/hr" color={SW_COLORS.brand} />
+              <Stat label="ACTIVE BLOCKS"   value={String(pmlBlocks.length)}                                  unit="" color={SW_COLORS.fabric} />
+              <Stat label="BOTTLENECK"       value={pmlBottleneck ? pmlBottleneck.ws.name.slice(0, 18) : '—'}  unit=""        color={pmlBottleneck ? SW_COLORS.alarm : SW_COLORS.muted} />
+              <Stat label="MAX UTIL"         value={Math.max(0, ...pmlBlocks.map((b) => b.util)).toFixed(0)}    unit="%"       color={SW_COLORS.thread} />
+            </div>
+
+            <div style={{ overflowX: 'auto' }}>
+              <table
+                style={{
+                  width: '100%',
+                  borderCollapse: 'collapse',
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 11,
+                }}
+              >
+                <thead>
+                  <tr style={{ textAlign: 'left', borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>BLOCK</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>KIND</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>ROLE</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>PCS/HR</th>
+                    <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>UTIL</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {pmlBlocks.slice(0, 20).map((b) => (
+                    <tr
+                      key={b.ws.id}
+                      style={{
+                        borderBottom: `1px solid ${SW_COLORS.line}`,
+                        background: b.bottleneck ? '#FFE5E5' : 'transparent',
+                      }}
+                    >
+                      <td style={{ padding: '6px 8px', color: SW_COLORS.ink, fontWeight: 700 }}>
+                        {b.bottleneck && '◆ '}
+                        {b.ws.name}
+                      </td>
+                      <td style={{ padding: '6px 8px', color: SW_COLORS.steel }}>{b.kind}</td>
+                      <td style={{ padding: '6px 8px', color: SW_COLORS.steel }}>{b.role}</td>
+                      <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 800, color: SW_COLORS.ink }}>
+                        {Math.round(b.throughput).toLocaleString()}
+                      </td>
+                      <td style={{ padding: '6px 8px', textAlign: 'right', color: SW_COLORS.steel }}>
+                        {b.util > 0 ? `${b.util.toFixed(0)}%` : '—'}
+                      </td>
+                    </tr>
+                  ))}
+                </tbody>
+              </table>
+              {pmlBlocks.length > 20 && (
+                <div style={{ marginTop: 6, fontSize: 11, color: SW_COLORS.muted, fontStyle: 'italic' }}>
+                  +{pmlBlocks.length - 20} more blocks not shown
+                </div>
+              )}
+            </div>
+          </>
+        )}
+      </Card>
 
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
         <KpiTile label="OUTPUT"     mean={producedPieces} std={runs > 1 ? agg.producedPieces.std : 0} unit="pcs" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.brand}/>

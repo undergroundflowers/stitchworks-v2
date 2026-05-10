@@ -8,6 +8,12 @@
  */
 
 import { createElement, type ReactNode } from 'react';
+import {
+  PML_BLOCK_LIBRARY,
+  pmlFixtureId,
+  type PmlBlockSpec,
+  type PmlCategory,
+} from './pml';
 
 // ============================================================================
 // ISO PROJECTION
@@ -589,6 +595,84 @@ function fabricRoll(): IsoDrawFn {
 function binShelf(): IsoDrawFn {
   return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal });
 }
+/** Per-PML-category accent colour (matches the PROCESS canvas card tints
+ *  in `pages/Builder.tsx > PML_CATEGORY_TINT` so a Source on the iso
+ *  canvas reads the same as a Source in the PML diagram). */
+const PML_CAT_ACCENT: Record<PmlCategory, string> = {
+  lifecycle: SW_PAL.yellow,
+  buffer:    SW_PAL.blue,
+  service:   SW_PAL.red,
+  routing:   SW_PAL.green,
+  batch:     '#7E5BEF',
+  movement:  SW_PAL.wood,
+};
+
+/** Generic PML-block draw factory: a paper-coloured cuboid with a coloured
+ *  top stripe and the kind's glyph painted on the top face. Used by every
+ *  `pml_*` fixture so the iso canvas always shows the block's identity at
+ *  a glance. */
+function pmlBlock(glyph: string, accent: string): IsoDrawFn {
+  return ({ w, d, h }) => {
+    // Compute the top-face centroid for glyph placement.
+    const c = isoCuboid(w, d, h);
+    const topCenter = isoProj(w / 2, d / 2, h);
+    return createElement(
+      'g',
+      null,
+      // Body — paper-coloured cuboid for high contrast against any dept tint
+      CuboidFaces({
+        w,
+        d,
+        h,
+        top: SW_PAL.paper,
+        left: shade(SW_PAL.paperShade, -0.05),
+        right: SW_PAL.paperShade,
+      }),
+      // Coloured stripe on the top edge (front-right ridge) so the
+      // category accent is visible without the glyph.
+      createElement('polygon', {
+        points: ptsToStr([
+          isoProj(0, 0, h),
+          isoProj(w, 0, h),
+          isoProj(w, 0.18, h),
+          isoProj(0, 0.18, h),
+        ]),
+        fill: accent,
+        stroke: SW_PAL.edge,
+        strokeWidth: 0.5,
+      }),
+      // Inner top-face inset rectangle in the accent colour
+      createElement('polygon', {
+        points: ptsToStr([
+          isoProj(0.18, 0.32, h),
+          isoProj(w - 0.18, 0.32, h),
+          isoProj(w - 0.18, d - 0.18, h),
+          isoProj(0.18, d - 0.18, h),
+        ]),
+        fill: shade(accent, 0.55),
+        stroke: accent,
+        strokeWidth: 0.6,
+      }),
+      // Glyph
+      createElement(
+        'text',
+        {
+          x: topCenter.sx,
+          y: topCenter.sy + 6,
+          textAnchor: 'middle',
+          fontFamily: 'ui-monospace, Menlo, monospace',
+          fontSize: 22,
+          fontWeight: 900,
+          fill: shade(accent, -0.45),
+        },
+        glyph,
+      ),
+      // Suppress unused-var warning — `c` exists for future face-decals.
+      ((): null => { void c; return null; })(),
+    );
+  };
+}
+
 function operator(shirt: string): IsoDrawFn {
   return ({ w: _w, d: _d, h }) =>
     createElement(
@@ -813,7 +897,8 @@ export type IsoCategoryId =
   | 'op'
   | 'buf'
   | 'fix'
-  | 'util';
+  | 'util'
+  | 'pml';
 
 export interface IsoCategory {
   id: IsoCategoryId;
@@ -833,6 +918,7 @@ export const ISO_CATEGORIES: IsoCategory[] = [
   { id: 'buf', label: 'Buffers', icon: '◫' },
   { id: 'fix', label: 'Fixtures', icon: '▭' },
   { id: 'util', label: 'Utilities', icon: '⚡' },
+  { id: 'pml', label: 'Process blocks', icon: '⚙' },
 ];
 
 // ============================================================================
@@ -1014,6 +1100,21 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
   // ─── APPAREL — MATERIALS & HANDLING ─────────────────────────────────────
   { id: 'a_fabric_rack',   cat: 'store', label: 'Fabric Roll Rack', w: 4, d: 1, h: 4.5, draw: palletRack()          },
   { id: 'a_bundle_trolley',cat: 'mh',    label: 'Bundle Trolley',   w: 1, d: 2, h: 1.0, draw: wipCart()             },
+
+  // ─── PML — PROCESS MODELING LIBRARY PRIMITIVES ──────────────────────────
+  // Generated from PML_BLOCK_LIBRARY so adding a new kind in pml.ts adds a
+  // matching iso fixture automatically. All PML fixtures share the same
+  // pmlBlock() draw function and a 2×2×1.2 footprint — visual identity
+  // comes from the kind glyph + per-category accent colour.
+  ...(Object.values(PML_BLOCK_LIBRARY) as PmlBlockSpec[]).map<IsoFixture>((spec) => ({
+    id: pmlFixtureId(spec.kind),
+    cat: 'pml',
+    label: `${spec.glyph} ${spec.label}`,
+    w: 2,
+    d: 2,
+    h: 1.2,
+    draw: pmlBlock(spec.glyph, PML_CAT_ACCENT[spec.category]),
+  })),
 ];
 
 // ============================================================================
@@ -1103,6 +1204,17 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
   if (a.cat === 'util') return { ...base, power_kw: 5.5, vendor: '' };
   if (a.cat === 'fix') return { ...base, capacity_per_hr: 40, cost_per_hr: 3 };
   if (a.cat === 'zone') return { ...base, area_label: a.label, color: '' };
+  if (a.cat === 'pml')
+    return {
+      ...base,
+      // PML primitives are pure simulation blocks — physical props are
+      // optional and overlap heavily with the kind's semantics. We seed a
+      // minimal set that the sim engine can read; the user fleshes out the
+      // rest from the Inspector.
+      capacity_per_hr: 0,
+      cycle_s: 0,
+      cost_per_hr: 0,
+    };
   return base;
 }
 

@@ -11,7 +11,7 @@
  * efficiency); the views are pure visualisations of `SimState.stations`.
  */
 
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Button, ToggleGroup } from '../components';
@@ -23,8 +23,12 @@ import {
 } from '../simulation';
 import { useProject, useGarments } from '../store';
 import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade } from '../domain';
+import { useTwin, selectActiveTwin } from '../store/twin';
+import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
+import { getBlockSpec, apparelRoleFor } from '../domain/pml';
+import type { Workstation } from '../domain/twin';
 
-type SimView = 'iso' | 'top' | 'heat' | 'logic';
+type SimView = 'iso' | 'top' | 'heat' | 'logic' | 'pml';
 
 const SHIFT_MIN_PER_DAY = 480;
 
@@ -115,7 +119,7 @@ export function LiveSimPage() {
         {/* View toggle */}
         <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
         <div style={{ display: 'flex', gap: 2, background: '#ffffff08', padding: 2, borderRadius: 6 }}>
-          {(['iso', 'top', 'heat', 'logic'] as const).map((v) => (
+          {(['iso', 'top', 'heat', 'logic', 'pml'] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
@@ -131,8 +135,9 @@ export function LiveSimPage() {
                 letterSpacing: '0.1em',
                 borderRadius: 4,
               }}
+              title={v === 'pml' ? 'PML — block-graph snapshot of the active twin' : undefined}
             >
-              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : v === 'heat' ? 'HEAT' : 'LOGIC'}
+              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : v === 'heat' ? 'HEAT' : v === 'logic' ? 'LOGIC' : '⚙ PML'}
             </button>
           ))}
         </div>
@@ -214,6 +219,7 @@ export function LiveSimPage() {
             simTime={state.time}
           />
         )}
+        {view === 'pml' && <SimPmlView />}
 
         {/* HUD stat tiles */}
         <div style={{ position: 'absolute', left: 24, top: 24, display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
@@ -1347,6 +1353,324 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime }: Sim
         </text>
       </g>
     </svg>
+  );
+}
+
+// ============================================================================
+// PML VIEW — block-graph snapshot of the active twin
+// ============================================================================
+//
+// Reads `kpiObserved` off each workstation in the active twin and renders
+// a card grid sorted by throughput. Inline `▶ Run PML` button kicks off
+// a fresh sim against the active twin without leaving this page. Skips
+// the per-tick streaming animation that the legacy views have — the PML
+// engine is one-shot for v1; per-minute timeseries playback is scoped to
+// a follow-up turn (the engine needs to record samples first).
+
+function SimPmlView() {
+  const twin = useTwin(selectActiveTwin);
+  const setKpiObserved = useTwin((s) => s.setKpiObserved);
+  /** Last completed run, retained so the timeline can scrub through it. */
+  const [report, setReport] = useState<RunReport | null>(null);
+  /** Index into report.raw.samples — the frame currently rendered. */
+  const [frame, setFrame] = useState(0);
+  /** Wall-clock playback state. Each tick advances `frame` by 1. */
+  const [playing, setPlaying] = useState(false);
+  /** Sim-minutes per real-second (1× = real time, 60× = 1 sim-min/sec). */
+  const [speed, setSpeed] = useState(60);
+
+  const samples = report?.raw.samples ?? [];
+  const lastFrame = Math.max(0, samples.length - 1);
+  const currentSample = samples[Math.min(frame, lastFrame)];
+  const simMin = currentSample?.time ?? 0;
+
+  // Playback loop. Advances `frame` every 50ms by `speed/20` sim-minutes
+  // (so speed=60 → 3 sim-min per 50ms = 60 sim-min/sec wall-clock).
+  // Uses setInterval rather than rAF so playback continues smoothly even
+  // when the tab is in the background or under a hidden preview frame.
+  useEffect(() => {
+    if (!playing || samples.length === 0) return;
+    const STEP_MS = 50;
+    const id = setInterval(() => {
+      setFrame((f) => {
+        const advance = Math.max(1, Math.round((speed * STEP_MS) / 1000));
+        const next = f + advance;
+        if (next >= lastFrame) {
+          setPlaying(false);
+          return lastFrame;
+        }
+        return next;
+      });
+    }, STEP_MS);
+    return () => clearInterval(id);
+  }, [playing, samples.length, speed, lastFrame]);
+  // Suppress unused-import lint until/unless we revisit rAF playback.
+  void useRef;
+
+  /** Build the per-block render list for the current frame. Throughput
+   *  is computed from cumulative pieces / elapsed sim hours, so the
+   *  numbers ramp up smoothly as playback advances. */
+  const blockData = useMemo(() => {
+    if (!currentSample || samples.length === 0) return [];
+    const elapsedHr = currentSample.time / 60;
+    return twin.workstations
+      .map((w) => {
+        const snap = currentSample.blocks.get(w.id);
+        if (!snap) return null;
+        const spec = getBlockSpec(w);
+        const tputPerHr = elapsedHr > 0 ? snap.producedPieces / elapsedHr : 0;
+        const obs = report?.raw.blocks.get(w.id);
+        return {
+          ws: w,
+          spec,
+          role: apparelRoleFor(w),
+          producedPieces: snap.producedPieces,
+          queueLen: snap.queueLen,
+          inService: snap.inService,
+          throughputPerHr: tputPerHr,
+          // util only makes sense for resource-using blocks at the run-end;
+          // mid-playback we show the live queue instead.
+          utilizationPct: obs?.utilization ? obs.utilization * 100 : 0,
+          bottleneck: obs?.bottleneck ?? false,
+        };
+      })
+      .filter((x): x is NonNullable<typeof x> => x !== null)
+      .filter((b) => b.producedPieces > 0 || b.queueLen > 0 || b.inService > 0)
+      .sort((a, b) => b.throughputPerHr - a.throughputPerHr);
+  }, [twin, currentSample, samples.length, report]);
+
+  const sinkThroughput = blockData
+    .filter((b) => b.spec.kind === 'Sink')
+    .reduce((s, b) => s + b.throughputPerHr, 0);
+  const bottleneck = blockData.find((b) => b.bottleneck);
+
+  const runIt = () => {
+    const r = runPmlOnTwin(twin, { writeKpiObserved: setKpiObserved, samplePeriodMin: 1 });
+    setReport(r);
+    setFrame(0);
+    setPlaying(true);
+  };
+
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        inset: 0,
+        padding: 24,
+        overflow: 'auto',
+        color: '#fff',
+      }}
+    >
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'baseline',
+          gap: 16,
+          marginBottom: 14,
+          flexWrap: 'wrap',
+        }}
+      >
+        <div style={{ fontFamily: SW_FONTS.display, fontSize: 18, fontWeight: 900, letterSpacing: '0.06em' }}>
+          ⚙ PML SIMULATION
+        </div>
+        <div style={{ fontSize: 12, color: '#ffffffaa', fontFamily: SW_FONTS.mono }}>
+          {twin.name} · {twin.workstations.length} blocks · {twin.connectors.length} connectors
+        </div>
+        <div style={{ flex: 1 }} />
+        <Button variant="primary" size="sm" icon="▶" onClick={runIt}>
+          Run PML
+        </Button>
+      </div>
+
+      {/* Playback strip — only shown after a run has produced samples. */}
+      {samples.length > 0 && (
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            gap: 12,
+            marginBottom: 16,
+            padding: '8px 12px',
+            background: '#ffffff08',
+            border: '1px solid #ffffff20',
+            borderRadius: 6,
+          }}
+        >
+          <button
+            onClick={() => setPlaying((p) => !p)}
+            disabled={frame >= lastFrame && !playing}
+            style={{
+              width: 32,
+              height: 32,
+              borderRadius: '50%',
+              background: playing ? SW_COLORS.alarm : SW_COLORS.brand,
+              border: 'none',
+              color: '#fff',
+              fontSize: 14,
+              fontWeight: 900,
+              cursor: 'pointer',
+            }}
+            title={playing ? 'Pause' : 'Play'}
+          >
+            {playing ? '❚❚' : '▶'}
+          </button>
+          <button
+            onClick={() => {
+              setFrame(0);
+              setPlaying(false);
+            }}
+            style={{
+              padding: '4px 10px',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              fontWeight: 800,
+              color: '#fff',
+              background: 'transparent',
+              border: '1px solid #ffffff30',
+              borderRadius: 4,
+              cursor: 'pointer',
+            }}
+            title="Restart"
+          >
+            ↻ RESTART
+          </button>
+          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 13, fontWeight: 700, minWidth: 80, color: SW_COLORS.brand }}>
+            t = {simMin.toFixed(0)} min
+          </div>
+          <input
+            type="range"
+            min={0}
+            max={lastFrame}
+            value={frame}
+            onChange={(e) => {
+              setFrame(parseInt(e.target.value));
+              setPlaying(false);
+            }}
+            style={{ flex: 1, accentColor: SW_COLORS.brand }}
+          />
+          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: '#ffffff80' }}>
+            {frame + 1} / {samples.length}
+          </div>
+          <select
+            value={speed}
+            onChange={(e) => setSpeed(parseInt(e.target.value))}
+            style={{
+              padding: '4px 8px',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 800,
+              color: '#fff',
+              background: '#ffffff10',
+              border: '1px solid #ffffff20',
+              borderRadius: 4,
+            }}
+            title="Sim-minutes per wall-clock-second"
+          >
+            <option value={15}>15× SLOW</option>
+            <option value={60}>60×</option>
+            <option value={240}>240× FAST</option>
+            <option value={480}>480× FASTEST</option>
+          </select>
+        </div>
+      )}
+
+      <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 12, marginBottom: 18 }}>
+        <SimHudStat label="SINK THROUGHPUT" value={Math.round(sinkThroughput).toLocaleString()} unit="pcs/hr" color={SW_COLORS.brand} />
+        <SimHudStat label="SUNK PIECES"     value={(currentSample?.totalSunkPieces ?? 0).toLocaleString()}    unit=""        color={SW_COLORS.fabric} />
+        <SimHudStat label="BOTTLENECK"      value={bottleneck ? bottleneck.ws.name.slice(0, 18) : '—'}        unit=""        color={bottleneck ? SW_COLORS.alarm : '#ffffff60'} />
+        <SimHudStat label="MAX UTIL"        value={Math.max(0, ...blockData.map((b) => b.utilizationPct)).toFixed(0)} unit="%" color={SW_COLORS.thread} />
+      </div>
+
+      {blockData.length === 0 ? (
+        <div
+          style={{
+            padding: '40px 24px',
+            textAlign: 'center',
+            border: '1px dashed #ffffff30',
+            borderRadius: 8,
+            color: '#ffffff80',
+            fontFamily: SW_FONTS.mono,
+          }}
+        >
+          {samples.length === 0
+            ? <>No PML run on this twin yet. Click <strong style={{ color: SW_COLORS.brand }}>▶ Run PML</strong> to simulate the wired graph.</>
+            : 'No flow yet at this time. Press play to advance the timeline.'}
+        </div>
+      ) : (
+        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(auto-fill, minmax(220px, 1fr))', gap: 12 }}>
+          {blockData.map((b) => (
+            <SimPmlCard key={b.ws.id} block={b} />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+interface PmlCardData {
+  ws: Workstation;
+  spec: ReturnType<typeof getBlockSpec>;
+  role: string;
+  producedPieces: number;
+  queueLen: number;
+  inService: number;
+  throughputPerHr: number;
+  utilizationPct: number;
+  bottleneck: boolean;
+}
+
+/** One block card in the PML view, fed by a per-frame snapshot so values
+ *  ramp up as playback advances. */
+function SimPmlCard({ block: b }: { block: PmlCardData }) {
+  return (
+    <div
+      style={{
+        padding: 12,
+        background: b.bottleneck ? '#3a1212' : '#ffffff08',
+        border: `1px solid ${b.bottleneck ? SW_COLORS.alarm : '#ffffff20'}`,
+        borderLeft: `4px solid ${b.bottleneck ? SW_COLORS.alarm : SW_COLORS.brand}`,
+        borderRadius: 6,
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        color: '#fff',
+      }}
+    >
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 900, color: SW_COLORS.brand }}>
+          {b.spec.spec.glyph}
+        </span>
+        <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.06em', color: '#ffffffcc' }}>
+          {b.spec.kind.toUpperCase()}
+        </span>
+        {b.bottleneck && (
+          <span style={{ marginLeft: 'auto', fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 800, color: SW_COLORS.alarm, letterSpacing: '0.1em' }}>
+            ◆ BOTTLENECK
+          </span>
+        )}
+      </div>
+      <div style={{ fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: '#fff', lineHeight: 1.2 }}>
+        {b.ws.name}
+      </div>
+      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffff80' }}>
+        {b.role}
+      </div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginTop: 4 }}>
+        <div>
+          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 18, fontWeight: 900, color: '#fff' }}>
+            {Math.round(b.throughputPerHr).toLocaleString()}
+          </span>
+          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffff80', marginLeft: 4 }}>
+            pcs/hr
+          </span>
+        </div>
+        {b.queueLen + b.inService > 0 && (
+          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.thread }}>
+            Q {b.queueLen + b.inService}
+          </div>
+        )}
+      </div>
+    </div>
   );
 }
 

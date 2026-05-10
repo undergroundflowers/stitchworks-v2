@@ -52,6 +52,7 @@ import {
   normalizeTwin,
   validateTwin,
 } from '../domain/twin';
+import type { PmlBlockOverride } from '../domain/pml';
 
 export const TWIN_STORE_SCHEMA_VERSION = 4 as const;
 
@@ -100,12 +101,16 @@ export interface TwinState {
   // ── Connector CRUD ───────────────────────────────────────────────────────
   /** Create a directed connector between two workstations. Returns the
    *  created id, or null if the source/target ids don't resolve in the
-   *  active twin or if from === to. */
+   *  active twin or if from === to. `fromPort` / `toPort` bind the wire
+   *  to specific named PML ports — omit them to default to the first
+   *  output / first input on the respective block. */
   addConnector: (input: {
     kind: ConnectorKind;
     fromWsId: string;
     toWsId: string;
     label?: string;
+    fromPort?: string;
+    toPort?: string;
   }) => string | null;
   /** Patch fields on a connector. */
   updateConnector: (id: string, patch: Partial<Omit<Connector, 'id'>>) => void;
@@ -129,6 +134,9 @@ export interface TwinState {
   /** Called by the simulation engine after a run; mirrors per-station
    *  observed values onto the twin for fast lens rendering. */
   setKpiObserved: (wsId: string, observed: KpiObservedAttrs | undefined) => void;
+  /** Set or clear the workstation's PML block override. Pass `null` to
+   *  drop the override and fall back to the catalog-default block kind. */
+  setBlock: (wsId: string, block: PmlBlockOverride | null) => void;
 
   // ── Scenario forking ─────────────────────────────────────────────────────
   /** Fork the canonical twin into a new scenario, optionally switching to
@@ -360,6 +368,8 @@ export const useTwin = create<TwinState>()(
           fromWsId: input.fromWsId,
           toWsId: input.toWsId,
           label: input.label,
+          fromPort: input.fromPort,
+          toPort: input.toPort,
         };
         set((s) =>
           updateActive(s, (twin) => ({
@@ -456,6 +466,21 @@ export const useTwin = create<TwinState>()(
       setKpiObserved: (wsId, observed) =>
         set((s) =>
           patchWorkstation(s, wsId, (w) => ({ ...w, kpiObserved: observed })),
+        ),
+
+      setBlock: (wsId, block) =>
+        set((s) =>
+          patchWorkstation(s, wsId, (w) => ({
+            ...w,
+            block: block
+              ? {
+                  kind: block.kind,
+                  inputs: block.inputs ? block.inputs.map((p) => ({ ...p })) : undefined,
+                  outputs: block.outputs ? block.outputs.map((p) => ({ ...p })) : undefined,
+                  params: block.params ? { ...block.params } : undefined,
+                }
+              : undefined,
+          })),
         ),
 
       // ── Scenarios ──────────────────────────────────────────────────────────
@@ -615,6 +640,7 @@ export const useTwin = create<TwinState>()(
           setResources: get().setResources,
           setKpiTargets: get().setKpiTargets,
           setKpiObserved: get().setKpiObserved,
+          setBlock: get().setBlock,
           createScenarioFromCanonical: get().createScenarioFromCanonical,
           forkScenario: get().forkScenario,
           renameScenario: get().renameScenario,

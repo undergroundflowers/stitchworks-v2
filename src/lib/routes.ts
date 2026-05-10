@@ -32,6 +32,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/kpi',       id: 'kpi',       label: 'Reports',          icon: '⌬', kind: 'special' },
   { path: '/scenarios', id: 'scenarios', label: 'Scenarios',        icon: '✦', kind: 'main' },
   { path: '/balance',   id: 'balance',   label: 'Line Balance',     icon: '⚖', kind: 'main' },
+  { path: '/assets',    id: 'assets',    label: 'Assets',           icon: '◇', kind: 'main' },
   { path: '/settings',  id: 'settings',  label: 'Settings',         icon: '⚙', kind: 'main' },
 ];
 
