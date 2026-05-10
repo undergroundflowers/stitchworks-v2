@@ -211,6 +211,14 @@ const inputBase: CSSProperties = {
   color: SW_COLORS.ink,
 };
 
+// Side-panel resize bounds. Keeps the canvas usable at minimum widths and
+// prevents either panel from eating the screen.
+const PALETTE_MIN = 220;
+const PALETTE_MAX = 520;
+const INSPECTOR_MIN = 260;
+const INSPECTOR_MAX = 560;
+const SPLITTER_W = 5;
+
 // ============================================================================
 // MAIN PAGE
 // ============================================================================
@@ -317,6 +325,44 @@ export function BuilderPage() {
   /** When true the Auto-Extract modal is open over the canvas. Reads its
    *  candidate list from the active twin's CAD underlay. */
   const [extractOpen, setExtractOpen] = useState(false);
+
+  // Side-panel widths. User drags the splitters; values persist in
+  // localStorage so the layout survives reloads.
+  const [paletteWidth, setPaletteWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem('builder.paletteW'));
+    return Number.isFinite(v) && v >= PALETTE_MIN && v <= PALETTE_MAX ? v : 280;
+  });
+  const [inspectorWidth, setInspectorWidth] = useState<number>(() => {
+    const v = Number(localStorage.getItem('builder.inspectorW'));
+    return Number.isFinite(v) && v >= INSPECTOR_MIN && v <= INSPECTOR_MAX ? v : 340;
+  });
+  useEffect(() => { localStorage.setItem('builder.paletteW', String(paletteWidth)); }, [paletteWidth]);
+  useEffect(() => { localStorage.setItem('builder.inspectorW', String(inspectorWidth)); }, [inspectorWidth]);
+
+  const startSideResize = useCallback((side: 'left' | 'right') => (e: React.MouseEvent) => {
+    e.preventDefault();
+    const startX = e.clientX;
+    const startW = side === 'left' ? paletteWidth : inspectorWidth;
+    const min = side === 'left' ? PALETTE_MIN : INSPECTOR_MIN;
+    const max = side === 'left' ? PALETTE_MAX : INSPECTOR_MAX;
+    const setter = side === 'left' ? setPaletteWidth : setInspectorWidth;
+    // Dragging right grows the left palette; dragging right shrinks the right inspector.
+    const dir = side === 'left' ? 1 : -1;
+    const onMove = (ev: MouseEvent) => {
+      const next = Math.max(min, Math.min(max, startW + (ev.clientX - startX) * dir));
+      setter(next);
+    };
+    const onUp = () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+      document.body.style.cursor = '';
+      document.body.style.userSelect = '';
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    document.body.style.cursor = 'col-resize';
+    document.body.style.userSelect = 'none';
+  }, [paletteWidth, inspectorWidth]);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
   const cadFileInputRef = useRef<HTMLInputElement | null>(null);
@@ -677,7 +723,7 @@ export function BuilderPage() {
       style={{
         height: '100%',
         display: 'grid',
-        gridTemplateColumns: '280px 1fr 340px',
+        gridTemplateColumns: `${paletteWidth}px ${SPLITTER_W}px 1fr ${SPLITTER_W}px ${inspectorWidth}px`,
         gridTemplateRows: 'auto 1fr',
         background: SW_COLORS.paperDeep,
         fontFamily: SW_FONTS.body,
@@ -686,7 +732,7 @@ export function BuilderPage() {
       {/* TOP TOOLBAR */}
       <div
         style={{
-          gridColumn: '1 / 4',
+          gridColumn: '1 / 6',
           display: 'flex',
           alignItems: 'center',
           gap: 12,
@@ -1041,7 +1087,7 @@ export function BuilderPage() {
           onClick={() => setLastRun(null)}
           title="Click to dismiss"
           style={{
-            gridColumn: '2',
+            gridColumn: '3',
             gridRow: '2',
             position: 'absolute',
             top: 56,
@@ -1092,6 +1138,21 @@ export function BuilderPage() {
         onPickWs={(catalogId) => setDrop({ kind: 'ws', catalogId })}
       />
 
+      {/* LEFT SPLITTER (palette ↔ canvas) */}
+      <div
+        onMouseDown={startSideResize('left')}
+        onDoubleClick={() => setPaletteWidth(280)}
+        title="Drag to resize · double-click to reset"
+        style={{
+          gridColumn: '2',
+          gridRow: '2',
+          cursor: 'col-resize',
+          background: 'transparent',
+          position: 'relative',
+          zIndex: 5,
+        }}
+      />
+
       {/* CANVAS */}
       <div
         ref={stageRef}
@@ -1099,7 +1160,7 @@ export function BuilderPage() {
         onClick={onCanvasClick}
         onMouseDown={onPanStart}
         style={{
-          gridColumn: '2',
+          gridColumn: '3',
           gridRow: '2',
           position: 'relative',
           overflow: 'hidden',
@@ -1400,6 +1461,21 @@ export function BuilderPage() {
           </span>
         </div>
       </div>
+
+      {/* RIGHT SPLITTER (canvas ↔ inspector) */}
+      <div
+        onMouseDown={startSideResize('right')}
+        onDoubleClick={() => setInspectorWidth(340)}
+        title="Drag to resize · double-click to reset"
+        style={{
+          gridColumn: '4',
+          gridRow: '2',
+          cursor: 'col-resize',
+          background: 'transparent',
+          position: 'relative',
+          zIndex: 5,
+        }}
+      />
 
       {/* RIGHT INSPECTOR */}
       <Inspector
@@ -3847,7 +3923,7 @@ interface InspectorProps {
 
 function Inspector(props: InspectorProps) {
   const wrapper: CSSProperties = {
-    gridColumn: '3',
+    gridColumn: '5',
     gridRow: '2',
     borderLeft: `1px solid ${SW_COLORS.line}`,
     background: SW_COLORS.paper,
