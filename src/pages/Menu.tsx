@@ -1,7 +1,6 @@
 import { useNavigate } from 'react-router-dom';
 import { Card, Button, Tag, Logo } from '../components';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { INITIAL_GAME } from '../lib/game';
+import { SW_COLORS, SW_FONTS } from '../design/tokens';
 
 /**
  * Splash / main menu — entry point of the app. Two-column layout:
@@ -13,7 +12,6 @@ import { INITIAL_GAME } from '../lib/game';
  */
 export function MenuPage() {
   const navigate = useNavigate();
-  const game = INITIAL_GAME;
 
   return (
     <div style={{

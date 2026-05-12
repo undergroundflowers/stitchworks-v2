@@ -54,11 +54,12 @@ export function applyVibe(vibeKey: keyof typeof SW_VIBES): void {
     brand: v.brand, brandDeep: v.brandDeep, brandLite: v.brandLite,
     ink: v.ink, paper: v.paper, paperDeep: v.paperDeep, paperEdge: v.paperEdge,
   });
-  SW_FONTS.display = v.display;
-  SW_RADIUS.sm = Math.round(6 * v.radiusMul);
-  SW_RADIUS.md = Math.round(10 * v.radiusMul);
-  SW_RADIUS.lg = Math.round(14 * v.radiusMul);
-  SW_RADIUS.xl = Math.round(22 * v.radiusMul);
+  (SW_FONTS as { display: string }).display = v.display;
+  const radius = SW_RADIUS as { sm: number; md: number; lg: number; xl: number };
+  radius.sm = Math.round(6 * v.radiusMul);
+  radius.md = Math.round(10 * v.radiusMul);
+  radius.lg = Math.round(14 * v.radiusMul);
+  radius.xl = Math.round(22 * v.radiusMul);
   document.documentElement.style.setProperty('--sw-sat', String(v.sat));
   document.body.style.background = v.paperDeep;
 }

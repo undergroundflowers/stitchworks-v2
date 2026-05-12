@@ -31,7 +31,7 @@
  * harness, future export).
  */
 
-import type { Twin, Workstation, Connector } from '../domain/twin';
+import type { Twin, Workstation } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
