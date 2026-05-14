@@ -360,6 +360,10 @@ interface BlockState {
   passProb: number;
   /** Batch-only: target batch size (agent count). */
   batchSize: number;
+  /** Service-only: number of parallel servers (machines) at this station.
+   *  Caps `inService` even when the dept's ResourcePool has spare units;
+   *  matches the real-world "one machine = one server" semantics. Default 1. */
+  servers: number;
 }
 
 // ============================================================================
@@ -442,6 +446,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       arrivalIntervalMin: arrivalIntervalFor(ws),
       passProb: passProbFor(ws),
       batchSize: batchSizeFor(ws),
+      servers: Math.max(1, Math.round(getBlockParams(ws).servers)),
     });
   }
 
@@ -548,6 +553,11 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function tryStartService(b: BlockState, now: number): boolean {
     if (b.kind !== 'Service') return false;
     if (b.queue.length === 0) return false;
+    // Per-station server cap: cannot exceed the configured `servers` count
+    // even when the dept's pool has spare units. Matches "one machine =
+    // one server" semantics — without this, the pool acts as a shared
+    // pool of mobile operators that float between stations.
+    if (b.inService >= b.servers) return false;
     const pool = deptPools.get(b.ws.deptId);
     if (pool) {
       if (pool.busy >= pool.capacity) return false; // no free unit

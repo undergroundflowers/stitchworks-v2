@@ -69,6 +69,7 @@ import {
   type PmlPort,
 } from '../domain/pml';
 import { importCadFile, regionToWorldRect } from '../lib/cadImport';
+import { buildReferenceFactoryTwin } from '../domain/reference-twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
 
@@ -250,6 +251,7 @@ export function BuilderPage() {
   const setCadUnderlay = useTwin((s) => s.setCadUnderlay);
   const updateCadTransform = useTwin((s) => s.updateCadTransform);
   const renameActive = useTwin((s) => s.renameActive);
+  const loadCanonical = useTwin((s) => s.loadCanonical);
   const createScenarioFromCanonical = useTwin(
     (s) => s.createScenarioFromCanonical,
   );
@@ -307,6 +309,26 @@ export function BuilderPage() {
     () => (engineMode === 'pml' ? validatePmlGraph(twin) : []),
     [engineMode, twin],
   );
+
+  // Best scenario — leader on latest-run throughput/hr, with efficiencyPct as
+  // a tiebreaker. Scenarios with no runs are ignored. Null when nothing's
+  // been simulated yet.
+  const bestScenario = useMemo(() => {
+    let winner: { id: string; name: string; throughput: number; eff: number } | null = null;
+    for (const scn of scenarios) {
+      const k = scn.runs[0]?.kpis;
+      if (!k) continue;
+      const cand = { id: scn.id, name: scn.name, throughput: k.throughputPerHr, eff: k.efficiencyPct };
+      if (
+        !winner ||
+        cand.throughput > winner.throughput ||
+        (cand.throughput === winner.throughput && cand.eff > winner.eff)
+      ) {
+        winner = cand;
+      }
+    }
+    return winner;
+  }, [scenarios]);
   const errorCount = pmlIssues.filter((i) => i.level === 'error').length;
   const warnCount = pmlIssues.filter((i) => i.level === 'warn').length;
   const infoCount = pmlIssues.filter((i) => i.level === 'info').length;
@@ -775,13 +797,46 @@ export function BuilderPage() {
             <option value="__canonical__">◆ Canonical · {canonical.name}</option>
             {scenarios.map((scn) => (
               <option key={scn.id} value={scn.id}>
-                ✦ {scn.name}
+                {bestScenario?.id === scn.id ? '★' : '✦'} {scn.name}
+                {bestScenario?.id === scn.id ? ' · BEST' : ''}
               </option>
             ))}
           </select>
           <button onClick={onForkScenario} style={btnSec} title="Fork the canonical twin into a new scenario">
             ✦ FORK
           </button>
+          {bestScenario && (
+            <button
+              onClick={() => {
+                setActiveScenario(bestScenario.id);
+                setSelected(null);
+              }}
+              title={`Leader on latest sim · ${Math.round(bestScenario.throughput).toLocaleString()} pcs/hr · ${bestScenario.eff.toFixed(1)}% eff — click to switch`}
+              style={{
+                background: activeScenarioId === bestScenario.id ? SW_COLORS.ok : SW_COLORS.paper,
+                border: `1.5px solid ${SW_COLORS.ok}`,
+                color: activeScenarioId === bestScenario.id ? '#fff' : SW_COLORS.ok,
+                padding: '5px 9px',
+                fontFamily: SW_FONTS.display,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.06em',
+                cursor: 'pointer',
+                borderRadius: 6,
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 5,
+                maxWidth: 180,
+                whiteSpace: 'nowrap',
+                overflow: 'hidden',
+              }}
+            >
+              <span>★ BEST</span>
+              <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, opacity: 0.85, overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                {bestScenario.name}
+              </span>
+            </button>
+          )}
           {activeScenarioId !== null && (
             <button
               onClick={() => {
@@ -917,6 +972,28 @@ export function BuilderPage() {
         />
         <button onClick={onExportJson} style={btnSec} title="Download the active twin as JSON">
           ⤓ EXPORT JSON
+        </button>
+        <button
+          onClick={() => {
+            const has = canonical.departments.length > 0 || canonical.workstations.length > 0;
+            if (
+              has &&
+              !window.confirm(
+                'Replace the current canonical factory with the multi-line reference factory? Existing scenarios will be cleared.',
+              )
+            ) {
+              return;
+            }
+            const next = buildReferenceFactoryTwin({ name: 'Reference Factory · All Lines' });
+            const result = loadCanonical(next);
+            if (!result.ok) {
+              window.alert(`Could not load reference factory: ${result.reason}`);
+            }
+          }}
+          style={btnSec}
+          title="Seed the canonical twin with one line per reference paper (Hossain · Elnaggar · Sime · Morshed · Kursun · Koç) stacked on the same floor."
+        >
+          📚 LOAD REF FACTORY
         </button>
 
         {/* Engine toggle — PML graph-driven DES vs. legacy operation-list sim.

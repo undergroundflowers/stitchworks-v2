@@ -52,6 +52,9 @@ export function MenuPage() {
           <Button variant="secondary" size="lg" onClick={() => navigate('/scenarios')} icon="✦">
             NEW SCENARIO
           </Button>
+          <Button variant="secondary" size="lg" onClick={() => navigate('/reference')} icon="📖">
+            REFERENCE MODELS
+          </Button>
         </div>
 
         {/* Save slots */}

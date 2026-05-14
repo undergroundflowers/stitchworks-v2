@@ -1,6 +1,7 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup } from '../components';
 import { Fragment, useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   ALL_WORKER_ARCHETYPES,
   type WorkerArchetype,
@@ -25,7 +26,14 @@ import { useProject, useGarments, type EffectiveGarments } from '../store';
  * those become live once the project file format and roster scheduler land.
  */
 export function ResourcesPage() {
-  const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster' | 'skills' | 'operations'>('operators');
+  // ?tab=operations&garment=<id> lets pages like Orders deep-link straight to
+  // the operations editor for a specific garment.
+  const [searchParams] = useSearchParams();
+  const initialTab = (searchParams.get('tab') as
+    | 'operators' | 'machines' | 'inventory' | 'roster' | 'skills' | 'operations'
+    | null) ?? 'operators';
+  const initialGarment = searchParams.get('garment') ?? undefined;
+  const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster' | 'skills' | 'operations'>(initialTab);
   const project = useProject();
   const garments = useGarments();
   const skillMatrix = project.skillMatrix;
@@ -215,7 +223,7 @@ export function ResourcesPage() {
         )}
 
         {tab==='operations' && (
-          <OperationsPanel garments={garments}/>
+          <OperationsPanel garments={garments} initialGarmentId={initialGarment}/>
         )}
 
         {tab==='skills' && (
@@ -276,6 +284,9 @@ const ALL_OPERATION_CATEGORIES: OperationCategory[] = [
 
 interface OperationsPanelProps {
   garments: EffectiveGarments;
+  /** Optional deep-link target — when set, the panel opens with this garment
+   *  pre-selected (e.g. from Orders ?garment=<id>). */
+  initialGarmentId?: string;
 }
 
 /**
@@ -284,9 +295,13 @@ interface OperationsPanelProps {
  * custom) and flow through `useGarments()` so every read site (LiveSim,
  * Yamazumi, Twin run-line, etc.) picks them up immediately.
  */
-function OperationsPanel({ garments }: OperationsPanelProps) {
+function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
   const project = useProject();
-  const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
+  const [garmentId, setGarmentId] = useState<string>(
+    initialGarmentId && garments.byId[initialGarmentId]
+      ? initialGarmentId
+      : project.selectedGarmentId,
+  );
   const garment = garments.byId[garmentId] ?? garments.all[0];
   const builtIn = GARMENT_TEMPLATES[garmentId];
   const isEdited = project.garmentEdits[garmentId] !== undefined;

@@ -9,3 +9,4 @@ export { ToggleGroup } from './ToggleGroup';
 export { Slider } from './Slider';
 export { Yamazumi, autoAssign, type OperatorAssignment } from './Yamazumi';
 export { FactoryTreePanel } from './FactoryTreePanel';
+export { ProductionSystemDiagram } from './ProductionSystemDiagram';

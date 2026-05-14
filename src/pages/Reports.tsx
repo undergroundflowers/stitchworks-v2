@@ -13,6 +13,9 @@ import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import { getBlockSpec, apparelRoleFor } from '../domain/pml';
+import { REFERENCE_MODELS } from '../domain/reference-models';
+import { compareToPaper, type ReferenceVariant } from '../domain/reference-twin';
+import { useReferenceContext } from '../store/reference';
 
 interface DonutSlice {
   v: number;
@@ -44,6 +47,13 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const setYamazumiOverride = project.setYamazumiOverride;
   const clearYamazumiOverride = project.clearYamazumiOverride;
   const [period, setPeriod] = useState<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>('SHIFT');
+
+  // Save-scenario modal state. We avoid `window.prompt()` because it's
+  // suppressed inside many embedded preview / iframe contexts, which silently
+  // killed the save flow before this — the button looked like it did nothing.
+  const [saveOpen, setSaveOpen] = useState(false);
+  const [saveName, setSaveName] = useState('');
+  const [saveNotes, setSaveNotes] = useState('');
 
   // Yamazumi state — picks from store override if present, else LPT auto.
   const [yamGarment, setYamGarment] = useState<string>(project.selectedGarmentId);
@@ -149,6 +159,73 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const pmlBottleneck = pmlBlocks.find((b) => b.bottleneck) ?? null;
   const pmlAnyObserved = pmlBlocks.length > 0;
 
+  // ── Reference paper validation ──────────────────────────────────────────
+  // When the user has loaded a published case study into the active twin,
+  // surface a paper-vs-observed comparison so they can judge how closely
+  // Stitchworks reproduces the literature.
+  const refCtx = useReferenceContext();
+  const clearRefContext = useReferenceContext((s) => s.clear);
+  const refModel = useMemo(
+    () =>
+      refCtx.slug
+        ? REFERENCE_MODELS.find((m) => m.slug === refCtx.slug) ?? null
+        : null,
+    [refCtx.slug],
+  );
+
+  // Auto-run PML once when a reference is loaded but no observed values
+  // exist yet — saves the user a click. Stays a no-op for non-reference twins.
+  useEffect(() => {
+    if (!refModel || !refCtx.variantKey) return;
+    if (pmlAnyObserved) return;
+    runPmlOnTwin(pmlTwin, { writeKpiObserved: setKpiObserved });
+    setPmlRunBump((n) => n + 1);
+  }, [refModel, refCtx.variantKey, pmlAnyObserved, pmlTwin, setKpiObserved]);
+
+  const refValidation = useMemo(() => {
+    if (!refModel || !refCtx.variantKey) return null;
+    if (!pmlAnyObserved) return null;
+    const throughputPerHr = pmlSinkThroughput;
+    const pool = pmlTwin.workstations.find(
+      (w) => w.block?.kind === 'ResourcePool',
+    );
+    const operatorsConfigured =
+      pool && pool.block && pool.block.kind === 'ResourcePool'
+        ? (pool.block.params.capacity ?? 0)
+        : 0;
+    const totalSmvMin = refModel.garmentTemplate.totalSmv;
+    const isScenario = !!refModel.scenarios?.some(
+      (s) => s.id === refCtx.variantKey,
+    );
+    const variant: ReferenceVariant =
+      refCtx.variantKey === 'proposed' ? 'proposed' : 'baseline';
+    const rows = compareToPaper({
+      model: refModel,
+      variant,
+      scenarioId: isScenario ? refCtx.variantKey : undefined,
+      observed: {
+        throughputPerHr,
+        operatorsConfigured,
+        totalSmvMin,
+        shiftMin: SHIFT_MIN,
+      },
+    });
+    const variantLabel =
+      refCtx.variantKey === 'baseline'
+        ? 'Baseline'
+        : refCtx.variantKey === 'proposed'
+          ? 'Proposed'
+          : refModel.scenarios?.find((s) => s.id === refCtx.variantKey)?.name ??
+            refCtx.variantKey;
+    return {
+      rows,
+      throughputPerHr,
+      operatorsConfigured,
+      variantLabel,
+      variantKey: refCtx.variantKey,
+    };
+  }, [refModel, refCtx.variantKey, pmlSinkThroughput, pmlAnyObserved, pmlTwin]);
+
   return (
     <div style={embedded
       ? { width:'100%', background: SW_COLORS.paperDeep, padding: 24 }
@@ -172,31 +249,9 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             <Button variant="primary" size="sm" icon="✦"
               onClick={() => {
                 const defaultName = `${yamTemplate.name} · ${yamOperators} ops · ${runs > 1 ? `${runs}× ` : ''}${new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
-                const name = prompt('Save as scenario — name?', defaultName);
-                if (!name) return;
-                project.saveScenario({
-                  name,
-                  kpis: {
-                    producedPieces: agg.producedPieces.mean,
-                    throughputPerHr: agg.throughputPerHr.mean,
-                    efficiencyPct: agg.efficiencyPct.mean,
-                    meanLeadTime: agg.meanLeadTime.mean,
-                    utilization: agg.utilization.mean,
-                    wipBundles: agg.wipBundles.mean,
-                    bottleneckOpName: agg.bottleneckOpName,
-                    bottleneckQueue: agg.bottleneckQueue,
-                    replicationCount: agg.n,
-                    std: agg.n > 1 ? {
-                      producedPieces: agg.producedPieces.std,
-                      throughputPerHr: agg.throughputPerHr.std,
-                      efficiencyPct: agg.efficiencyPct.std,
-                      meanLeadTime: agg.meanLeadTime.std,
-                      utilization: agg.utilization.std,
-                      wipBundles: agg.wipBundles.std,
-                    } : undefined,
-                  },
-                });
-                navigate('/scenarios');
+                setSaveName(defaultName);
+                setSaveNotes('');
+                setSaveOpen(true);
               }}
             >
               Save scenario
@@ -210,6 +265,111 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           </div>
         }
       />
+
+      {/* ── Reference paper validation ───────────────────────────────────
+          Visible only when the user has loaded a published case study into
+          the active twin from the Simulation tab. Side-by-side paper KPIs
+          vs. Stitchworks observed, with delta% and pass/fail badges. */}
+      {refModel && refCtx.variantKey && (
+        <Card padding={20} style={{ marginBottom: 20, borderLeft: `4px solid ${SW_COLORS.brand}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap' }}>
+            <div>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '2px', marginBottom: 4 }}>
+                📚 PAPER VALIDATION
+              </div>
+              <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: SW_COLORS.ink }}>
+                {refModel.title}
+              </div>
+              <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 4 }}>
+                {refModel.authorYear} · variant <strong style={{ color: SW_COLORS.ink }}>{refValidation?.variantLabel ?? refCtx.variantKey}</strong>
+              </div>
+            </div>
+            <div style={{ display: 'flex', gap: 8 }}>
+              <Button
+                variant="primary"
+                size="sm"
+                icon="▶"
+                onClick={() => {
+                  runPmlOnTwin(pmlTwin, { writeKpiObserved: setKpiObserved });
+                  setPmlRunBump((n) => n + 1);
+                }}
+              >
+                Re-run PML
+              </Button>
+              <Button variant="ghost" size="sm" onClick={() => { clearRefContext(); }}>
+                Clear
+              </Button>
+            </div>
+          </div>
+
+          {!refValidation ? (
+            <div style={{ padding: '14px 16px', border: `1px dashed ${SW_COLORS.line}`, borderRadius: 6, fontSize: 12, color: SW_COLORS.muted }}>
+              Running first PML pass on the loaded reference twin…
+            </div>
+          ) : (
+            <>
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 14 }}>
+                <Stat label="OPERATORS (CFG)" value={refValidation.operatorsConfigured} unit="" color={SW_COLORS.steel} />
+                <Stat label="OBSERVED" value={Math.round(refValidation.throughputPerHr * 8).toLocaleString()} unit="pcs/day" color={SW_COLORS.brand} />
+                <Stat
+                  label="PAPER THROUGHPUT"
+                  value={
+                    refValidation.rows.find((r) => r.label === 'Throughput')
+                      ? Number(refValidation.rows.find((r) => r.label === 'Throughput')!.paper).toLocaleString()
+                      : '—'
+                  }
+                  unit="pcs/day"
+                  color={SW_COLORS.fabric}
+                />
+                <Stat
+                  label="WITHIN ±10%"
+                  value={refValidation.rows.every((r) => r.withinTolerance) ? '✓ PASS' : '⚠ DRIFT'}
+                  unit=""
+                  color={refValidation.rows.every((r) => r.withinTolerance) ? SW_COLORS.ok : SW_COLORS.alarm}
+                />
+              </div>
+              <div style={{ overflowX: 'auto' }}>
+                <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.mono, fontSize: 11 }}>
+                  <thead>
+                    <tr style={{ textAlign: 'left', borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em' }}>KPI</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>PAPER</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>STITCHWORKS</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>Δ%</th>
+                      <th style={{ padding: '6px 8px', fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.08em', textAlign: 'right' }}>±10%</th>
+                    </tr>
+                  </thead>
+                  <tbody>
+                    {refValidation.rows.map((r) => {
+                      const tone = r.withinTolerance ? SW_COLORS.ok : SW_COLORS.alarm;
+                      return (
+                        <tr key={r.label} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                          <td style={{ padding: '6px 8px', color: SW_COLORS.ink, fontWeight: 700 }}>{r.label}</td>
+                          <td style={{ padding: '6px 8px', textAlign: 'right', color: SW_COLORS.ink }}>
+                            {Number(r.paper).toLocaleString()} {r.unit}
+                          </td>
+                          <td style={{ padding: '6px 8px', textAlign: 'right', fontWeight: 800, color: SW_COLORS.ink }}>
+                            {typeof r.observed === 'number' ? r.observed.toLocaleString() : r.observed} {r.unit}
+                          </td>
+                          <td style={{ padding: '6px 8px', textAlign: 'right', color: tone, fontWeight: 800 }}>
+                            {r.deltaPct >= 0 ? '+' : ''}{r.deltaPct.toFixed(1)}%
+                          </td>
+                          <td style={{ padding: '6px 8px', textAlign: 'right', color: tone, fontWeight: 800 }}>
+                            {r.withinTolerance ? '✓' : '✗'}
+                          </td>
+                        </tr>
+                      );
+                    })}
+                  </tbody>
+                </table>
+              </div>
+              <div style={{ marginTop: 8, fontSize: 11, color: SW_COLORS.muted, fontStyle: 'italic', lineHeight: 1.55 }}>
+                Stitchworks uses mean SMV per op (deterministic); the paper fitted per-op stochastic distributions. Small drift is expected.
+              </div>
+            </>
+          )}
+        </Card>
+      )}
 
       {/* ── PML simulation report ───────────────────────────────────────
           Reads observed KPIs that the Builder's PML runner wrote onto
@@ -477,6 +637,207 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         {!embedded && (
           <Button variant="dark" icon="✓" onClick={() => navigate('/builder')}>Back to builder</Button>
         )}
+      </div>
+
+      {saveOpen && (
+        <SaveScenarioModal
+          name={saveName}
+          notes={saveNotes}
+          onNameChange={setSaveName}
+          onNotesChange={setSaveNotes}
+          summary={{
+            template: yamTemplate.name,
+            operators: yamOperators,
+            runs: agg.n,
+            throughputPerHr: agg.throughputPerHr.mean,
+            efficiencyPct: agg.efficiencyPct.mean,
+          }}
+          onCancel={() => setSaveOpen(false)}
+          onConfirm={() => {
+            const trimmed = saveName.trim();
+            if (!trimmed) return;
+            project.saveScenario({
+              name: trimmed,
+              notes: saveNotes.trim() || undefined,
+              kpis: {
+                producedPieces: agg.producedPieces.mean,
+                throughputPerHr: agg.throughputPerHr.mean,
+                efficiencyPct: agg.efficiencyPct.mean,
+                meanLeadTime: agg.meanLeadTime.mean,
+                utilization: agg.utilization.mean,
+                wipBundles: agg.wipBundles.mean,
+                bottleneckOpName: agg.bottleneckOpName,
+                bottleneckQueue: agg.bottleneckQueue,
+                replicationCount: agg.n,
+                std: agg.n > 1 ? {
+                  producedPieces: agg.producedPieces.std,
+                  throughputPerHr: agg.throughputPerHr.std,
+                  efficiencyPct: agg.efficiencyPct.std,
+                  meanLeadTime: agg.meanLeadTime.std,
+                  utilization: agg.utilization.std,
+                  wipBundles: agg.wipBundles.std,
+                } : undefined,
+              },
+            });
+            setSaveOpen(false);
+            navigate('/scenarios');
+          }}
+        />
+      )}
+    </div>
+  );
+}
+
+/** Save-as-scenario dialog. Replaces the legacy `window.prompt()` call so the
+ *  flow works inside embedded preview / iframe contexts that suppress native
+ *  prompts. Lets the user edit the auto-generated name and add free-form notes
+ *  before committing. */
+interface SaveScenarioModalProps {
+  name: string;
+  notes: string;
+  summary: {
+    template: string;
+    operators: number;
+    runs: number;
+    throughputPerHr: number;
+    efficiencyPct: number;
+  };
+  onNameChange: (s: string) => void;
+  onNotesChange: (s: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function SaveScenarioModal({
+  name,
+  notes,
+  summary,
+  onNameChange,
+  onNotesChange,
+  onCancel,
+  onConfirm,
+}: SaveScenarioModalProps) {
+  const canSave = name.trim().length > 0;
+  return (
+    <div
+      role="dialog"
+      aria-label="Save scenario"
+      onClick={onCancel}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(15, 20, 25, 0.45)',
+        zIndex: 50,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(460px, 92%)',
+          background: SW_COLORS.paper,
+          borderRadius: 8,
+          border: `1px solid ${SW_COLORS.line}`,
+          boxShadow: '0 18px 50px rgba(0,0,0,0.25)',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            padding: '14px 18px',
+            borderBottom: `1px solid ${SW_COLORS.line}`,
+            display: 'flex',
+            alignItems: 'baseline',
+            gap: 10,
+          }}
+        >
+          <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, letterSpacing: '0.1em' }}>
+            ✦ SAVE SCENARIO
+          </div>
+          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>
+            {summary.template} · {summary.operators} ops · {summary.runs > 1 ? `${summary.runs}× replications` : 'single seed'}
+          </div>
+        </div>
+
+        <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '1px' }}>
+              NAME
+            </span>
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => onNameChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canSave) onConfirm();
+                if (e.key === 'Escape') onCancel();
+              }}
+              style={{
+                padding: '8px 10px',
+                border: `1px solid ${SW_COLORS.line}`,
+                borderRadius: SW_RADIUS.sm,
+                background: '#fff',
+                fontFamily: SW_FONTS.body,
+                fontSize: 13,
+                color: SW_COLORS.ink,
+              }}
+            />
+          </label>
+
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '1px' }}>
+              NOTES <span style={{ fontWeight: 500, opacity: 0.6 }}>(optional)</span>
+            </span>
+            <textarea
+              value={notes}
+              onChange={(e) => onNotesChange(e.target.value)}
+              rows={3}
+              placeholder="What did you change vs. baseline? Any caveats worth remembering."
+              style={{
+                padding: '8px 10px',
+                border: `1px solid ${SW_COLORS.line}`,
+                borderRadius: SW_RADIUS.sm,
+                background: '#fff',
+                fontFamily: SW_FONTS.body,
+                fontSize: 13,
+                color: SW_COLORS.ink,
+                resize: 'vertical',
+              }}
+            />
+          </label>
+
+          <div style={{ display: 'flex', gap: 14, fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>
+            <span><b style={{ color: SW_COLORS.ink }}>{Math.round(summary.throughputPerHr).toLocaleString()}</b> pcs/hr</span>
+            <span><b style={{ color: SW_COLORS.ink }}>{summary.efficiencyPct.toFixed(1)}%</b> efficiency</span>
+          </div>
+        </div>
+
+        <div
+          style={{
+            padding: '12px 18px',
+            borderTop: `1px solid ${SW_COLORS.line}`,
+            display: 'flex',
+            gap: 8,
+            justifyContent: 'flex-end',
+          }}
+        >
+          <Button variant="secondary" size="sm" onClick={onCancel}>
+            Cancel
+          </Button>
+          <Button
+            variant="primary"
+            size="sm"
+            icon="✦"
+            onClick={onConfirm}
+            disabled={!canSave}
+          >
+            Save scenario
+          </Button>
+        </div>
       </div>
     </div>
   );

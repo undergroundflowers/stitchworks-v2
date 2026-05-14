@@ -27,6 +27,18 @@ import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
 import { getBlockSpec, apparelRoleFor } from '../domain/pml';
 import type { Workstation } from '../domain/twin';
+import { REFERENCE_MODELS, REFERENCE_MODELS_BY_SLUG, type ReferenceModel } from '../domain/reference-models';
+import { buildReferenceTwin } from '../domain/reference-twin';
+import { useReferenceContext } from '../store/reference';
+
+/** Total operator pool count for a (paper, variant/scenario) selection.
+ *  Falls back to the baseline op count if the chosen variant key is unknown. */
+function variantOperatorCount(model: ReferenceModel, key: string): number {
+  if (key === 'baseline') return model.baseline.operators;
+  if (key === 'proposed') return model.proposed?.operators ?? model.baseline.operators;
+  const scenario = model.scenarios?.find((s) => s.id === key);
+  return scenario?.operators ?? model.baseline.operators;
+}
 
 type SimView = 'iso' | 'top' | 'heat' | 'logic' | 'pml';
 
@@ -47,7 +59,31 @@ export function LiveSimPage() {
   const [operators, setOperators] = useState<number>(project.defaultOperators);
   const [view, setView] = useState<SimView>('iso');
 
-  const garment = garments.byId[garmentId] ?? garments.all[0];
+  // ── Reference-model picker state ────────────────────────────────────────
+  // Lets the user load any published case study (paper × variant/scenario)
+  // straight into the PML view for a side-by-side comparison vs. the paper.
+  // Read first so we can fold it into the legacy SimEngine inputs below —
+  // that way the ISO/TOP/HEAT/LOGIC views also reflect the loaded reference.
+  const loadCanonical = useTwin((s) => s.loadCanonical);
+  const refCtx = useReferenceContext();
+  const setRefContext = useReferenceContext((s) => s.setContext);
+  const clearRefContext = useReferenceContext((s) => s.clear);
+
+  // When a reference is loaded, its garment bulletin + operator pool drive the
+  // legacy SimEngine too — otherwise the ISO/TOP/HEAT/LOGIC views would still
+  // show the project's default garment, which is jarring after LOAD & SIMULATE.
+  const refOverride = useMemo(() => {
+    if (!refCtx.slug || !refCtx.variantKey) return null;
+    const model = REFERENCE_MODELS_BY_SLUG[refCtx.slug];
+    if (!model) return null;
+    return {
+      garment: model.garmentTemplate,
+      operators: variantOperatorCount(model, refCtx.variantKey),
+    };
+  }, [refCtx.slug, refCtx.variantKey]);
+
+  const garment = refOverride?.garment ?? (garments.byId[garmentId] ?? garments.all[0]);
+  const effectiveOperators = refOverride?.operators ?? operators;
 
   const opEfficiency = useMemo(
     () => efficiencyFromSkillMatrix(project.skillMatrix, garment.operations),
@@ -55,11 +91,115 @@ export function LiveSimPage() {
   );
 
   const config = useMemo(
-    () => buildSimConfig({ garment, operators, opEfficiency }),
-    [garment, operators, opEfficiency],
+    () => buildSimConfig({ garment, operators: effectiveOperators, opEfficiency }),
+    [garment, effectiveOperators, opEfficiency],
   );
 
   const { state, playing, speed, setPlaying, setSpeed, reset, step } = useSim(config);
+
+  const [refSlug, setRefSlug] = useState<string>(
+    refCtx.slug ?? REFERENCE_MODELS[0].slug,
+  );
+  const [refVariantKey, setRefVariantKey] = useState<string>(
+    refCtx.variantKey ?? 'baseline',
+  );
+  const [refLoadFlash, setRefLoadFlash] = useState<string | null>(null);
+
+  const refModel: ReferenceModel = useMemo(
+    () =>
+      REFERENCE_MODELS.find((m) => m.slug === refSlug) ?? REFERENCE_MODELS[0],
+    [refSlug],
+  );
+
+  // Variant menu derived from the chosen paper.
+  const variantOptions = useMemo(() => {
+    const opts: { key: string; label: string; tag: string }[] = [
+      {
+        key: 'baseline',
+        label: `Baseline · ${refModel.baseline.operators} ops${
+          refModel.baseline.throughputPerDayPcs
+            ? ` · ${refModel.baseline.throughputPerDayPcs}/day`
+            : ''
+        }`,
+        tag: 'BASE',
+      },
+    ];
+    if (refModel.proposed) {
+      opts.push({
+        key: 'proposed',
+        label: `Proposed · ${refModel.proposed.operators} ops${
+          refModel.proposed.throughputPerDayPcs
+            ? ` · ${refModel.proposed.throughputPerDayPcs}/day`
+            : ''
+        }`,
+        tag: 'PROP',
+      });
+    }
+    if (refModel.scenarios) {
+      for (const s of refModel.scenarios) {
+        opts.push({
+          key: s.id,
+          label: `${s.id} · ${s.name} · ${s.operators} ops · ${s.throughputPerDayPcs}/day (+${s.upliftPct}%)`,
+          tag: s.id,
+        });
+      }
+    }
+    return opts;
+  }, [refModel]);
+
+  // Reset variant when paper changes if previous key is no longer valid.
+  useEffect(() => {
+    if (!variantOptions.some((o) => o.key === refVariantKey)) {
+      setRefVariantKey(variantOptions[0].key);
+    }
+  }, [variantOptions, refVariantKey]);
+
+  function handleLoadReference() {
+    const opts =
+      refVariantKey === 'baseline' || refVariantKey === 'proposed'
+        ? { variant: refVariantKey as 'baseline' | 'proposed' }
+        : { scenarioId: refVariantKey };
+    const twin = buildReferenceTwin(refModel, opts);
+    if (!twin) {
+      setRefLoadFlash('This paper has no enumerated ops — twin not built.');
+      return;
+    }
+    const r = loadCanonical(twin);
+    if (!r.ok) {
+      setRefLoadFlash(`Could not load twin: ${r.reason}`);
+      return;
+    }
+    setRefContext({ slug: refModel.slug, variantKey: refVariantKey });
+    setView('pml');
+    const variantLabel =
+      refVariantKey === 'baseline'
+        ? 'Baseline'
+        : refVariantKey === 'proposed'
+          ? 'Proposed'
+          : refVariantKey;
+    setRefLoadFlash(`Loaded · ${refModel.authorYear} · ${variantLabel}`);
+    setTimeout(() => setRefLoadFlash(null), 3000);
+  }
+
+  function handleClearReference() {
+    clearRefContext();
+    setRefLoadFlash(null);
+  }
+
+  const refLoadedLabel =
+    refCtx.slug && refCtx.variantKey
+      ? (() => {
+          const m = REFERENCE_MODELS.find((x) => x.slug === refCtx.slug);
+          if (!m) return null;
+          const vlabel =
+            refCtx.variantKey === 'baseline'
+              ? 'Baseline'
+              : refCtx.variantKey === 'proposed'
+                ? 'Proposed'
+                : refCtx.variantKey;
+          return `${m.authorYear} · ${vlabel}`;
+        })()
+      : null;
 
   const elapsedMin = Math.round(state.time);
   const hr = 8 + Math.floor(elapsedMin / 60);
@@ -79,7 +219,7 @@ export function LiveSimPage() {
         width: '100%',
         height: '100%',
         display: 'grid',
-        gridTemplateRows: 'auto 1fr auto',
+        gridTemplateRows: 'auto auto 1fr auto',
         background: SW_COLORS.ink,
         color: SW_COLORS.paper,
       }}
@@ -146,8 +286,13 @@ export function LiveSimPage() {
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: SW_FONTS.body, fontSize: 11 }}>
           <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>GARMENT</span>
           <ToggleGroup
-            value={garmentId}
-            onChange={setGarmentId}
+            value={refOverride ? '' : garmentId}
+            onChange={(id) => {
+              // Manual garment pick overrides any active reference selection,
+              // so the toggle stays authoritative.
+              if (refOverride) clearRefContext();
+              setGarmentId(id);
+            }}
             options={garments.all.map((g) => ({
               value: g.id,
               label: g.name.replace(/\s*\(.*\)/, ''),
@@ -161,8 +306,14 @@ export function LiveSimPage() {
             type="number"
             min={4}
             max={80}
-            value={operators}
-            onChange={(e) => setOperators(Math.max(4, Math.min(80, parseInt(e.target.value) || 4)))}
+            value={effectiveOperators}
+            onChange={(e) => {
+              const next = Math.max(4, Math.min(80, parseInt(e.target.value) || 4));
+              // Manual edit detaches from the active reference variant so the
+              // user can tweak operator count without snapping back.
+              if (refOverride) clearRefContext();
+              setOperators(next);
+            }}
             style={{
               width: 56,
               padding: '4px 8px',
@@ -177,6 +328,148 @@ export function LiveSimPage() {
           />
         </div>
         <div style={{ flex: 1 }} />
+      </div>
+
+      {/* REFERENCE-LINE PICKER ─────────────────────────────────────────────
+          Compact strip that lets the user materialise any published case
+          study (paper × variant/scenario) into the active twin and jump
+          straight to the PML view for replication. */}
+      <div
+        style={{
+          padding: '10px 24px',
+          borderBottom: '1px solid #ffffff15',
+          background: '#ffffff04',
+          display: 'flex',
+          alignItems: 'center',
+          gap: 12,
+          flexWrap: 'wrap',
+        }}
+      >
+        <span
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 800,
+            color: SW_COLORS.brand,
+            letterSpacing: '2px',
+          }}
+        >
+          📚 REFERENCE LINE
+        </span>
+
+        <select
+          value={refSlug}
+          onChange={(e) => setRefSlug(e.target.value)}
+          style={{
+            padding: '6px 10px',
+            border: '1px solid #ffffff25',
+            background: '#ffffff10',
+            borderRadius: SW_RADIUS.sm,
+            color: '#fff',
+            fontFamily: SW_FONTS.body,
+            fontSize: 12,
+            fontWeight: 700,
+            minWidth: 260,
+            cursor: 'pointer',
+          }}
+        >
+          {REFERENCE_MODELS.map((m) => (
+            <option key={m.slug} value={m.slug} style={{ color: '#0F1419' }}>
+              {m.authorYear} — {m.title}
+            </option>
+          ))}
+        </select>
+
+        <select
+          value={refVariantKey}
+          onChange={(e) => setRefVariantKey(e.target.value)}
+          style={{
+            padding: '6px 10px',
+            border: '1px solid #ffffff25',
+            background: '#ffffff10',
+            borderRadius: SW_RADIUS.sm,
+            color: '#fff',
+            fontFamily: SW_FONTS.body,
+            fontSize: 12,
+            fontWeight: 700,
+            minWidth: 280,
+            cursor: 'pointer',
+          }}
+        >
+          {variantOptions.map((o) => (
+            <option key={o.key} value={o.key} style={{ color: '#0F1419' }}>
+              [{o.tag}] {o.label}
+            </option>
+          ))}
+        </select>
+
+        <Button variant="primary" size="sm" icon="▶" onClick={handleLoadReference}>
+          LOAD & SIMULATE
+        </Button>
+
+        {refLoadedLabel && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '4px 10px',
+              border: `1px solid ${SW_COLORS.brand}55`,
+              background: `${SW_COLORS.brand}18`,
+              borderRadius: SW_RADIUS.sm,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 700,
+              color: SW_COLORS.brand,
+              letterSpacing: '1px',
+            }}
+          >
+            ACTIVE · {refLoadedLabel}
+            <button
+              onClick={handleClearReference}
+              title="Clear reference context"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: SW_COLORS.brand,
+                cursor: 'pointer',
+                fontSize: 14,
+                lineHeight: 1,
+                padding: 0,
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {refLoadFlash && (
+          <span
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 700,
+              color: SW_COLORS.ok,
+            }}
+          >
+            ✓ {refLoadFlash}
+          </span>
+        )}
+
+        <div style={{ flex: 1 }} />
+
+        <span
+          style={{
+            fontSize: 11,
+            color: '#ffffff80',
+            fontFamily: SW_FONTS.mono,
+            maxWidth: 280,
+            lineHeight: 1.4,
+          }}
+        >
+          Load builds Source → {refModel.garmentTemplate.operations.length} ops → Sink
+          with a {variantOptions.find((o) => o.key === refVariantKey)?.tag ?? '—'}-sized operator pool.
+        </span>
       </div>
 
       {/* SIMULATION FLOOR */}
@@ -221,15 +514,18 @@ export function LiveSimPage() {
         )}
         {view === 'pml' && <SimPmlView />}
 
-        {/* HUD stat tiles */}
-        <div style={{ position: 'absolute', left: 24, top: 24, display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
-          <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
-          <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
-          <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
-          <SimHudStat label="UTIL" value={efficiencyPct} unit="%" color={SW_COLORS.fabric} />
-        </div>
+        {/* HUD stat tiles — PML view owns its own KPI strip, so hide these there. */}
+        {view !== 'pml' && (
+          <div style={{ position: 'absolute', left: 24, top: 24, display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
+            <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
+            <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
+            <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
+            <SimHudStat label="UTIL" value={efficiencyPct} unit="%" color={SW_COLORS.fabric} />
+          </div>
+        )}
 
         {/* Right inspector */}
+        {view !== 'pml' && (
         <div
           style={{
             position: 'absolute',
@@ -324,6 +620,7 @@ export function LiveSimPage() {
             </div>
           </div>
         </div>
+        )}
       </div>
 
       {/* TRANSPORT BAR */}

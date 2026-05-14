@@ -1,0 +1,584 @@
+/**
+ * Reference-twin builder — turns a published case study (ReferenceModel)
+ * into a runnable Stitchworks Twin so the PML engine can reproduce the
+ * paper's KPIs.
+ *
+ * One ReferenceModel → two twins:
+ *   • variant 'baseline' — pool capacity = paper's baseline operator count
+ *   • variant 'proposed' — pool capacity = paper's proposed operator count
+ *
+ * Layout: a single Sewing-line department with the 21 (or N) ops laid
+ * out left-to-right in row-wrapped order. A Source feeds the first op,
+ * the last op drains into a Sink, and a ResourcePool block carries the
+ * operator capacity that all Service blocks in the dept seize against.
+ *
+ * The engine's `runPmlOnTwin(twin, …)` consumes the result unchanged —
+ * no wiring change in the Builder is needed to run a reference twin.
+ */
+
+import type { Operation } from './operations';
+import { REFERENCE_MODELS, type ReferenceModel, type ReferenceScenario } from './reference-models';
+import {
+  type Twin,
+  type Workstation,
+  type Department,
+  type Connector,
+  type TwinSchemaVersion,
+  TWIN_SCHEMA_VERSION,
+  newTwinId,
+  newDeptId,
+  newWorkstationId,
+  newConnectorId,
+  makeWorkstation,
+} from './twin';
+import { defaultPropsFor } from './iso';
+
+// ============================================================================
+// MACHINE CODE → ISO CATALOG ID
+// ============================================================================
+
+/**
+ * Map a paper's machine code (DNL, SNL, 5OL, 4OL, FB, MNL, …) onto the
+ * iso fixture catalog id Stitchworks understands. Unknown codes fall back
+ * to the single-needle lock so the line still runs — the user can pick a
+ * better fixture from the Inspector afterwards.
+ */
+function catalogForMachine(code: string): string {
+  switch (code.toUpperCase()) {
+    case 'DNL':
+    case 'DNLS': return 'a_dnls';
+    case 'SNL':
+    case 'SNLS': return 'a_snls';
+    case '5OL':  return 'a_5ol';
+    case '4OL':  return 'a_4ol';
+    case '3OL':  return 'a_3ol';
+    case 'FB':
+    case 'FOA':  return 'a_foa';
+    case 'BT':   return 'a_bartack';
+    case 'BH':   return 'a_buttonhole';
+    case 'BS':   return 'a_buttonsew';
+    case 'FL':   return 'a_flatlock';
+    case 'KS':
+    case 'KANSAI': return 'a_kansai';
+    case 'PRESS': return 'fx_press';
+    case 'INSP':  return 'fx_qctab';
+    case 'MNL':   return 'fx_table';
+    default:      return 'a_snls';
+  }
+}
+
+// ============================================================================
+// BUILD
+// ============================================================================
+
+export type ReferenceVariant = 'baseline' | 'proposed';
+
+export interface BuildReferenceTwinOpts {
+  /** Which top-level variant from the paper to build. Defaults to 'baseline'. */
+  variant?: ReferenceVariant;
+  /** Optional — when the paper has multiple what-if scenarios listed under
+   *  `model.scenarios`, pass the scenario id here to size the operator pool
+   *  to that scenario's count. Wins over `variant` when both are set. */
+  scenarioId?: string;
+  /** Override the twin name. Defaults to "<paper title> · <variant>". */
+  name?: string;
+}
+
+/** Resolve which set of paper KPIs the caller is asking for, given the
+ *  variant / scenarioId combination. Falls back gracefully when fields
+ *  are missing. */
+function resolveScenarioKpis(
+  model: ReferenceModel,
+  opts: BuildReferenceTwinOpts,
+): {
+  operators: number;
+  scenario: ReferenceScenario | null;
+  variant: ReferenceVariant;
+  label: string;
+} {
+  const variant: ReferenceVariant = opts.variant ?? 'baseline';
+  if (opts.scenarioId && model.scenarios) {
+    const s = model.scenarios.find((x) => x.id === opts.scenarioId);
+    if (s) return { operators: s.operators, scenario: s, variant, label: s.id };
+  }
+  const kpis = variant === 'proposed' && model.proposed ? model.proposed : model.baseline;
+  return {
+    operators: kpis.operators,
+    scenario: null,
+    variant,
+    label: variant === 'proposed' ? 'Proposed' : 'Baseline',
+  };
+}
+
+/**
+ * Build a Twin that reproduces one variant of a published reference model.
+ * Returns null when the model carries no operation bulletin (placeholder
+ * papers like Sime 2019 where the 54 ops are not enumerated).
+ */
+export function buildReferenceTwin(
+  model: ReferenceModel,
+  opts: BuildReferenceTwinOpts = {},
+): Twin | null {
+  const ops = model.garmentTemplate.operations;
+  if (ops.length === 0) return null;
+
+  const resolved = resolveScenarioKpis(model, opts);
+  const variant = resolved.variant;
+  const operatorCount = resolved.operators;
+  const scenario = resolved.scenario;
+  const totalSmv = model.garmentTemplate.totalSmv;
+
+  const now = new Date().toISOString();
+
+  // ── Layout grid ──────────────────────────────────────────────────────────
+  // Wrap N ops into rows of up to STATIONS_PER_ROW. Each station is 1×2
+  // (matching the sewing-machine fixture footprint) with 2-cell spacing,
+  // so a 7-station row spans ~21 cells horizontally.
+  const STATIONS_PER_ROW = 7;
+  const STATION_DX = 3;
+  const ROW_DY = 4;
+  const ORIGIN_X = 3;
+  const ORIGIN_Y = 6;
+  const rowCount = Math.ceil(ops.length / STATIONS_PER_ROW);
+
+  const gridW = Math.max(36, ORIGIN_X + STATIONS_PER_ROW * STATION_DX + 4);
+  const gridH = Math.max(28, ORIGIN_Y + rowCount * ROW_DY + 8);
+
+  // ── Departments ──────────────────────────────────────────────────────────
+  // One sewing-line department wide enough to enclose every station + the
+  // Source / Sink / Pool plumbing. A second narrow "Plumbing" lane up top
+  // hosts the lifecycle blocks so they read as scaffolding.
+  const dSew = newDeptId();
+  const dPlumb = newDeptId();
+  const departments: Department[] = [
+    {
+      id: dPlumb,
+      name: 'Plumbing',
+      kind: 'Logistics',
+      color: 'cream',
+      bounds: { x: 1, y: 1, w: gridW - 2, h: 4 },
+      notes: 'Source · Sink · operator pool. Auto-generated by the reference-twin builder.',
+    },
+    {
+      id: dSew,
+      name: `Sewing line — ${model.title}`,
+      kind: 'Sewing',
+      color: 'blue',
+      bounds: {
+        x: 1,
+        y: 5,
+        w: gridW - 2,
+        h: rowCount * ROW_DY + 4,
+      },
+      notes:
+        `${ops.length} ops · total SMV ${totalSmv.toFixed(2)} min · ` +
+        `${operatorCount} operators (${variant}).`,
+    },
+  ];
+
+  // ── Workstations ─────────────────────────────────────────────────────────
+  const workstations: Workstation[] = [];
+
+  // Source at the top-left of the plumbing strip. Pumps pieces in at a rate
+  // sized to fully load the line (1.2× the theoretical takt). Each piece is
+  // a single garment (piecesPerAgent = 1) — the Hossain paper releases a
+  // bundle of 36 every 10 min, which works out to ~216/hr; we round to a
+  // slightly higher rate so the line is never starved and the bottleneck
+  // op governs throughput.
+  const takt = totalSmv / ops.length; // min per piece if perfectly balanced
+  const sourceRatePerHr = Math.max(60, Math.round((60 / takt) * 1.5));
+  const wsSource = makeWorkstation({
+    deptId: dPlumb,
+    catalogId: 'buf_in',
+    position: { x: 2, y: 2 },
+    name: 'Source — orders in',
+  });
+  wsSource.block = {
+    kind: 'Source',
+    params: { sourceRatePerHr, piecesPerAgent: 1 },
+  };
+  wsSource.operation = {
+    ...wsSource.operation,
+    freeText: `${sourceRatePerHr} pcs/hr · seeds the line`,
+  };
+  workstations.push(wsSource);
+
+  // ResourcePool — one block whose capacity equals the paper's operator
+  // count. Every Service block in the Sewing-line dept seizes against the
+  // dept's combined pool; placing the pool in the *sewing* dept (not
+  // plumbing) is what binds it.
+  const wsPool = makeWorkstation({
+    deptId: dSew,
+    catalogId: 'op_sewer',
+    position: { x: 2, y: 2 + ROW_DY * rowCount + 2 < gridH - 2 ? ORIGIN_Y + rowCount * ROW_DY : gridH - 3 },
+    name: `Operators · ${operatorCount} units`,
+  });
+  wsPool.block = {
+    kind: 'ResourcePool',
+    params: { capacity: operatorCount },
+  };
+  workstations.push(wsPool);
+
+  // Sink at the top-right of the plumbing strip.
+  const wsSink = makeWorkstation({
+    deptId: dPlumb,
+    catalogId: 'buf_out',
+    position: { x: gridW - 4, y: 2 },
+    name: 'Sink — finished pcs',
+  });
+  wsSink.block = { kind: 'Sink' };
+  workstations.push(wsSink);
+
+  // Count of extra servers per op index (1-based). Reinforced ops listed
+  // in the scenario get +1 server each; the rest stay at 1 (single machine).
+  // Pool capacity is sized to match (one operator per server).
+  const extraServersByIdx1 = new Map<number, number>();
+  if (scenario?.reinforcedOpIndices) {
+    for (const idx1 of scenario.reinforcedOpIndices) {
+      extraServersByIdx1.set(idx1, (extraServersByIdx1.get(idx1) ?? 0) + 1);
+    }
+  }
+
+  // Per-op Service stations.
+  const opStations: Workstation[] = [];
+  ops.forEach((op: Operation, i) => {
+    const row = Math.floor(i / STATIONS_PER_ROW);
+    const col = i % STATIONS_PER_ROW;
+    // Snake rows so the sequential flow zig-zags rather than jumping
+    // back to x=ORIGIN_X at every row break — keeps connectors short.
+    const colInRow = row % 2 === 0 ? col : STATIONS_PER_ROW - 1 - col;
+    const x = ORIGIN_X + colInRow * STATION_DX;
+    const y = ORIGIN_Y + row * ROW_DY;
+
+    const catalogId = catalogForMachine(op.machineCode);
+    const stationServers = 1 + (extraServersByIdx1.get(i + 1) ?? 0);
+    const ws = makeWorkstation({
+      deptId: dSew,
+      catalogId,
+      position: { x, y },
+      name: stationServers > 1
+        ? `${i + 1}. ${op.name} (×${stationServers})`
+        : `${i + 1}. ${op.name}`,
+    });
+    ws.block = {
+      kind: 'Service',
+      params: {
+        cycleS: Math.max(1, Math.round(op.smv * 60)),
+        servers: stationServers,
+      },
+    };
+    ws.operation = {
+      ...ws.operation,
+      opId: op.id,
+      garmentId: model.garmentTemplate.id,
+      bundleSize: model.garmentTemplate.defaultBundleSize,
+      freeText: op.notes ?? `SMV ${op.smv.toFixed(3)} min`,
+    };
+    // Targets used by Reports' efficiency math.
+    ws.kpiTargets = {
+      ...ws.kpiTargets,
+      capacityPerHr: op.smv > 0 ? Math.round((60 / op.smv) * stationServers) : undefined,
+    };
+    // Author the catalog props so the Inspector shows the per-op SMV.
+    ws.props = {
+      ...defaultPropsFor(catalogId),
+      ...ws.props,
+      cycle_s: Math.round(op.smv * 60),
+      servers: stationServers,
+    };
+    workstations.push(ws);
+    opStations.push(ws);
+  });
+
+  // ── Connectors ───────────────────────────────────────────────────────────
+  // Source → Op1 → Op2 → … → OpN → Sink.
+  const connectors: Connector[] = [];
+  function link(fromWs: Workstation, toWs: Workstation): void {
+    connectors.push({
+      id: newConnectorId(),
+      kind: 'flow',
+      fromWsId: fromWs.id,
+      toWsId: toWs.id,
+    });
+  }
+  if (opStations.length > 0) {
+    link(wsSource, opStations[0]);
+    for (let i = 0; i < opStations.length - 1; i++) {
+      link(opStations[i], opStations[i + 1]);
+    }
+    link(opStations[opStations.length - 1], wsSink);
+  }
+
+  // ── Twin ─────────────────────────────────────────────────────────────────
+  const variantLabel = scenario ? `${scenario.id} (${scenario.name})` : resolved.label;
+  const name = opts.name ?? `${model.title} · ${variantLabel}`;
+  const paperKpis = scenario
+    ? {
+        operators: scenario.operators,
+        throughputPerDayPcs: scenario.throughputPerDayPcs as number | undefined,
+        lineEfficiencyPct: undefined as number | undefined,
+      }
+    : variant === 'proposed' && model.proposed
+      ? model.proposed
+      : model.baseline;
+  const twin: Twin = {
+    schemaVersion: TWIN_SCHEMA_VERSION as TwinSchemaVersion,
+    id: newTwinId(),
+    name,
+    parentTwinId: null,
+    isCanonical: true,
+    createdAt: now,
+    modifiedAt: now,
+    gridW,
+    gridH,
+    departments,
+    workstations,
+    connectors,
+    cadUnderlay: null,
+    notes:
+      `Auto-built from ${model.authorYear}. ${model.citation}\n\n` +
+      `Variant: ${variantLabel}. ` +
+      `Paper KPIs — operators ${paperKpis.operators}` +
+      (paperKpis.throughputPerDayPcs ? ` · ${paperKpis.throughputPerDayPcs} pcs/day` : '') +
+      (paperKpis.lineEfficiencyPct ? ` · line eff ${paperKpis.lineEfficiencyPct.toFixed(2)} %` : '') +
+      (scenario?.reinforcedOpIndices?.length
+        ? `\nReinforced ops (per paper): ${scenario.reinforcedOpIndices.join(', ')}.`
+        : '') +
+      '.',
+  };
+
+  return twin;
+}
+
+// ============================================================================
+// MULTI-LINE FACTORY (one Twin · one line per reference paper)
+// ============================================================================
+
+/**
+ * Build a single Twin that contains one production line per reference paper
+ * with an enumerated operation bulletin. Each paper's `buildReferenceTwin`
+ * output is stacked vertically inside the same factory grid, with a band of
+ * empty cells between lines so departments don't visually collide.
+ *
+ * Use this to seed a "showcase factory" that lets the user visualise every
+ * reproducible reference layout side-by-side on the Factory Builder canvas.
+ *
+ * Papers without an enumerated bulletin (e.g. Sime 2019 — Ladies' Tunic,
+ * which the source paper reports only as aggregate figures) are surfaced as
+ * a placeholder Logistics department so the user knows the line exists in
+ * the literature but is not yet wired.
+ */
+export interface BuildReferenceFactoryOpts {
+  /** Override the twin name. */
+  name?: string;
+  /** Vertical gap (in cells) between adjacent lines. */
+  gap?: number;
+  /** Variant to build per model. Defaults to 'baseline' across the board. */
+  variant?: ReferenceVariant;
+}
+
+export function buildReferenceFactoryTwin(
+  opts: BuildReferenceFactoryOpts = {},
+): Twin {
+  const variant = opts.variant ?? 'baseline';
+  const gap = opts.gap ?? 3;
+  const now = new Date().toISOString();
+
+  const allDepartments: Department[] = [];
+  const allWorkstations: Workstation[] = [];
+  const allConnectors: Connector[] = [];
+  let cursorY = 1;
+  let maxW = 0;
+
+  for (const model of REFERENCE_MODELS) {
+    const ops = model.garmentTemplate.operations;
+
+    if (ops.length === 0) {
+      // Paper has no enumerated bulletin — surface as a placeholder dept so
+      // the line is visible on the floor even though it isn't wired yet.
+      const placeholderH = 6;
+      const placeholderW = 36;
+      const dPlaceholder = newDeptId();
+      allDepartments.push({
+        id: dPlaceholder,
+        name: `${model.title} — ${model.authorYear}`,
+        kind: 'Logistics',
+        color: 'cream',
+        bounds: { x: 1, y: cursorY, w: placeholderW - 2, h: placeholderH },
+        notes:
+          `${model.authorYear} — bulletin not enumerated in the source paper. ` +
+          `Aggregate KPIs only (operators ${model.baseline.operators}` +
+          (model.baseline.throughputPerDayPcs
+            ? ` · ${model.baseline.throughputPerDayPcs} pcs/day`
+            : '') +
+          ').',
+      });
+      cursorY += placeholderH + gap;
+      maxW = Math.max(maxW, placeholderW);
+      continue;
+    }
+
+    const lineTwin = buildReferenceTwin(model, { variant });
+    if (!lineTwin) continue;
+
+    // Re-key the line into the factory frame: stamp each dept with a
+    // paper-qualified name and shift every dept / workstation by `cursorY`.
+    const paperTag = model.authorYear;
+    const linePrefix = paperTag.split(/\s+\d/)[0]; // "Kursun & Kalaoglu"
+
+    for (const dept of lineTwin.departments) {
+      allDepartments.push({
+        ...dept,
+        // Keep ids — buildReferenceTwin already generated fresh ones per call.
+        name:
+          dept.kind === 'Sewing'
+            ? `${linePrefix} — ${model.garmentTemplate.name}`
+            : `${linePrefix} · ${dept.name}`,
+        bounds: { ...dept.bounds, y: dept.bounds.y + cursorY - 1 },
+      });
+    }
+
+    for (const ws of lineTwin.workstations) {
+      allWorkstations.push({
+        ...ws,
+        position: { x: ws.position.x, y: ws.position.y + cursorY - 1 },
+      });
+    }
+
+    for (const conn of lineTwin.connectors) {
+      allConnectors.push({ ...conn });
+    }
+
+    cursorY += lineTwin.gridH + gap;
+    maxW = Math.max(maxW, lineTwin.gridW);
+  }
+
+  const gridW = Math.max(40, maxW + 2);
+  const gridH = Math.max(40, cursorY + 2);
+
+  return {
+    schemaVersion: TWIN_SCHEMA_VERSION as TwinSchemaVersion,
+    id: newTwinId(),
+    name: opts.name ?? 'Reference Factory — All Lines',
+    parentTwinId: null,
+    isCanonical: true,
+    createdAt: now,
+    modifiedAt: now,
+    gridW,
+    gridH,
+    departments: allDepartments,
+    workstations: allWorkstations,
+    connectors: allConnectors,
+    cadUnderlay: null,
+    notes:
+      'Multi-line showcase factory · auto-built from every reference paper ' +
+      'with an enumerated operation bulletin. Each line carries its own ' +
+      'Source → ops → Sink pipeline and operator pool sized to the paper.',
+  };
+}
+
+// ============================================================================
+// VALIDATION HELPER
+// ============================================================================
+
+/**
+ * Compare a sim result's headline KPIs against the paper's reported KPIs.
+ * Used by the Reference Models page's "Validate" card after the user has
+ * run the sim on the loaded reference twin.
+ *
+ * Returns one row per KPI the paper reported. `withinTolerance` is true
+ * when the observed value lands within the supplied ± fraction of the
+ * paper figure (default ±10 %).
+ */
+export interface ValidationRow {
+  label: string;
+  paper: number;
+  observed: number;
+  unit: string;
+  deltaPct: number;
+  withinTolerance: boolean;
+}
+
+export function compareToPaper(input: {
+  model: ReferenceModel;
+  variant: ReferenceVariant;
+  /** Optional — when set, compare against this scenario's KPIs instead of
+   *  the variant's baseline/proposed block. */
+  scenarioId?: string;
+  observed: {
+    throughputPerHr: number;
+    operatorsConfigured: number;
+    totalSmvMin: number;
+    shiftMin: number;
+  };
+  tolerancePct?: number;
+}): ValidationRow[] {
+  const { model, variant, observed } = input;
+  const tol = (input.tolerancePct ?? 10) / 100;
+  const scenario =
+    input.scenarioId && model.scenarios
+      ? model.scenarios.find((s) => s.id === input.scenarioId) ?? null
+      : null;
+  const paperKpis = scenario
+    ? {
+        operators: scenario.operators,
+        throughputPerDayPcs: scenario.throughputPerDayPcs,
+        lineEfficiencyPct: undefined as number | undefined,
+      }
+    : variant === 'proposed' && model.proposed
+      ? model.proposed
+      : model.baseline;
+
+  const rows: ValidationRow[] = [];
+
+  // Operators — exact, by construction.
+  rows.push({
+    label: 'Operators',
+    paper: paperKpis.operators,
+    observed: observed.operatorsConfigured,
+    unit: '',
+    deltaPct: pctDelta(paperKpis.operators, observed.operatorsConfigured),
+    withinTolerance: paperKpis.operators === observed.operatorsConfigured,
+  });
+
+  // Throughput / day — derive from per-hour observed (× 8).
+  if (paperKpis.throughputPerDayPcs) {
+    const observedPerDay = observed.throughputPerHr * 8;
+    const delta = pctDelta(paperKpis.throughputPerDayPcs, observedPerDay);
+    rows.push({
+      label: 'Throughput',
+      paper: paperKpis.throughputPerDayPcs,
+      observed: Math.round(observedPerDay),
+      unit: 'pcs/day',
+      deltaPct: delta,
+      withinTolerance: Math.abs(delta) <= tol * 100,
+    });
+  }
+
+  // Line efficiency — recompute observed from throughput × SMV.
+  if (paperKpis.lineEfficiencyPct) {
+    const observedOutputPerShift = observed.throughputPerHr * (observed.shiftMin / 60);
+    const observedLineEff =
+      observed.operatorsConfigured > 0
+        ? ((observedOutputPerShift * observed.totalSmvMin) /
+            (observed.operatorsConfigured * observed.shiftMin)) *
+          100
+        : 0;
+    const delta = pctDelta(paperKpis.lineEfficiencyPct, observedLineEff);
+    rows.push({
+      label: 'Line efficiency',
+      paper: paperKpis.lineEfficiencyPct,
+      observed: Math.round(observedLineEff * 100) / 100,
+      unit: '%',
+      deltaPct: delta,
+      withinTolerance: Math.abs(delta) <= tol * 100,
+    });
+  }
+
+  return rows;
+}
+
+function pctDelta(paper: number, observed: number): number {
+  if (paper === 0) return 0;
+  return ((observed - paper) / paper) * 100;
+}
