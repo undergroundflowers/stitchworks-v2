@@ -1,9 +1,12 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
-import { Card, Button, SectionHeader, ToggleGroup, Slider } from '../components';
+import { Card, Button, SectionHeader, ToggleGroup, Slider, HudSelect, Tag, TimeChip } from '../components';
 import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, downloadProjectJson, pickProjectFile } from '../store';
 import { ALL_GARMENT_TEMPLATES } from '../domain';
+import { formatDate } from '../lib/format';
+import type { UnitsPrefs } from '../store/project';
+import { fmtMinutesAsHHMM, parseHHMM, type ModelTimeUnit } from '../simulation/timeUnit';
 
 export function SettingsPage() {
   const navigate = useNavigate();
@@ -17,13 +20,22 @@ export function SettingsPage() {
   const [effVariance, setEffVariance] = useState(15);
   const [breakdowns, setBreakdowns] = useState(2);
 
+  const [gamification, setGamification] = useState([
+    { k: 'XP & badges',       desc: 'Earn XP, unlock badges', on: true },
+    { k: 'Difficulty events', desc: 'Random crises (sickness, breakdowns, rush orders)', on: true },
+    { k: 'Tutorial hints',    desc: 'Show contextual tips', on: false },
+    { k: 'Sound effects',     desc: 'Sewing machines, alerts, chime', on: false },
+  ]);
+  const toggleGamification = (i: number) =>
+    setGamification((prev) => prev.map((p, idx) => (idx === i ? { ...p, on: !p.on } : p)));
+
   return (
     <div style={{ width: '100%', height: '100%', overflow: 'auto', padding: 32, background: SW_COLORS.paperDeep }}>
       <div style={{ maxWidth: 760, margin: '0 auto' }}>
         <SectionHeader
           kicker="Settings"
           title="Factory & project configuration"
-          sub={`Last modified ${new Date(project.meta.modifiedAt).toLocaleString()} · Schema v${project.schemaVersion}`}
+          sub={`Last modified ${formatDate(project.meta.modifiedAt, project.units.dateFormat)} · Schema v${project.schemaVersion}`}
         />
 
         <Card padding={22} style={{ marginBottom: 14 }}>
@@ -45,20 +57,13 @@ export function SettingsPage() {
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 12 }}>
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Default garment</div>
-              <select
+              <HudSelect
                 value={project.selectedGarmentId}
-                onChange={(e) => project.setSelectedGarment(e.target.value)}
-                style={{
-                  width: '100%', padding: '8px 10px',
-                  borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`,
-                  fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 600,
-                  background: SW_COLORS.paper,
-                }}
-              >
-                {ALL_GARMENT_TEMPLATES.map((g) => (
-                  <option key={g.id} value={g.id}>{g.name}</option>
-                ))}
-              </select>
+                onChange={(v) => project.setSelectedGarment(v)}
+                variant="light"
+                width="100%"
+                options={ALL_GARMENT_TEMPLATES.map((g) => ({ value: g.id, label: g.name }))}
+              />
             </div>
             <div>
               <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Default operators</div>
@@ -135,35 +140,196 @@ export function SettingsPage() {
           </div>
         </Card>
 
+        {/*
+          TIME — the three kinds of time a simulation must distinguish.
+          Per Big Book of Simulation Modelling (AnyLogic, Ch. 16): model
+          time is virtual sim clock; calendar time is its real-date
+          projection; wall time is the user's device clock. Each section
+          below labels whether it affects engine behaviour or display only.
+        */}
+        <Card padding={22} style={{ marginBottom: 14 }}>
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 12 }}>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>TIME</div>
+            <div style={{ display: 'flex', gap: 6 }}>
+              <TimeChip kind="MODEL" />
+              <TimeChip kind="CAL" />
+              <TimeChip kind="WALL" />
+            </div>
+          </div>
+
+          {/* ── Section A: model semantics (affects the engine) ─────────── */}
+          <div style={{ marginBottom: 6 }}>
+            <Tag soft color={SW_COLORS.brand}>AFFECTS SIMULATION</Tag>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Model time unit</div>
+              <ToggleGroup
+                value={project.time.modelTimeUnit}
+                onChange={(v) => project.setTime('modelTimeUnit', v as ModelTimeUnit)}
+                options={[
+                  { value: 'second', label: 'Second' },
+                  { value: 'minute', label: 'Minute' },
+                  { value: 'hour',   label: 'Hour' },
+                  { value: 'day',    label: 'Day' },
+                ]}
+              />
+              <div style={{ fontSize: 11, color: SW_COLORS.muted, marginTop: 4 }}>
+                What one tick of <code style={{ fontFamily: SW_FONTS.mono }}>t</code> means everywhere in the UI.
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Shift duration</div>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                <input
+                  type="number" min={30} max={1440} step={30}
+                  value={project.time.shiftDurationMin}
+                  onChange={(e) => project.setTime('shiftDurationMin', Math.max(30, Math.min(1440, parseInt(e.target.value) || 480)))}
+                  style={{
+                    width: 88, padding: '8px 10px',
+                    borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`,
+                    fontFamily: SW_FONTS.mono, fontSize: 13, fontWeight: 700,
+                  }}
+                />
+                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>min</span>
+                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>
+                  = {(project.time.shiftDurationMin / 60).toFixed(1)} h
+                </span>
+              </div>
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: SW_COLORS.line, margin: '16px 0' }} />
+
+          {/* ── Section B: calendar anchoring (display only) ────────────── */}
+          <div style={{ marginBottom: 6 }}>
+            <Tag soft color={SW_COLORS.bobbin}>AFFECTS DISPLAY</Tag>
+          </div>
+          <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14 }}>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Simulation start date</div>
+              <input
+                type="date"
+                value={project.time.startDate.slice(0, 10)}
+                onChange={(e) => {
+                  const day = e.target.value;
+                  if (!day) return;
+                  // Preserve the time-of-day portion of the existing startDate.
+                  const existing = new Date(project.time.startDate);
+                  const next = new Date(day);
+                  if (!Number.isNaN(existing.getTime())) {
+                    next.setHours(existing.getHours(), existing.getMinutes(), 0, 0);
+                  }
+                  project.setTime('startDate', next.toISOString());
+                }}
+                style={{
+                  width: '100%', padding: '8px 10px',
+                  borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`,
+                  fontFamily: SW_FONTS.mono, fontSize: 13, fontWeight: 700,
+                }}
+              />
+              <div style={{ fontSize: 11, color: SW_COLORS.muted, marginTop: 4 }}>
+                Maps <code style={{ fontFamily: SW_FONTS.mono }}>t = 0</code> to this calendar date.
+              </div>
+            </div>
+            <div>
+              <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Shift start time-of-day</div>
+              <input
+                type="time"
+                value={fmtMinutesAsHHMM(project.time.shiftStartMinuteOfDay)}
+                onChange={(e) => project.setTime('shiftStartMinuteOfDay', parseHHMM(e.target.value))}
+                style={{
+                  width: '100%', padding: '8px 10px',
+                  borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`,
+                  fontFamily: SW_FONTS.mono, fontSize: 13, fontWeight: 700,
+                }}
+              />
+            </div>
+          </div>
+
+          <div style={{ height: 1, background: SW_COLORS.line, margin: '16px 0' }} />
+
+          {/* ── Section C: execution pacing (affects the engine) ────────── */}
+          <div style={{ marginBottom: 6 }}>
+            <Tag soft color={SW_COLORS.brand}>AFFECTS SIMULATION</Tag>
+          </div>
+          <div>
+            <div style={{ fontSize: 13, fontWeight: 700, marginBottom: 4 }}>Execution mode</div>
+            <ToggleGroup
+              value={project.time.executionMode}
+              onChange={(v) => project.setTime('executionMode', v as 'virtual' | 'realtime')}
+              options={[
+                { value: 'realtime', label: 'Real-time (paced)' },
+                { value: 'virtual',  label: 'Virtual (as fast as possible)' },
+              ]}
+            />
+          </div>
+
+          {project.time.executionMode === 'realtime' && (
+            <div style={{ marginTop: 14 }}>
+              <Slider
+                label="Real-time scale"
+                value={project.time.realTimeScale}
+                min={1} max={480} step={1}
+                format={(v) => `${v}× — ${v} model-${project.time.modelTimeUnit} / real-sec`}
+                onChange={(v) => project.setTime('realTimeScale', v)}
+              />
+              <div style={{ display: 'flex', gap: 6, marginTop: 8, flexWrap: 'wrap' }}>
+                {[
+                  { v: 1,   l: 'Real-time (1×)' },
+                  { v: 10,  l: '10×' },
+                  { v: 60,  l: 'Fast (1 hr/s)' },
+                  { v: 480, l: 'Very fast (shift/s)' },
+                ].map((p) => (
+                  <Button
+                    key={p.v}
+                    variant="secondary"
+                    onClick={() => project.setTime('realTimeScale', p.v)}
+                  >
+                    {p.l}
+                  </Button>
+                ))}
+              </div>
+            </div>
+          )}
+        </Card>
+
         <Card padding={22} style={{ marginBottom: 14 }}>
           <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, marginBottom: 14 }}>UNITS & FORMAT</div>
-          {[
-            { k: 'Length',      opts: ['Meters', 'Yards'], v: 'Meters' },
-            { k: 'Currency',    opts: ['USD', 'EUR', 'INR', 'BDT'], v: 'USD' },
-            { k: 'SAM display', opts: ['Minutes', 'Seconds'], v: 'Minutes' },
-            { k: 'Date format', opts: ['DD/MM', 'MM/DD', 'YYYY-MM-DD'], v: 'YYYY-MM-DD' },
-          ].map((r) => (
+          {([
+            { k: 'Length',      field: 'length',      opts: ['Meters', 'Yards'] },
+            { k: 'Currency',    field: 'currency',    opts: ['USD', 'EUR', 'INR', 'BDT'] },
+            { k: 'SAM display', field: 'samDisplay',  opts: ['Minutes', 'Seconds'] },
+            { k: 'Date format', field: 'dateFormat',  opts: ['DD/MM', 'MM/DD', 'YYYY-MM-DD'] },
+          ] as const).map((r) => (
             <div key={r.k} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '10px 0', borderTop: r.k !== 'Length' ? `1px solid ${SW_COLORS.line}` : 'none' }}>
               <div style={{ flex: 1, fontSize: 13, fontWeight: 700 }}>{r.k}</div>
-              <ToggleGroup value={r.v} onChange={() => { /* presentational */ }} options={r.opts.map((o) => ({ value: o, label: o }))} />
+              <ToggleGroup
+                value={project.units[r.field]}
+                onChange={(v) => project.setUnit(r.field, v as UnitsPrefs[typeof r.field])}
+                options={r.opts.map((o) => ({ value: o, label: o }))}
+              />
             </div>
           ))}
         </Card>
 
         <Card padding={22}>
           <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, marginBottom: 14 }}>GAMIFICATION</div>
-          {[
-            { k: 'XP & badges',     desc: 'Earn XP, unlock badges', on: true },
-            { k: 'Difficulty events', desc: 'Random crises (sickness, breakdowns, rush orders)', on: true },
-            { k: 'Tutorial hints',  desc: 'Show contextual tips', on: false },
-            { k: 'Sound effects',   desc: 'Sewing machines, alerts, chime', on: false },
-          ].map((r, i) => (
+          {gamification.map((r, i) => (
             <div key={r.k} style={{ display: 'flex', alignItems: 'center', gap: 14, padding: '10px 0', borderTop: i ? `1px solid ${SW_COLORS.line}` : 'none' }}>
               <div style={{ flex: 1 }}>
                 <div style={{ fontSize: 13, fontWeight: 700 }}>{r.k}</div>
                 <div style={{ fontSize: 11, color: SW_COLORS.muted }}>{r.desc}</div>
               </div>
-              <div style={{ width: 42, height: 24, background: r.on ? SW_COLORS.brand : SW_COLORS.paperEdge, borderRadius: 24, position: 'relative', cursor: 'pointer' }}>
+              <div
+                role="switch"
+                aria-checked={r.on}
+                aria-label={r.k}
+                tabIndex={0}
+                onClick={() => toggleGamification(i)}
+                onKeyDown={(e) => { if (e.key === ' ' || e.key === 'Enter') { e.preventDefault(); toggleGamification(i); } }}
+                style={{ width: 42, height: 24, background: r.on ? SW_COLORS.brand : SW_COLORS.paperEdge, borderRadius: 24, position: 'relative', cursor: 'pointer', transition: 'background 120ms' }}
+              >
                 <div style={{ position: 'absolute', top: 2, left: r.on ? 20 : 2, width: 20, height: 20, background: '#fff', borderRadius: '50%', transition: 'left 100ms', boxShadow: SW_SHADOWS.card }} />
               </div>
             </div>

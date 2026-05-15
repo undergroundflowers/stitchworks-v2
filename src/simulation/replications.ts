@@ -67,6 +67,13 @@ export function runReplications(opts: {
       firstHistory = snap.history;
       firstStations = snap.stations;
     }
+    // Efficiency = SAM consumed / available operator minutes.
+    // ASSUMES: (a) SMV is per-piece (engine now enforces this in
+    // beginService, where bundle.pieces × per-piece SMV gives bundle
+    // service time), and (b) every piece traverses every operation
+    // exactly once — i.e. linear bulletin, no parallel paths or skips.
+    // If routing branches are added later, switch to a per-station sum:
+    //   samConsumed = Σ_station (produced_station × station.smv)
     const samConsumed = snap.producedPieces *
       config.operations.reduce((s, o) => s + o.smv, 0);
     const operators = config.stationServers.reduce((s, c) => s + c, 0);

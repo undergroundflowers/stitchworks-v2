@@ -17,10 +17,26 @@
  * /builder, KPIs live in /kpi.
  */
 
-import { useEffect, useMemo, useRef, useState, type ReactNode } from 'react';
+import {
+  useEffect,
+  useLayoutEffect,
+  useMemo,
+  useRef,
+  useState,
+  type MutableRefObject,
+  type ReactNode,
+} from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { useTwin, selectActiveTwin, type DepartmentColorKey } from '../store/twin';
+import { useProject } from '../store';
+import { TimeDisplay } from '../components';
+import {
+  fmtModelTime,
+  fmtCalendar,
+  fmtWallClock,
+  simDayNumber,
+} from '../simulation/timeUnit';
 import {
   ISO_FIXTURE_CATALOG,
   isoProj,
@@ -70,8 +86,13 @@ function utilColor(util: number): string {
 export function LiveFloorPage() {
   const navigate = useNavigate();
   const twin = useTwin(selectActiveTwin);
+  const projectTime = useProject((s) => s.time);
+  const dateFormat = useProject((s) => s.units.dateFormat);
   const [view, setView] = useState<FloorView>('iso');
   const [playing, setPlaying] = useState(true);
+  /** Synthetic preview clock — accumulates real seconds since the page
+   *  opened. LiveFloor is a visualisation preview, not a real DES run,
+   *  so this stands in as the "model time" axis for the animation. */
   const [t, setT] = useState(0);
   const [zoom, setZoom] = useState(1);
   const [pan, setPan] = useState({ x: 0, y: 0 });
@@ -85,6 +106,24 @@ export function LiveFloorPage() {
     moved: boolean;
   } | null>(null);
   const justDraggedRef = useRef(false);
+  // Live drag pipeline — mutates the IsoView `<g>` transform attribute
+  // directly during pointer moves so we don't pay a 130-station React re-render
+  // per frame. Final pan is committed to state on pointerup.
+  const isoGroupRef = useRef<SVGGElement | null>(null);
+  const livePanRef = useRef({ x: 0, y: 0 });
+  const rafPanRef = useRef<number | null>(null);
+  useEffect(() => {
+    livePanRef.current = pan;
+  }, [pan]);
+  const writeLiveTransform = () => {
+    rafPanRef.current = null;
+    const g = isoGroupRef.current;
+    if (!g) return;
+    g.setAttribute(
+      'transform',
+      `translate(${livePanRef.current.x}, ${livePanRef.current.y}) scale(${zoom})`,
+    );
+  };
 
   // Animation tick
   useEffect(() => {
@@ -132,9 +171,20 @@ export function LiveFloorPage() {
     return set;
   }, [events]);
 
-  const elapsed = Math.floor(t);
-  const hr = 8 + Math.floor(elapsed / 60);
-  const mn = (elapsed % 60).toString().padStart(2, '0');
+  // Three labelled clocks. Preview `t` is treated as model time in the
+  // project's chosen unit; calendar projects via the start-date anchor.
+  const unit = projectTime.modelTimeUnit;
+  const previewModelT = t; // animation ticks model-time-units directly
+  const dayN = simDayNumber(previewModelT, unit, projectTime.shiftDurationMin);
+  const modelStr = fmtModelTime(previewModelT, unit);
+  const calStr = fmtCalendar(previewModelT, unit, projectTime.startDate, dateFormat);
+
+  const [wallNow, setWallNow] = useState(() => new Date());
+  useEffect(() => {
+    const id = window.setInterval(() => setWallNow(new Date()), 1000);
+    return () => window.clearInterval(id);
+  }, []);
+  const wallStr = fmtWallClock(wallNow);
 
   const empty = twin.departments.length === 0;
 
@@ -145,8 +195,8 @@ export function LiveFloorPage() {
         height: '100%',
         display: 'grid',
         gridTemplateRows: 'auto 1fr auto',
-        background: SW_COLORS.ink,
-        color: SW_COLORS.paper,
+        background: SW_COLORS.paper,
+        color: SW_COLORS.ink,
         fontFamily: SW_FONTS.body,
       }}
     >
@@ -157,8 +207,7 @@ export function LiveFloorPage() {
           display: 'flex',
           alignItems: 'center',
           gap: 14,
-          borderBottom: '1px solid #ffffff15',
-          background: '#0a0d12',
+          background: 'transparent',
           flexWrap: 'wrap',
         }}
       >
@@ -177,22 +226,34 @@ export function LiveFloorPage() {
             {playing ? 'RUNNING' : 'PAUSED'}
           </span>
         </div>
-        <div style={{ width: 1, height: 22, background: '#ffffff20' }} />
-        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 22, fontWeight: 700, color: '#fff' }}>
-          {hr.toString().padStart(2, '0')}:{mn}
+        <div style={{ width: 1, height: 22, background: '#0F141925' }} />
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
+          <TimeDisplay
+            kind="MODEL"
+            primarySize={16}
+            primary={modelStr}
+            secondary={`day ${dayN}`}
+            compact
+          />
+          <TimeDisplay
+            kind="CAL"
+            primarySize={11}
+            primary={calStr}
+            compact
+          />
         </div>
-        <div style={{ fontSize: 10, color: '#ffffff80', fontFamily: SW_FONTS.mono }}>SHIFT A · DAY 14</div>
-        <div style={{ width: 1, height: 22, background: '#ffffff20' }} />
+        <TimeDisplay kind="WALL" primarySize={11} primary={wallStr} compact />
+        <div style={{ width: 1, height: 22, background: '#0F141925' }} />
 
         {/* View toggle */}
-        <div style={{ display: 'flex', gap: 2, background: '#ffffff08', padding: 2, borderRadius: 6 }}>
+        <div style={{ display: 'flex', gap: 2, background: '#0F141910', padding: 2, borderRadius: 6 }}>
           {(['iso', 'top', 'heat', 'logic'] as const).map((v) => (
             <button
               key={v}
               onClick={() => setView(v)}
               style={{
                 background: view === v ? SW_COLORS.brand : 'transparent',
-                color: view === v ? '#fff' : '#ffffffaa',
+                color: view === v ? '#fff' : '#0F141999',
                 border: 'none',
                 cursor: 'pointer',
                 padding: '6px 14px',
@@ -211,25 +272,14 @@ export function LiveFloorPage() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Twin badge */}
-        <div
-          style={{
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            fontWeight: 700,
-            color: '#ffffff80',
-            letterSpacing: '1.5px',
-          }}
-        >
-          TWIN · {twin.name.toUpperCase()} · {twin.departments.length}D · {twin.workstations.length}W
-        </div>
+        <TwinPicker activeTwin={twin} />
 
         <button
           onClick={() => navigate('/builder')}
           style={{
-            background: '#ffffff10',
-            border: '1px solid #ffffff30',
-            color: '#fff',
+            background: '#0F141910',
+            border: '1px solid #0F141930',
+            color: SW_COLORS.ink,
             padding: '6px 12px',
             fontFamily: SW_FONTS.display,
             fontSize: 10,
@@ -257,13 +307,31 @@ export function LiveFloorPage() {
           style={{
             position: 'relative',
             overflow: 'hidden',
-            background: '#0b2a4a',
+            background: 'transparent',
             cursor: panning ? 'grabbing' : 'grab',
             touchAction: 'none',
           }}
           onWheel={(e) => {
             e.preventDefault();
-            setZoom((z) => Math.max(0.4, Math.min(2.5, z * (e.deltaY < 0 ? 1.08 : 0.93))));
+            // Pinch zoom: trackpad pinch reports ctrlKey; Cmd-wheel for power users.
+            // Mouse wheel (deltaMode != 0, or large discrete deltaY with no deltaX)
+            // still zooms so wheel users aren't stuck with pan-only.
+            const isPinch = e.ctrlKey || e.metaKey;
+            const isMouseWheel = e.deltaMode !== 0 || (e.deltaX === 0 && Math.abs(e.deltaY) >= 50);
+            if (isPinch || isMouseWheel) {
+              setZoom((z) => Math.max(0.4, Math.min(2.5, z * (e.deltaY < 0 ? 1.08 : 0.93))));
+              return;
+            }
+            // Two-finger trackpad swipe → pan. Route through the live-transform
+            // pipeline so we don't re-render 130 stations on every wheel tick.
+            livePanRef.current = {
+              x: livePanRef.current.x - e.deltaX,
+              y: livePanRef.current.y - e.deltaY,
+            };
+            if (rafPanRef.current == null) {
+              rafPanRef.current = requestAnimationFrame(writeLiveTransform);
+            }
+            setPan({ ...livePanRef.current });
           }}
           onPointerDown={(e) => {
             if (e.button !== 0 && e.button !== 1) return;
@@ -286,7 +354,10 @@ export function LiveFloorPage() {
               d.moved = true;
               setPanning(true);
             }
-            setPan({ x: d.panX + dx, y: d.panY + dy });
+            livePanRef.current = { x: d.panX + dx, y: d.panY + dy };
+            if (rafPanRef.current == null) {
+              rafPanRef.current = requestAnimationFrame(writeLiveTransform);
+            }
           }}
           onPointerUp={(e) => {
             const d = dragRef.current;
@@ -295,11 +366,20 @@ export function LiveFloorPage() {
             if (d?.moved) {
               justDraggedRef.current = true;
               setPanning(false);
+              if (rafPanRef.current != null) {
+                cancelAnimationFrame(rafPanRef.current);
+                rafPanRef.current = null;
+              }
+              setPan({ ...livePanRef.current });
             }
           }}
           onPointerCancel={() => {
             dragRef.current = null;
             setPanning(false);
+            if (rafPanRef.current != null) {
+              cancelAnimationFrame(rafPanRef.current);
+              rafPanRef.current = null;
+            }
           }}
           onClickCapture={(e) => {
             if (justDraggedRef.current) {
@@ -321,6 +401,7 @@ export function LiveFloorPage() {
                   hotIds={hotIds}
                   selectedWs={selectedWs}
                   onSelect={setSelectedWs}
+                  groupRef={isoGroupRef}
                 />
               )}
               {view === 'top' && (
@@ -393,9 +474,9 @@ export function LiveFloorPage() {
                   bottom: 16,
                   display: 'flex',
                   gap: 4,
-                  background: '#0a0d12',
+                  background: SW_COLORS.paperEdge,
                   padding: 3,
-                  border: '1px solid #ffffff20',
+                  border: '1px solid #0F141925',
                   borderRadius: 6,
                 }}
               >
@@ -428,8 +509,7 @@ export function LiveFloorPage() {
       <div
         style={{
           padding: '12px 18px',
-          background: '#0a0d12',
-          borderTop: '1px solid #ffffff15',
+          background: 'transparent',
           display: 'flex',
           alignItems: 'center',
           gap: 12,
@@ -452,8 +532,8 @@ export function LiveFloorPage() {
         >
           {playing ? '⏸ PAUSE' : '▶ PLAY'}
         </button>
-        <div style={{ width: 1, height: 24, background: '#ffffff20' }} />
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#ffffff80', letterSpacing: '0.1em' }}>
+        <div style={{ width: 1, height: 24, background: '#0F141925' }} />
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#0F141999', letterSpacing: '0.1em' }}>
           ELAPSED · {elapsed}s
         </span>
         <div style={{ flex: 1 }} />
@@ -461,7 +541,7 @@ export function LiveFloorPage() {
           style={{
             fontFamily: SW_FONTS.mono,
             fontSize: 10,
-            color: '#ffffff60',
+            color: '#0F141970',
             letterSpacing: '0.06em',
           }}
         >
@@ -497,6 +577,197 @@ export function LiveFloorPage() {
 }
 
 // ============================================================================
+// TWIN PICKER — dropdown over canonical + scenarios, used in the HUD
+// ============================================================================
+
+function TwinPicker({ activeTwin }: { activeTwin: ReturnType<typeof selectActiveTwin> }) {
+  const canonical = useTwin((s) => s.canonical);
+  const scenarios = useTwin((s) => s.scenarios);
+  const activeScenarioId = useTwin((s) => s.activeScenarioId);
+  const setActiveScenario = useTwin((s) => s.setActiveScenario);
+  const [open, setOpen] = useState(false);
+  const ref = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onDown = (e: MouseEvent) => {
+      if (ref.current && !ref.current.contains(e.target as Node)) setOpen(false);
+    };
+    window.addEventListener('mousedown', onDown);
+    return () => window.removeEventListener('mousedown', onDown);
+  }, [open]);
+
+  const isCanonical = activeScenarioId === null;
+
+  return (
+    <div ref={ref} style={{ position: 'relative' }}>
+      <button
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          background: SW_COLORS.paper,
+          border: '1px solid #0F141930',
+          color: SW_COLORS.ink,
+          padding: '5px 10px 5px 12px',
+          fontFamily: SW_FONTS.display,
+          fontSize: 10,
+          fontWeight: 900,
+          letterSpacing: '0.08em',
+          cursor: 'pointer',
+          borderRadius: 4,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 10,
+          maxWidth: 320,
+        }}
+        title="Switch live factory"
+      >
+        <span style={{ fontSize: 11 }}>{isCanonical ? '◆' : '✦'}</span>
+        <span
+          style={{
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+            whiteSpace: 'nowrap',
+            textTransform: 'uppercase',
+          }}
+        >
+          {activeTwin.name}
+        </span>
+        <span
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 9,
+            fontWeight: 700,
+            color: '#0F141999',
+            letterSpacing: '0.12em',
+          }}
+        >
+          {activeTwin.departments.length}D · {activeTwin.workstations.length}W
+        </span>
+        <span style={{ fontSize: 9, color: '#0F141999' }}>{open ? '▴' : '▾'}</span>
+      </button>
+
+      {open && (
+        <div
+          style={{
+            position: 'absolute',
+            top: 'calc(100% + 6px)',
+            right: 0,
+            minWidth: 280,
+            background: SW_COLORS.paper,
+            border: '1px solid #0F141925',
+            borderRadius: 6,
+            boxShadow: '0 8px 24px rgba(15,20,25,0.12)',
+            padding: 4,
+            zIndex: 50,
+          }}
+        >
+          <TwinPickerRow
+            icon="◆"
+            label={canonical.name}
+            sub={`canonical · ${canonical.departments.length}D · ${canonical.workstations.length}W`}
+            selected={isCanonical}
+            onClick={() => {
+              setActiveScenario(null);
+              setOpen(false);
+            }}
+          />
+          {scenarios.length > 0 && (
+            <div
+              style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 8,
+                fontWeight: 800,
+                color: '#0F141970',
+                letterSpacing: '0.15em',
+                padding: '8px 10px 4px',
+              }}
+            >
+              SCENARIOS
+            </div>
+          )}
+          {scenarios.map((s) => (
+            <TwinPickerRow
+              key={s.id}
+              icon="✦"
+              label={s.twin.name}
+              sub={`${s.twin.departments.length}D · ${s.twin.workstations.length}W`}
+              selected={s.id === activeScenarioId}
+              onClick={() => {
+                setActiveScenario(s.id);
+                setOpen(false);
+              }}
+            />
+          ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+function TwinPickerRow({
+  icon,
+  label,
+  sub,
+  selected,
+  onClick,
+}: {
+  icon: string;
+  label: string;
+  sub: string;
+  selected: boolean;
+  onClick: () => void;
+}) {
+  return (
+    <button
+      onClick={onClick}
+      style={{
+        width: '100%',
+        background: selected ? SW_COLORS.brandLite : 'transparent',
+        border: 'none',
+        cursor: 'pointer',
+        padding: '8px 10px',
+        display: 'flex',
+        alignItems: 'center',
+        gap: 10,
+        borderRadius: 4,
+        textAlign: 'left',
+        color: SW_COLORS.ink,
+      }}
+    >
+      <span style={{ fontSize: 12, color: selected ? SW_COLORS.brand : '#0F141999' }}>{icon}</span>
+      <div style={{ display: 'flex', flexDirection: 'column', gap: 2, minWidth: 0, flex: 1 }}>
+        <span
+          style={{
+            fontFamily: SW_FONTS.display,
+            fontSize: 11,
+            fontWeight: 900,
+            letterSpacing: '0.04em',
+            whiteSpace: 'nowrap',
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {label}
+        </span>
+        <span
+          style={{
+            fontFamily: SW_FONTS.mono,
+            fontSize: 9,
+            color: '#0F141999',
+            letterSpacing: '0.08em',
+          }}
+        >
+          {sub}
+        </span>
+      </div>
+      {selected && (
+        <span style={{ fontSize: 11, color: SW_COLORS.brand, fontWeight: 900 }}>●</span>
+      )}
+    </button>
+  );
+}
+
+// ============================================================================
 // EMPTY STATE
 // ============================================================================
 
@@ -515,7 +786,7 @@ function EmptyState({ onBuild }: { onBuild: () => void }) {
         textAlign: 'center',
       }}
     >
-      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700, color: '#ffffff60', letterSpacing: '2px' }}>
+      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700, color: '#0F141970', letterSpacing: '2px' }}>
         NO TWIN AUTHORED YET
       </div>
       <div
@@ -524,7 +795,7 @@ function EmptyState({ onBuild }: { onBuild: () => void }) {
           fontSize: 36,
           fontWeight: 900,
           letterSpacing: '-0.01em',
-          color: '#fff',
+          color: SW_COLORS.ink,
           maxWidth: 520,
           lineHeight: 1.05,
         }}
@@ -532,7 +803,7 @@ function EmptyState({ onBuild }: { onBuild: () => void }) {
         Build your factory.<br />
         <span style={{ color: SW_COLORS.brand }}>Then watch it run.</span>
       </div>
-      <div style={{ fontSize: 13, color: '#ffffffaa', maxWidth: 440 }}>
+      <div style={{ fontSize: 13, color: '#0F141999', maxWidth: 440 }}>
         Drop departments and workstations on the canvas in Factory Builder, then come back here for the iso 3D, top-down 2D and heat-map live views.
       </div>
       <button
@@ -569,20 +840,41 @@ interface IsoViewProps {
   hotIds: Set<string>;
   selectedWs: string | null;
   onSelect: (id: string | null) => void;
+  groupRef: MutableRefObject<SVGGElement | null>;
 }
 
-function IsoView({ twin, t, zoom, pan, hotIds, selectedWs, onSelect }: IsoViewProps) {
-  // World-extent bounds → SVG viewBox.
+function IsoView({ twin, t, zoom, pan, hotIds, selectedWs, onSelect, groupRef }: IsoViewProps) {
+  // Sync pan/zoom state → DOM transform. Drag updates bypass React and write
+  // straight to the same attribute via ref, so this only fires for committed
+  // state changes (release, zoom buttons, reset). Layout effect runs before
+  // paint to avoid a flash on mount.
+  useLayoutEffect(() => {
+    const g = groupRef.current;
+    if (!g) return;
+    g.setAttribute('transform', `translate(${pan.x}, ${pan.y}) scale(${zoom})`);
+  }, [pan.x, pan.y, zoom, groupRef]);
+  // World-extent bounds → SVG viewBox. Padded generously so the iso grid
+  // breathes outward beyond the floor diamond.
   const cTL = isoProj(0, 0);
   const cTR = isoProj(twin.gridW, 0);
   const cBR = isoProj(twin.gridW, twin.gridH);
   const cBL = isoProj(0, twin.gridH);
-  const minX = Math.min(cTL.sx, cBL.sx) - 80;
-  const maxX = Math.max(cTR.sx, cBR.sx) + 80;
-  const minY = Math.min(cTL.sy, cTR.sy) - 80;
-  const maxY = Math.max(cBL.sy, cBR.sy) + 80;
+  const PAD = 220;
+  const minX = Math.min(cTL.sx, cBL.sx) - PAD;
+  const maxX = Math.max(cTR.sx, cBR.sx) + PAD;
+  const minY = Math.min(cTL.sy, cTR.sy) - PAD;
+  const maxY = Math.max(cBL.sy, cBR.sy) + PAD;
   const vbW = maxX - minX;
   const vbH = maxY - minY;
+
+  // Extended iso grid bounds — overshoots the floor by a wide margin so the
+  // grid radiates outward into the surrounding plane.
+  const GRID_OVERSCAN = 14;
+  const gx0 = -GRID_OVERSCAN;
+  const gx1 = twin.gridW + GRID_OVERSCAN;
+  const gy0 = -GRID_OVERSCAN;
+  const gy1 = twin.gridH + GRID_OVERSCAN;
+  const MAJOR = 4; // major iso grid line every N cells
 
   const sortedWs = useMemo(
     () =>
@@ -602,34 +894,132 @@ function IsoView({ twin, t, zoom, pan, hotIds, selectedWs, onSelect }: IsoViewPr
       onClick={() => onSelect(null)}
     >
       <defs>
-        <pattern id="lf-grid-iso" width={32} height={32} patternUnits="userSpaceOnUse">
-          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff06" strokeWidth={1} />
-        </pattern>
-        <radialGradient id="lf-vig" cx="50%" cy="40%" r="60%">
-          <stop offset="0%" stopColor="#000" stopOpacity={0} />
-          <stop offset="100%" stopColor="#000" stopOpacity={0.6} />
+        {/* Faint warm paper backing — radial wash that fades toward edges. */}
+        <radialGradient id="lf-paper" cx="50%" cy="42%" r="72%">
+          <stop offset="0%" stopColor="#FFFDF6" stopOpacity={1} />
+          <stop offset="60%" stopColor="#F4EFE0" stopOpacity={1} />
+          <stop offset="100%" stopColor="#E8E1CD" stopOpacity={1} />
+        </radialGradient>
+        {/* Outer vignette darkens edges to focus the eye on the floor. */}
+        <radialGradient id="lf-vig" cx="50%" cy="40%" r="65%">
+          <stop offset="0%" stopColor={SW_COLORS.ink} stopOpacity={0} />
+          <stop offset="100%" stopColor={SW_COLORS.ink} stopOpacity={0.22} />
+        </radialGradient>
+        {/* Floor diamond fill — subtle blueprint cyan wash. */}
+        <linearGradient id="lf-floor" x1="0%" y1="0%" x2="0%" y2="100%">
+          <stop offset="0%" stopColor="#E7EEF6" stopOpacity={1} />
+          <stop offset="100%" stopColor="#D6E0EC" stopOpacity={1} />
+        </linearGradient>
+        {/* Soft grey under-shadow blob for each fixture base. */}
+        <radialGradient id="lf-fix-shadow" cx="50%" cy="50%" r="50%">
+          <stop offset="0%" stopColor={SW_COLORS.ink} stopOpacity={0.35} />
+          <stop offset="60%" stopColor={SW_COLORS.ink} stopOpacity={0.12} />
+          <stop offset="100%" stopColor={SW_COLORS.ink} stopOpacity={0} />
         </radialGradient>
       </defs>
-      <rect x={minX} y={minY} width={vbW} height={vbH} fill="url(#lf-grid-iso)" />
 
-      <g transform={`translate(${pan.x}, ${pan.y}) scale(${zoom})`} style={{ transformOrigin: 'center' }}>
-        {/* Floor diamond */}
+      {/* 1. Paper backing — solid warm fill behind everything. */}
+      <rect x={minX} y={minY} width={vbW} height={vbH} fill="url(#lf-paper)" />
+
+      <g ref={groupRef} style={{ transformOrigin: 'center', willChange: 'transform' }}>
+        {/* 2. Overscan iso grid — minor lines (every cell, outside the floor too). */}
+        {Array.from({ length: gx1 - gx0 + 1 }, (_, i) => {
+          const x = gx0 + i;
+          const a = isoProj(x, gy0);
+          const b = isoProj(x, gy1);
+          const isMajor = x % MAJOR === 0;
+          return (
+            <line
+              key={`gv-${x}`}
+              x1={a.sx}
+              y1={a.sy}
+              x2={b.sx}
+              y2={b.sy}
+              stroke={isMajor ? '#0F141958' : '#0F14192e'}
+              strokeWidth={isMajor ? 1.0 : 0.6}
+            />
+          );
+        })}
+        {Array.from({ length: gy1 - gy0 + 1 }, (_, i) => {
+          const y = gy0 + i;
+          const a = isoProj(gx0, y);
+          const b = isoProj(gx1, y);
+          const isMajor = y % MAJOR === 0;
+          return (
+            <line
+              key={`gh-${y}`}
+              x1={a.sx}
+              y1={a.sy}
+              x2={b.sx}
+              y2={b.sy}
+              stroke={isMajor ? '#0F141958' : '#0F14192e'}
+              strokeWidth={isMajor ? 1.0 : 0.6}
+            />
+          );
+        })}
+
+        {/* 3. Floor diamond — drop shadow + filled shape + crisp outline + inner bevel. */}
+        <polygon
+          points={ptsToStr([
+            { sx: cTL.sx + 6, sy: cTL.sy + 10 },
+            { sx: cTR.sx + 6, sy: cTR.sy + 10 },
+            { sx: cBR.sx + 6, sy: cBR.sy + 10 },
+            { sx: cBL.sx + 6, sy: cBL.sy + 10 },
+          ])}
+          fill="#0F141925"
+        />
         <polygon
           points={ptsToStr([cTL, cTR, cBR, cBL])}
-          fill="#ffffff05"
-          stroke="#ffffff20"
-          strokeWidth={1.2}
+          fill="url(#lf-floor)"
+          stroke="#0F1419"
+          strokeWidth={1.8}
+          strokeLinejoin="round"
         />
-        {/* Iso grid lines */}
+        <polygon
+          points={ptsToStr([
+            { sx: cTL.sx, sy: cTL.sy + 6 },
+            { sx: cTR.sx - 6, sy: cTR.sy + 3 },
+            { sx: cBR.sx, sy: cBR.sy - 6 },
+            { sx: cBL.sx + 6, sy: cBL.sy - 3 },
+          ])}
+          fill="none"
+          stroke="#0F141930"
+          strokeWidth={0.8}
+          strokeLinejoin="round"
+        />
+
+        {/* 4. In-floor iso grid lines — slightly stronger so they read clearly inside the floor. */}
         {Array.from({ length: twin.gridW + 1 }, (_, i) => {
           const a = isoProj(i, 0);
           const b = isoProj(i, twin.gridH);
-          return <line key={`v-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#ffffff08" strokeWidth={0.5} />;
+          const isMajor = i % MAJOR === 0;
+          return (
+            <line
+              key={`v-${i}`}
+              x1={a.sx}
+              y1={a.sy}
+              x2={b.sx}
+              y2={b.sy}
+              stroke={isMajor ? '#0F141958' : '#0F141930'}
+              strokeWidth={isMajor ? 0.9 : 0.5}
+            />
+          );
         })}
         {Array.from({ length: twin.gridH + 1 }, (_, i) => {
           const a = isoProj(0, i);
           const b = isoProj(twin.gridW, i);
-          return <line key={`h-${i}`} x1={a.sx} y1={a.sy} x2={b.sx} y2={b.sy} stroke="#ffffff08" strokeWidth={0.5} />;
+          const isMajor = i % MAJOR === 0;
+          return (
+            <line
+              key={`h-${i}`}
+              x1={a.sx}
+              y1={a.sy}
+              x2={b.sx}
+              y2={b.sy}
+              stroke={isMajor ? '#0F141958' : '#0F141930'}
+              strokeWidth={isMajor ? 0.9 : 0.5}
+            />
+          );
         })}
 
         {/* Departments — coloured zone diamonds */}
@@ -724,6 +1114,15 @@ function IsoWorkstation({
 
   const util = ws.kpiObserved?.utilizationPct ?? fakeUtil(ws, t);
 
+  // Contact shadow — a soft diamond patch under the footprint that grounds
+  // the fixture against the floor. Offset down-right to simulate raked light.
+  const shadowPts = ptsToStr([
+    { sx: 4, sy: 6 },
+    { sx: tr.sx - tl.sx + 4, sy: tr.sy - tl.sy + 6 },
+    { sx: br.sx - tl.sx + 4, sy: br.sy - tl.sy + 6 },
+    { sx: bl.sx - tl.sx + 4, sy: bl.sy - tl.sy + 6 },
+  ]);
+
   return (
     <g
       transform={`translate(${origin.sx}, ${origin.sy}) rotate(${ws.rotation})`}
@@ -733,6 +1132,21 @@ function IsoWorkstation({
         onClick();
       }}
     >
+      {/* Contact shadow — drawn first so the fixture sits on top of it. */}
+      <polygon points={shadowPts} fill={SW_COLORS.ink} opacity={0.22} pointerEvents="none" />
+      {/* Base plate — a slightly inset darker diamond that grounds the fixture. */}
+      <polygon
+        points={ptsToStr([
+          { sx: 1, sy: 1 },
+          { sx: tr.sx - tl.sx - 1, sy: tr.sy - tl.sy + 1 },
+          { sx: br.sx - tl.sx - 1, sy: br.sy - tl.sy - 1 },
+          { sx: bl.sx - tl.sx + 1, sy: bl.sy - tl.sy - 1 },
+        ])}
+        fill="#0F141918"
+        stroke="#0F141940"
+        strokeWidth={0.6}
+        pointerEvents="none"
+      />
       {fixture.draw({ w: fixture.w, d: fixture.d, h: fixture.h }) as ReactNode}
 
       {/* Heat tint */}
@@ -797,7 +1211,7 @@ function WalkingOperator({ ws, t }: { ws: Workstation; t: number }) {
   const p = isoProj(ox, oy);
   return (
     <g transform={`translate(${p.sx}, ${p.sy - 8})`} pointerEvents="none">
-      <circle cx={0} cy={4} r={4} fill={SW_COLORS.bobbin} stroke="#fff" strokeWidth={1} />
+      <circle cx={0} cy={4} r={4} fill={SW_COLORS.bobbin} stroke={SW_COLORS.ink} strokeWidth={1} />
       <circle cx={0} cy={-2} r={2.5} fill="#F0C49B" stroke="#0F1419" strokeWidth={0.6} />
     </g>
   );
@@ -862,10 +1276,10 @@ function TopView({ twin, t, zoom, hotIds, selectedWs, onSelect }: TopViewProps) 
     >
       <defs>
         <pattern id="lf-top-grid" width={CELL} height={CELL} patternUnits="userSpaceOnUse">
-          <path d={`M ${CELL} 0 L 0 0 0 ${CELL}`} fill="none" stroke="#ffffff10" strokeWidth={1} />
+          <path d={`M ${CELL} 0 L 0 0 0 ${CELL}`} fill="none" stroke="#0F141910" strokeWidth={1} />
         </pattern>
       </defs>
-      <rect width={W} height={H} fill="#0d1219" />
+      <rect width={W} height={H} fill={SW_COLORS.paperDeep} />
       <rect width={W} height={H} fill="url(#lf-top-grid)" />
 
       <g style={{ transformOrigin: 'center', transform: `scale(${zoom})` }}>
@@ -915,7 +1329,7 @@ function TopView({ twin, t, zoom, hotIds, selectedWs, onSelect }: TopViewProps) 
                   y1={ws.position.y * CELL + CELL / 2}
                   x2={next.position.x * CELL + CELL / 2}
                   y2={next.position.y * CELL + CELL / 2}
-                  stroke="#ffffff30"
+                  stroke="#0F141930"
                   strokeWidth={1.2}
                   strokeDasharray="6 4"
                   style={{
@@ -951,7 +1365,7 @@ function TopView({ twin, t, zoom, hotIds, selectedWs, onSelect }: TopViewProps) 
                 rx={3}
                 fill={fill}
                 opacity={0.7 + (util / 100) * 0.3}
-                stroke={isSel ? '#fff' : '#0F1419'}
+                stroke={isSel ? SW_COLORS.brand : SW_COLORS.ink}
                 strokeWidth={isSel ? 2 : 1}
               />
               {isHot && (
@@ -987,7 +1401,7 @@ function TopView({ twin, t, zoom, hotIds, selectedWs, onSelect }: TopViewProps) 
               cy={oy}
               r={3.5}
               fill={SW_COLORS.bobbin}
-              stroke="#fff"
+              stroke={SW_COLORS.ink}
               strokeWidth={1}
               pointerEvents="none"
             />
@@ -1040,7 +1454,7 @@ function HeatView({
         </linearGradient>
       </defs>
 
-      <rect width={W} height={H} fill="#0d1219" />
+      <rect width={W} height={H} fill={SW_COLORS.paperDeep} />
 
       {/* dept outlines for orientation */}
       {twin.departments.map((d) => (
@@ -1051,7 +1465,7 @@ function HeatView({
           width={d.bounds.w * CELL}
           height={d.bounds.h * CELL}
           fill="none"
-          stroke="#ffffff20"
+          stroke="#0F141925"
           strokeWidth={1}
           strokeDasharray="3 3"
         />
@@ -1069,7 +1483,7 @@ function HeatView({
             cy={cy}
             r={90}
             fill={`url(#heat-${ws.id})`}
-            style={{ mixBlendMode: 'screen' }}
+            style={{ mixBlendMode: 'multiply' }}
           />
         );
       })}
@@ -1086,7 +1500,7 @@ function HeatView({
             cx={cx}
             cy={cy}
             r={3.5}
-            fill={isHot ? SW_COLORS.alarm : '#fff'}
+            fill={isHot ? SW_COLORS.alarm : SW_COLORS.ink}
             opacity={0.85}
           />
         );
@@ -1094,11 +1508,11 @@ function HeatView({
 
       {/* legend */}
       <g transform={`translate(${W - 220}, 20)`}>
-        <rect width={200} height={62} fill="#0a0d12cc" stroke="#ffffff20" rx={4} />
+        <rect width={200} height={62} fill="#FBFAF6E6" stroke="#0F141925" rx={4} />
         <text
           x={12}
           y={20}
-          fill="#fff"
+          fill={SW_COLORS.ink}
           fontFamily={SW_FONTS.mono}
           fontSize={10}
           fontWeight={900}
@@ -1107,13 +1521,13 @@ function HeatView({
           UTILISATION HEAT
         </text>
         <rect x={12} y={30} width={176} height={10} fill="url(#lf-legend)" />
-        <text x={12} y={54} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={9}>
+        <text x={12} y={54} fill="#0F141999" fontFamily={SW_FONTS.mono} fontSize={9}>
           calm
         </text>
         <text
           x={188}
           y={54}
-          fill="#ffffff80"
+          fill="#0F141999"
           fontFamily={SW_FONTS.mono}
           fontSize={9}
           textAnchor="end"
@@ -1191,7 +1605,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
     >
       <defs>
         <pattern id="lf-logic-grid" width={32} height={32} patternUnits="userSpaceOnUse">
-          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#ffffff06" strokeWidth={1} />
+          <path d="M 32 0 L 0 0 0 32" fill="none" stroke="#0F14190a" strokeWidth={1} />
         </pattern>
         <marker
           id="lf-logic-arrow"
@@ -1202,10 +1616,10 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
           markerHeight={6}
           orient="auto"
         >
-          <path d="M0 0 L10 5 L0 10 z" fill="#ffffff80" />
+          <path d="M0 0 L10 5 L0 10 z" fill="#0F141999" />
         </marker>
       </defs>
-      <rect width={W} height={H} fill="#0d1219" />
+      <rect width={W} height={H} fill={SW_COLORS.paperDeep} />
       <rect width={W} height={H} fill="url(#lf-logic-grid)" />
 
       {/* Title */}
@@ -1213,7 +1627,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
         x={W / 2}
         y={32}
         textAnchor="middle"
-        fill="#ffffff80"
+        fill="#0F141999"
         fontFamily={SW_FONTS.mono}
         fontSize={12}
         fontWeight={800}
@@ -1245,7 +1659,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
             <path
               d={path}
               fill="none"
-              stroke="#ffffff35"
+              stroke="#0F141945"
               strokeWidth={2}
               strokeDasharray="6 5"
               markerEnd="url(#lf-logic-arrow)"
@@ -1279,7 +1693,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               width={CARD_W}
               height={CARD_H}
               rx={6}
-              fill="#0a0d12"
+              fill={SW_COLORS.paper}
               stroke={isSelected ? SW_COLORS.brand : accent}
               strokeWidth={isSelected ? 2.5 : 1.5}
             />
@@ -1295,7 +1709,11 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               fill="#fff"
               letterSpacing="0.1em"
             >
-              {d.name.toUpperCase()}
+              {(() => {
+                const name = d.name.toUpperCase();
+                // CARD_W=220, padding≈24 → ~24 chars fit at 11px Archivo Black
+                return name.length > 24 ? name.slice(0, 23) + '…' : name;
+              })()}
             </text>
             <text
               x={CARD_W - 12}
@@ -1304,7 +1722,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               fontFamily={SW_FONTS.mono}
               fontSize={9}
               fontWeight={800}
-              fill="#ffffffcc"
+              fill="#0F1419cc"
             >
               {stations.length} STN
             </text>
@@ -1317,7 +1735,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               fontFamily={SW_FONTS.display}
               fontSize={32}
               fontWeight={900}
-              fill="#fff"
+              fill={SW_COLORS.ink}
               letterSpacing="-0.02em"
             >
               {pcsHr}
@@ -1329,14 +1747,14 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               fontFamily={SW_FONTS.mono}
               fontSize={9}
               fontWeight={700}
-              fill="#ffffff80"
+              fill="#0F141999"
               letterSpacing="0.1em"
             >
               PCS/HR
             </text>
 
             {/* Util bar */}
-            <rect x={12} y={96} width={CARD_W - 24} height={4} rx={2} fill="#ffffff15" />
+            <rect x={12} y={96} width={CARD_W - 24} height={4} rx={2} fill="#0F141918" />
             <rect
               x={12}
               y={96}
@@ -1351,7 +1769,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               fontFamily={SW_FONTS.mono}
               fontSize={9}
               fontWeight={700}
-              fill="#ffffff80"
+              fill="#0F141999"
               letterSpacing="0.06em"
             >
               UTIL
@@ -1375,7 +1793,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               fontFamily={SW_FONTS.mono}
               fontSize={9}
               fontWeight={700}
-              fill="#ffffffaa"
+              fill="#0F141999"
             >
               WIP {wip}
             </text>
@@ -1386,7 +1804,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
               fontFamily={SW_FONTS.mono}
               fontSize={9}
               fontWeight={800}
-              fill={hot > 0 ? SW_COLORS.alarm : '#ffffff80'}
+              fill={hot > 0 ? SW_COLORS.alarm : '#0F141999'}
             >
               {hot > 0 ? `● ${hot} HOT` : '○ STABLE'}
             </text>
@@ -1421,7 +1839,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
           x={W / 2}
           y={H / 2}
           textAnchor="middle"
-          fill="#ffffff60"
+          fill="#0F141970"
           fontFamily={SW_FONTS.body}
           fontSize={14}
         >
@@ -1431,11 +1849,11 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
 
       {/* Legend */}
       <g transform={`translate(${W - 220}, ${H - 60})`}>
-        <rect width={200} height={44} fill="#0a0d12cc" stroke="#ffffff20" rx={4} />
+        <rect width={200} height={44} fill="#FBFAF6E6" stroke="#0F141925" rx={4} />
         <text
           x={12}
           y={18}
-          fill="#fff"
+          fill={SW_COLORS.ink}
           fontFamily={SW_FONTS.mono}
           fontSize={10}
           fontWeight={900}
@@ -1443,7 +1861,7 @@ function LogicView({ twin, t, hotIds, selectedWs, onSelect }: LogicViewProps) {
         >
           LOGIC LEGEND
         </text>
-        <text x={12} y={34} fill="#ffffff80" fontFamily={SW_FONTS.mono} fontSize={9}>
+        <text x={12} y={34} fill="#0F141999" fontFamily={SW_FONTS.mono} fontSize={9}>
           ⬛ dept · → flow · ● bottleneck
         </text>
       </g>
@@ -1486,8 +1904,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
   return (
     <div
       style={{
-        background: '#0a0d12',
-        borderLeft: '1px solid #ffffff15',
+        background: 'transparent',
         padding: 14,
         display: 'flex',
         flexDirection: 'column',
@@ -1501,7 +1918,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
             fontFamily: SW_FONTS.mono,
             fontSize: 9,
             fontWeight: 800,
-            color: '#ffffff80',
+            color: '#0F141999',
             letterSpacing: '0.18em',
             marginBottom: 8,
           }}
@@ -1518,8 +1935,8 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
 
       <div
         style={{
-          background: '#ffffff05',
-          border: '1px solid #ffffff15',
+          background: '#0F141908',
+          border: '1px solid #0F141918',
           borderRadius: 6,
           padding: 12,
         }}
@@ -1537,7 +1954,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
               fontFamily: SW_FONTS.mono,
               fontSize: 9,
               fontWeight: 800,
-              color: '#ffffff80',
+              color: '#0F141999',
               letterSpacing: '0.18em',
             }}
           >
@@ -1548,7 +1965,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
               onClick={onClear}
               style={{
                 background: 'transparent',
-                color: '#ffffffaa',
+                color: '#0F141999',
                 border: 'none',
                 cursor: 'pointer',
                 fontSize: 11,
@@ -1560,15 +1977,15 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
           )}
         </div>
         {!ws ? (
-          <div style={{ fontSize: 12, color: '#ffffffaa', fontStyle: 'italic' }}>
+          <div style={{ fontSize: 12, color: '#0F141999', fontStyle: 'italic' }}>
             Click a workstation to inspect.
           </div>
         ) : (
           <>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: '#fff' }}>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, color: SW_COLORS.ink }}>
               {ws.name}
             </div>
-            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#ffffff80', marginTop: 2 }}>
+            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#0F141999', marginTop: 2 }}>
               {fix?.label ?? ws.catalogId}  ·  {dept?.name ?? '—'}
             </div>
             <div style={{ marginTop: 10, display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8 }}>
@@ -1595,8 +2012,8 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
 
       <div
         style={{
-          background: '#ffffff05',
-          border: '1px solid #ffffff15',
+          background: '#0F141908',
+          border: '1px solid #0F141918',
           borderRadius: 6,
           padding: 12,
           flex: 1,
@@ -1610,7 +2027,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
             fontFamily: SW_FONTS.mono,
             fontSize: 9,
             fontWeight: 800,
-            color: '#ffffff80',
+            color: '#0F141999',
             letterSpacing: '0.18em',
             marginBottom: 8,
           }}
@@ -1619,7 +2036,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
         </div>
         <div style={{ flex: 1, overflow: 'auto', fontFamily: SW_FONTS.mono, fontSize: 11, lineHeight: 1.6 }}>
           {events.length === 0 && (
-            <div style={{ color: '#ffffff60', fontStyle: 'italic' }}>No events yet — press PLAY.</div>
+            <div style={{ color: '#0F141970', fontStyle: 'italic' }}>No events yet — press PLAY.</div>
           )}
           {events.map((e) => {
             const wsName = twin.workstations.find((w) => w.id === e.ws)?.name?.slice(0, 16) ?? '—';
@@ -1632,7 +2049,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
             return (
               <div key={e.id} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
                 <span style={{ color: col, width: 96, fontWeight: 700 }}>{e.label}</span>
-                <span style={{ color: '#ffffffaa', flex: 1 }}>· {wsName}</span>
+                <span style={{ color: '#0F141999', flex: 1 }}>· {wsName}</span>
               </div>
             );
           })}
@@ -1646,8 +2063,8 @@ function KpiTile({ label, value, accent }: { label: string; value: string; accen
   return (
     <div
       style={{
-        background: '#ffffff08',
-        border: '1px solid #ffffff15',
+        background: '#0F141910',
+        border: '1px solid #0F141918',
         borderRadius: 6,
         padding: '8px 10px',
       }}
@@ -1657,7 +2074,7 @@ function KpiTile({ label, value, accent }: { label: string; value: string; accen
           fontFamily: SW_FONTS.mono,
           fontSize: 9,
           fontWeight: 700,
-          color: '#ffffff80',
+          color: '#0F141999',
           letterSpacing: '0.1em',
           textTransform: 'uppercase',
         }}
@@ -1688,9 +2105,9 @@ function FloorBtn({ children, onClick }: { children: ReactNode; onClick: () => v
     <button
       onClick={onClick}
       style={{
-        background: '#ffffff10',
-        color: '#fff',
-        border: '1px solid #ffffff20',
+        background: '#0F141910',
+        color: SW_COLORS.ink,
+        border: '1px solid #0F141925',
         cursor: 'pointer',
         padding: '4px 10px',
         fontFamily: SW_FONTS.mono,

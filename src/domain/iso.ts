@@ -132,6 +132,7 @@ interface CuboidFacesProps {
 
 export function CuboidFaces({ w, d, h, top, left, right, stroke }: CuboidFacesProps): ReactNode {
   const c = isoCuboid(w, d, h);
+  const edge = stroke || SW_PAL.ink;
   return createElement(
     'g',
     null,
@@ -139,22 +140,22 @@ export function CuboidFaces({ w, d, h, top, left, right, stroke }: CuboidFacesPr
     createElement('polygon', {
       points: ptsToStr(c.leftFx),
       fill: left,
-      stroke: stroke || SW_PAL.edge,
-      strokeWidth: 0.6,
+      stroke: edge,
+      strokeWidth: 1.1,
       strokeLinejoin: 'round',
     }),
     createElement('polygon', {
       points: ptsToStr(c.rightFx),
       fill: right,
-      stroke: stroke || SW_PAL.edge,
-      strokeWidth: 0.6,
+      stroke: edge,
+      strokeWidth: 1.1,
       strokeLinejoin: 'round',
     }),
     createElement('polygon', {
       points: ptsToStr(c.top),
       fill: top,
-      stroke: stroke || SW_PAL.edge,
-      strokeWidth: 0.8,
+      stroke: edge,
+      strokeWidth: 1.4,
       strokeLinejoin: 'round',
     }),
   );

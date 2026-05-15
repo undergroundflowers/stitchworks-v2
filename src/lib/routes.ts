@@ -17,6 +17,12 @@ export interface RouteDef {
   id: string;
   /** Human-readable label for nav UI. */
   label: string;
+  /**
+   * Abbreviated label for narrow desktop widths (< 1180px). When undefined
+   * the full label is used at every width. Keeps the bar from dropping
+   * nav items on smaller laptop screens without collapsing to a hamburger.
+   */
+  shortLabel?: string;
   /** Glyph used in nav UI. */
   icon: string;
   kind: RouteKind;
@@ -24,16 +30,21 @@ export interface RouteDef {
 
 export const ROUTES: RouteDef[] = [
   { path: '/',          id: 'menu',      label: 'MENU',             icon: '⌂', kind: 'special' },
-  { path: '/floor',     id: 'floor',     label: 'Live Floor',       icon: '⬢', kind: 'main' },
-  { path: '/iso',       id: 'iso',       label: 'Factory Builder',      icon: '◆', kind: 'main' },
-  { path: '/orders',    id: 'orders',    label: 'Orders',           icon: '⎙', kind: 'main' },
-  { path: '/sim',       id: 'sim',       label: 'Simulation',       icon: '▷', kind: 'main' },
-  { path: '/resources', id: 'resources', label: 'Resources',        icon: '⊟', kind: 'main' },
-  { path: '/kpi',       id: 'kpi',       label: 'Reports',          icon: '⌬', kind: 'special' },
-  { path: '/scenarios', id: 'scenarios', label: 'Scenarios',        icon: '✦', kind: 'main' },
-  { path: '/balance',   id: 'balance',   label: 'Line Balance',     icon: '⚖', kind: 'main' },
-  { path: '/assets',    id: 'assets',    label: 'Assets',           icon: '◇', kind: 'main' },
-  { path: '/settings',  id: 'settings',  label: 'Settings',         icon: '⚙', kind: 'main' },
+  { path: '/floor',     id: 'floor',     label: 'Live Floor',       shortLabel: 'Floor',      icon: '⬢', kind: 'main' },
+  { path: '/iso',       id: 'iso',       label: 'Factory Builder',  shortLabel: 'Builder',    icon: '◆', kind: 'main' },
+  { path: '/orders',    id: 'orders',    label: 'Orders',                                     icon: '⎙', kind: 'main' },
+  { path: '/sim',       id: 'sim',       label: 'Simulation',       shortLabel: 'Sim',        icon: '▷', kind: 'main' },
+  { path: '/resources', id: 'resources', label: 'Resources',                                  icon: '⊟', kind: 'main' },
+  // /kpi is the legacy Reports path. App.tsx redirects it to /balance, which
+  // is the merged Reports hub (Performance + Line Balance + Validation tabs).
+  { path: '/kpi',       id: 'kpi',       label: 'Reports',                                    icon: '⌬', kind: 'special' },
+  { path: '/scenarios', id: 'scenarios', label: 'Scenarios',                                  icon: '✦', kind: 'main' },
+  { path: '/balance',   id: 'balance',   label: 'Reports',                                    icon: '⌬', kind: 'main' },
+  { path: '/queues',    id: 'queues',    label: 'Queue Analysis',   shortLabel: 'Queues',     icon: 'Σ', kind: 'main' },
+  { path: '/queues/analytics', id: 'queues-analytics', label: 'Queue Analytics', shortLabel: 'Analytics', icon: '∿', kind: 'special' },
+  { path: '/reference', id: 'reference', label: 'Reference Models', shortLabel: 'References', icon: '📖', kind: 'main' },
+  { path: '/assets',    id: 'assets',    label: 'Assets',                                     icon: '◇', kind: 'main' },
+  { path: '/settings',  id: 'settings',  label: 'Settings',                                   icon: '⚙', kind: 'main' },
 ];
 
 /**

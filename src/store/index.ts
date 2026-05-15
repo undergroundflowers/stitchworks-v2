@@ -12,5 +12,19 @@ export {
   type Floor,
   type Line,
   type FactoryStructure,
+  type CustomMachineSpec,
+  type CustomWorkerArchetype,
+  type CustomProductSpec,
 } from './project';
 export { useGarments, effectiveGarments, type EffectiveGarments } from './garments';
+export {
+  useMachines,
+  useWorkers,
+  useProducts,
+  type EffectiveMachines,
+  type EffectiveWorkers,
+  type EffectiveProducts,
+  type EffectiveMachine,
+  type EffectiveWorker,
+  type EffectiveProduct,
+} from './catalog';

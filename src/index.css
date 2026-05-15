@@ -8,7 +8,7 @@ body,
   margin: 0;
   padding: 0;
   height: 100%;
-  background: #fbfaf6;
+  background: #ffffff;
   font-family: 'Inter', system-ui, -apple-system, sans-serif;
   -webkit-font-smoothing: antialiased;
   -moz-osx-font-smoothing: grayscale;
@@ -31,5 +31,15 @@ body,
   }
   50% {
     opacity: 0.4;
+  }
+}
+
+@keyframes sw-pulse-bottleneck {
+  0%,
+  100% {
+    box-shadow: 0 0 0 0 rgba(231, 76, 60, 0);
+  }
+  50% {
+    box-shadow: 0 0 0 4px rgba(231, 76, 60, 0.25);
   }
 }
