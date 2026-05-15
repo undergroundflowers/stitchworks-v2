@@ -1,5 +1,5 @@
 import { useEffect, useReducer, useState } from 'react';
-import { Route, Routes, useLocation } from 'react-router-dom';
+import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
 import { TopBar } from './shell/TopBar';
 import { INITIAL_GAME } from './lib/game';
 import { SW_COLORS } from './design/tokens';
@@ -8,22 +8,23 @@ import { TweaksPanel, TweakSection, TweakSlider, TweakRadio, useTweaks } from '.
 
 import { useTwin } from './store/twin';
 import { buildDemoTwin } from './domain/twin';
+import { useProject } from './store/project';
 
 import { MenuPage } from './pages/Menu';
 import { OrdersPage } from './pages/Orders';
 import { LiveSimPage } from './pages/LiveSim';
-import { LineBalancePage } from './pages/LineBalance';
 import { ScenariosPage } from './pages/Scenarios';
 import { ResourcesPage } from './pages/Resources';
 import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
 import { Onboarding } from './pages/Onboarding';
-import { DeptInteriorPage } from './pages/DeptInterior';
-import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { BuilderPage } from './pages/Builder';
 import { LiveFloorPage } from './pages/LiveFloor';
 import { AssetsGalleryPage } from './pages/AssetsGallery';
 import { ReferenceModelsPage } from './pages/ReferenceModels';
+import { WorkstationDetailPage } from './pages/WorkstationDetail';
+import { QueueIndexPage } from './pages/QueueIndex';
+import { QueueAnalyticsPage } from './pages/QueueAnalytics';
 
 /**
  * App shell: top bar + route outlet, vibe-driven theming, the floating
@@ -34,6 +35,7 @@ import { ReferenceModelsPage } from './pages/ReferenceModels';
  */
 export default function App() {
   const location = useLocation();
+  const navigate = useNavigate();
   const [t, setTweak] = useTweaks(SW_TWEAK_DEFAULTS);
   // Vibe mutates SW_COLORS/SW_FONTS/SW_RADIUS in place. Force a re-render so
   // every component re-reads them on next paint.
@@ -55,6 +57,16 @@ export default function App() {
       s.scenarios.length === 0
     ) {
       s.loadCanonical(buildDemoTwin());
+    }
+  }, []);
+
+  // Boot-time sweep of leftover scratch garments (dvss / asdf / test / etc.).
+  // Idempotent — no-op when there's nothing to remove. Logs in dev so it's
+  // easy to spot the migration firing.
+  useEffect(() => {
+    const removed = useProject.getState().purgeTestGarments();
+    if (removed > 0 && import.meta.env.DEV) {
+      console.info(`[stitchworks] purged ${removed} scratch garment${removed === 1 ? '' : 's'} on boot`);
     }
   }, []);
 
@@ -85,10 +97,10 @@ export default function App() {
     }
     setShowOnboarding(false);
     if (!skipped) {
-      // mirror the original behaviour: completing onboarding lands you on
-      // the live floor; skipping leaves you wherever you were
-      window.history.pushState({}, '', '/builder');
-      window.dispatchEvent(new PopStateEvent('popstate'));
+      // Completing onboarding lands you on the live floor; skipping leaves
+      // you wherever you were. (HashRouter listens for hashchange, so we
+      // route through useNavigate rather than pushState + popstate.)
+      navigate('/floor');
     }
   };
 
@@ -113,10 +125,13 @@ export default function App() {
           <Route path="/" element={<MenuPage />} />
           <Route path="/orders" element={<OrdersPage />} />
           <Route path="/sim" element={<LiveSimPage />} />
-          <Route path="/balance" element={<LineBalancePage />} />
+          {/* /balance is the merged Reports hub (performance + line balance +
+              validation tabs). The legacy /kpi path redirects here so existing
+              links still resolve. */}
+          <Route path="/balance" element={<ReportsPage />} />
           <Route path="/scenarios" element={<ScenariosPage />} />
           <Route path="/resources" element={<ResourcesPage />} />
-          <Route path="/kpi" element={<ReportsPage />} />
+          <Route path="/kpi" element={<Navigate to="/balance" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
           {/* Live Floor — iso 3D / top 2D / heat-map views over the active twin */}
           <Route path="/floor" element={<LiveFloorPage />} />
@@ -124,8 +139,12 @@ export default function App() {
               Both /iso (legacy nav id) and /builder route here. */}
           <Route path="/builder" element={<BuilderPage />} />
           <Route path="/iso" element={<BuilderPage />} />
-          <Route path="/dept/:deptId" element={<DeptInteriorPage />} />
+          <Route path="/queues" element={<QueueIndexPage />} />
+          <Route path="/queues/analytics" element={<QueueAnalyticsPage />} />
           <Route path="/workstation/:deptId/:wsId" element={<WorkstationDetailPage />} />
+          {/* Dept interior screen is not yet ported.
+              Bounce back to Builder so users don't land on a dead-end stub. */}
+          <Route path="/dept/:deptId" element={<Navigate to="/builder" replace />} />
           <Route path="/assets" element={<AssetsGalleryPage />} />
           <Route path="/reference" element={<ReferenceModelsPage />} />
         </Routes>

@@ -1,3 +1,4 @@
+import { useEffect, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { ROUTES } from '../lib/routes';
@@ -6,6 +7,13 @@ import type { GameState } from '../lib/game';
 interface TopBarProps {
   game: GameState;
 }
+
+/** Below this width the bar tightens — wordmark hides, nav switches to
+ *  shortLabel where one exists, factory chip drops its name. Set to catch
+ *  ~13" laptops (1280px) and anything narrower. */
+const NARROW_BREAKPOINT = 1180;
+/** Below this the brand wordmark disappears entirely (logo only). */
+const COMPACT_BREAKPOINT = 980;
 
 /**
  * Sticky top HUD shown on every page except the splash menu. Renders the
@@ -20,15 +28,35 @@ export function TopBar({ game }: TopBarProps) {
   const currentRoute =
     ROUTES.find((r) => r.path === location.pathname)?.id ?? 'menu';
 
+  // Listen for window resize so the bar can tighten without a refresh. Keeps
+  // the bar self-contained (no global context). Throttled via rAF.
+  const [width, setWidth] = useState(() =>
+    typeof window === 'undefined' ? 1440 : window.innerWidth,
+  );
+  useEffect(() => {
+    let raf = 0;
+    const onResize = () => {
+      cancelAnimationFrame(raf);
+      raf = requestAnimationFrame(() => setWidth(window.innerWidth));
+    };
+    window.addEventListener('resize', onResize);
+    return () => {
+      cancelAnimationFrame(raf);
+      window.removeEventListener('resize', onResize);
+    };
+  }, []);
+  const narrow = width < NARROW_BREAKPOINT;
+  const compact = width < COMPACT_BREAKPOINT;
+
   return (
     <div
       style={{
         background: SW_COLORS.ink,
         color: SW_COLORS.paper,
-        padding: '0 16px',
+        padding: narrow ? '0 10px' : '0 16px',
         display: 'flex',
         alignItems: 'center',
-        gap: 14,
+        gap: narrow ? 8 : 14,
         height: 54,
         borderBottom: `1px solid #ffffff15`,
         flexShrink: 0,
@@ -41,7 +69,7 @@ export function TopBar({ game }: TopBarProps) {
           cursor: 'pointer',
           display: 'flex',
           alignItems: 'center',
-          gap: 9,
+          gap: narrow ? 6 : 9,
         }}
       >
         <svg width="22" height="22" viewBox="0 0 32 32">
@@ -61,23 +89,25 @@ export function TopBar({ game }: TopBarProps) {
             strokeLinecap="square"
           />
         </svg>
-        <span
-          style={{
-            fontFamily: SW_FONTS.display,
-            fontSize: 14,
-            fontWeight: 900,
-            letterSpacing: '-0.01em',
-          }}
-        >
-          STITCHWORKS
-        </span>
+        {!compact && (
+          <span
+            style={{
+              fontFamily: SW_FONTS.display,
+              fontSize: 14,
+              fontWeight: 900,
+              letterSpacing: '-0.01em',
+            }}
+          >
+            STITCHWORKS
+          </span>
+        )}
       </div>
 
-      <div style={{ width: 1, height: 24, background: '#ffffff20' }} />
+      {!compact && <div style={{ width: 1, height: 24, background: '#ffffff20' }} />}
 
       {/* Factory + settings icon */}
-      <div style={{ fontFamily: SW_FONTS.body, fontSize: 12, display: 'flex', alignItems: 'center', gap: 8 }}>
-        <div style={{ fontWeight: 700, fontSize: 12 }}>{game.factoryName}</div>
+      <div style={{ fontFamily: SW_FONTS.body, fontSize: 12, display: 'flex', alignItems: 'center', gap: narrow ? 6 : 8 }}>
+        {!narrow && <div style={{ fontWeight: 700, fontSize: 12 }}>{game.factoryName}</div>}
         <button
           onClick={() => navigate('/settings')}
           aria-label="Settings"
@@ -109,9 +139,10 @@ export function TopBar({ game }: TopBarProps) {
       </div>
 
       {/* Nav */}
-      <div style={{ flex: 1, display: 'flex', justifyContent: 'center', gap: 2 }}>
+      <div style={{ flex: 1, display: 'flex', justifyContent: 'center', gap: narrow ? 0 : 2, minWidth: 0 }}>
         {ROUTES.filter((r) => r.kind === 'main' && r.id !== 'settings').map((r) => {
           const active = currentRoute === r.id;
+          const label = narrow && r.shortLabel ? r.shortLabel : r.label;
           return (
             <button
               key={r.id}
@@ -126,21 +157,22 @@ export function TopBar({ game }: TopBarProps) {
                 background: active ? '#ffffff15' : 'transparent',
                 border: 'none',
                 cursor: 'pointer',
-                padding: '8px 12px',
+                padding: narrow ? '7px 8px' : '8px 12px',
                 color: active ? SW_COLORS.brand : '#ffffffcc',
                 fontFamily: SW_FONTS.body,
-                fontSize: 12,
+                fontSize: narrow ? 11.5 : 12,
                 fontWeight: 600,
                 display: 'flex',
                 alignItems: 'center',
-                gap: 6,
+                gap: narrow ? 4 : 6,
                 borderRadius: SW_RADIUS.sm,
                 transition: 'background 100ms',
                 position: 'relative',
+                whiteSpace: 'nowrap',
               }}
             >
-              <span style={{ fontSize: 14 }}>{r.icon}</span>
-              <span>{r.label}</span>
+              <span style={{ fontSize: narrow ? 13 : 14 }}>{r.icon}</span>
+              <span>{label}</span>
               {active && (
                 <div
                   style={{

@@ -353,42 +353,6 @@ export const REFERENCE_MODELS: ReferenceModel[] = [
   },
 
   {
-    slug: 'sime-2019-ladies-tunic',
-    title: "Ladies' Tunic — 54-op Line",
-    authorYear: 'Sime, Jana & Panghal 2019',
-    citation:
-      'Sime, H., Jana, P., & Panghal, D. (2019). Feasibility of Using Simulation Technique for Line Balancing in Apparel Industry. Procedia Manufacturing, 30, 300–307.',
-    garment: "Ladies' tunic",
-    setting: 'Ethiopian Textile Industry Development Institute · NIFT Delhi collab',
-    pitch:
-      'Largest line in the set: 54 ops, 62 operators, 5 what-if scenarios. Skilled-operator boost at bottlenecks (+9.87 %) is the headline finding.',
-    method: 'Arena 14.7, 18 replications matching 18 days of field data',
-    literaturePath: 'Literature/Reference Models/03-sime-2019-ladies-tunic/model.md',
-    operationCount: 54,
-    // Sime does not list the 54 ops in the paper — we use a synthetic-but-section-correct
-    // bulletin built from the Fig. 2 topology. See operations.json caveat.
-    garmentTemplate: mkTemplate(
-      'ref-ladies-tunic-sime-2019',
-      "Ladies' Tunic (Sime 2019, synthetic ops)",
-      'top',
-      "54-op ladies' tunic bulletin. Paper does not enumerate ops — names here are typical placeholders, sections from Fig. 2 are exact.",
-      [],
-      10,
-      'Validates large-line operator-allocation logic. Pair with the 5 published scenarios.',
-    ),
-    baseline: {
-      operators: 62,
-      throughputPerShiftPcs: 446,
-      notes: 'Productivity 7.19 pcs/op/shift. Validated t₀ = 0.65 < 2.101.',
-    },
-    proposed: {
-      operators: 62,
-      throughputPerShiftPcs: 490,
-      notes: 'S3: 5–10 % faster operators on bottleneck ops → +9.87 % (same head count).',
-    },
-  },
-
-  {
     slug: 'morshed-2014-polo-shirt',
     title: 'Polo Shirt — Work-Sharing',
     authorYear: 'Morshed & Palash 2014',

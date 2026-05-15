@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, type OperatorAssignment } from '../components';
+import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, type OperatorAssignment } from '../components';
 import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -47,6 +47,9 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const setYamazumiOverride = project.setYamazumiOverride;
   const clearYamazumiOverride = project.clearYamazumiOverride;
   const [period, setPeriod] = useState<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>('SHIFT');
+  // In-page tab nav. Line balance is a part of performance, so it lives as a
+  // section under the same Reports umbrella rather than its own route.
+  const [tab, setTab] = useState<'performance' | 'balance' | 'validation'>('performance');
 
   // Save-scenario modal state. We avoid `window.prompt()` because it's
   // suppressed inside many embedded preview / iframe contexts, which silently
@@ -226,12 +229,23 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     };
   }, [refModel, refCtx.variantKey, pmlSinkThroughput, pmlAnyObserved, pmlTwin]);
 
+  // Period scaling for cumulative KPIs. Throughput is a rate and percentages
+  // (efficiency, utilization) are intensive — they don't scale. Only OUTPUT
+  // and other tally-style numbers multiply by working-day count. Sri Lankan
+  // apparel convention: 1 shift/day, 6 working days/week, ~26 working days/month.
+  const periodMultiplier = period === 'WEEK' ? 6 : period === 'MONTH' ? 26 : 1;
+  const periodLabel = period === 'SHIFT' ? 'SHIFT' : period === 'DAY' ? 'DAY' : period === 'WEEK' ? 'WEEK' : 'MONTH';
+  const scaledProducedMean = producedPieces * periodMultiplier;
+  const scaledProducedStd = (runs > 1 ? agg.producedPieces.std : 0) * periodMultiplier;
+
   return (
     <div style={embedded
       ? { width:'100%', background: SW_COLORS.paperDeep, padding: 24 }
       : { width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
-      <SectionHeader kicker="Reports" title="Production KPIs"
-        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} ops respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
+      <SectionHeader
+        kicker="Reports"
+        title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Model validation' : 'Production performance'}
+        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} ops respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
@@ -248,7 +262,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             </Button>
             <Button variant="primary" size="sm" icon="✦"
               onClick={() => {
-                const defaultName = `${yamTemplate.name} · ${yamOperators} ops · ${runs > 1 ? `${runs}× ` : ''}${new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' })}`;
+                // Append device wall-clock so the user can recognise this
+                // save later; the "(device)" suffix calls out that the
+                // timestamp is wall time, not sim/calendar time.
+                const wallStamp = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
+                const defaultName = `${yamTemplate.name} · ${yamOperators} ops · ${runs > 1 ? `${runs}× ` : ''}${wallStamp} (device)`;
                 setSaveName(defaultName);
                 setSaveNotes('');
                 setSaveOpen(true);
@@ -266,13 +284,21 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         }
       />
 
+      {/* ── In-page tabs ─────────────────────────────────────────────────
+          Reports is the umbrella. Performance gives the headline KPIs;
+          Line Balance gives the Yamazumi authoring surface; Validation
+          shows how the model lines up with the reference paper / wired
+          block graph. */}
+      <ReportTabBar value={tab} onChange={setTab} hasReference={!!(refModel && refCtx.variantKey)} hasPml={pmlAnyObserved} />
+
       {/* ── Reference paper validation ───────────────────────────────────
           Visible only when the user has loaded a published case study into
           the active twin from the Simulation tab. Side-by-side paper KPIs
           vs. Stitchworks observed, with delta% and pass/fail badges. */}
-      {refModel && refCtx.variantKey && (
-        <Card padding={20} style={{ marginBottom: 20, borderLeft: `4px solid ${SW_COLORS.brand}` }}>
-          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap' }}>
+      {tab === 'validation' && refModel && refCtx.variantKey && (
+        <HideableBox style={{ marginBottom: 20 }}>
+        <Card padding={20} style={{ borderLeft: `4px solid ${SW_COLORS.brand}` }}>
+          <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap', paddingRight: 36 }}>
             <div>
               <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '2px', marginBottom: 4 }}>
                 📚 PAPER VALIDATION
@@ -369,14 +395,17 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             </>
           )}
         </Card>
+        </HideableBox>
       )}
 
       {/* ── PML simulation report ───────────────────────────────────────
           Reads observed KPIs that the Builder's PML runner wrote onto
           each workstation. Lets the user re-run from this page so they
           don't have to bounce back to Builder for a quick check. */}
-      <Card padding={20} style={{ marginBottom: 20, borderLeft: `4px solid ${SW_COLORS.brand}` }}>
-        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap' }}>
+      {tab === 'validation' && (
+      <HideableBox style={{ marginBottom: 20 }}>
+      <Card padding={20} style={{ borderLeft: `4px solid ${SW_COLORS.brand}` }}>
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'flex-start', gap: 14, marginBottom: 12, flexWrap: 'wrap', paddingRight: 36 }}>
           <div>
             <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>
               ⚙ PML SIMULATION
@@ -420,7 +449,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10, marginBottom: 12 }}>
               <Stat label="SINK THROUGHPUT" value={Math.round(pmlSinkThroughput).toLocaleString()} unit="pcs/hr" color={SW_COLORS.brand} />
               <Stat label="ACTIVE BLOCKS"   value={String(pmlBlocks.length)}                                  unit="" color={SW_COLORS.fabric} />
-              <Stat label="BOTTLENECK"       value={pmlBottleneck ? pmlBottleneck.ws.name.slice(0, 18) : '—'}  unit=""        color={pmlBottleneck ? SW_COLORS.alarm : SW_COLORS.muted} />
+              <Stat label="BOTTLENECK"       value={pmlBottleneck ? (() => { const n = pmlBottleneck.ws.name.replace(/^\d+\.\s*/, ''); return n.length > 16 ? n.slice(0, 15) + '…' : n; })() : '—'}  unit=""        color={pmlBottleneck ? SW_COLORS.alarm : SW_COLORS.muted} />
               <Stat label="MAX UTIL"         value={Math.max(0, ...pmlBlocks.map((b) => b.util)).toFixed(0)}    unit="%"       color={SW_COLORS.thread} />
             </div>
 
@@ -476,161 +505,168 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           </>
         )}
       </Card>
+      </HideableBox>
+      )}
 
+      {tab === 'performance' && (
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
-        <KpiTile label="OUTPUT"     mean={producedPieces} std={runs > 1 ? agg.producedPieces.std : 0} unit="pcs" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.brand}/>
-        <KpiTile label="THROUGHPUT" mean={throughputPerHr} std={runs > 1 ? agg.throughputPerHr.std : 0} unit="pcs/hr" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.ok}/>
-        <KpiTile label="EFFICIENCY" mean={efficiency} std={runs > 1 ? agg.efficiencyPct.std : 0} unit="%" formatter={(v) => v.toFixed(1)} color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
-        <KpiTile label="MEAN LEAD"  mean={meanLeadTime} std={runs > 1 ? agg.meanLeadTime.std : 0} unit="min" formatter={(v) => v.toFixed(1)} color={SW_COLORS.bobbin}/>
-        <KpiTile label="WIP"        mean={wipBundles} std={runs > 1 ? agg.wipBundles.std : 0} unit="bundles" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.warn}/>
-        <KpiTile label="UTIL"       mean={utilization * 100} std={runs > 1 ? agg.utilization.std * 100 : 0} unit="%" formatter={(v) => v.toFixed(0)} color={SW_COLORS.thread}/>
+        <HideableBox toggleSize={22} toggleOffset={6}>
+          <KpiTile label={`OUTPUT / ${periodLabel}`} mean={scaledProducedMean} std={scaledProducedStd} unit="pcs" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.brand}/>
+        </HideableBox>
+        <HideableBox toggleSize={22} toggleOffset={6}>
+          <KpiTile label="THROUGHPUT" mean={throughputPerHr} std={runs > 1 ? agg.throughputPerHr.std : 0} unit="pcs/hr" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.ok}/>
+        </HideableBox>
+        <HideableBox toggleSize={22} toggleOffset={6}>
+          <KpiTile label="EFFICIENCY" mean={efficiency} std={runs > 1 ? agg.efficiencyPct.std : 0} unit="%" formatter={(v) => v.toFixed(1)} color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+        </HideableBox>
+        <HideableBox toggleSize={22} toggleOffset={6}>
+          <KpiTile label="MEAN LEAD"  mean={meanLeadTime} std={runs > 1 ? agg.meanLeadTime.std : 0} unit="min" formatter={(v) => v.toFixed(1)} color={SW_COLORS.bobbin}/>
+        </HideableBox>
+        <HideableBox toggleSize={22} toggleOffset={6}>
+          <KpiTile label="WIP"        mean={wipBundles} std={runs > 1 ? agg.wipBundles.std : 0} unit="bundles" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.warn}/>
+        </HideableBox>
+        <HideableBox toggleSize={22} toggleOffset={6}>
+          <KpiTile label="UTIL"       mean={utilization * 100} std={runs > 1 ? agg.utilization.std * 100 : 0} unit="%" formatter={(v) => v.toFixed(0)} color={SW_COLORS.thread}/>
+        </HideableBox>
       </div>
+      )}
 
       {/* Yamazumi — drag operations between operators to rebalance */}
-      <Card padding={20} style={{ marginBottom:14 }}>
-        <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10, gap: 14, flexWrap: 'wrap' }}>
-          <div>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>YAMAZUMI · LINE BALANCE</div>
-            <div style={{ fontSize:12, color: SW_COLORS.muted }}>
-              Operator-by-operation SMV stack with takt-line overlay. Drag any segment onto another operator's bar to rebalance manually. Bars over the takt line are bottlenecks.
-            </div>
-          </div>
-          <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
-            <ToggleGroup value={yamGarment} onChange={setYamGarment} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
-            <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
-              <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPS</span>
-              <input type="number" min={4} max={60} value={yamOperators}
-                onChange={e => setYamOperators(Math.max(4, Math.min(60, parseInt(e.target.value) || 4)))}
-                style={{ width: 56, padding: '4px 8px', border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13 }}/>
-            </div>
-            {storedOverride && (
-              <Button variant="ghost" size="sm" onClick={() => clearYamazumiOverride(yamGarment)}>Reset to auto</Button>
-            )}
-          </div>
-        </div>
-        <Yamazumi assignments={yamAssignments} taktMin={yamTakt} height={300} onChange={handleYamazumiChange}/>
-        <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginTop: 8 }}>
-          <Stat label="GARMENT SAM" value={yamTemplate.totalSmv.toFixed(2)} unit="min"/>
-          <Stat label="TAKT" value={yamTakt.toFixed(3)} unit="min" color={SW_COLORS.brand}/>
-          <Stat label="BOTTLENECK" value={yamBottleneck.toFixed(3)} unit="min" color={SW_COLORS.alarm}/>
-          <Stat label="BALANCE LOSS" value={yamBalance.toFixed(1)} unit="%" color={yamBalance > 25 ? SW_COLORS.alarm : SW_COLORS.thread}/>
-          <Stat label="LINE EFF" value={yamEfficiency.toFixed(1)} unit="%" color={yamEfficiency >= 80 ? SW_COLORS.ok : SW_COLORS.thread}/>
-        </div>
-        <div style={{ marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
-          Smoothness index {yamSmoothness.toFixed(3)} (lower = smoother) · {storedOverride ? `Manual override (${storedOverride.length} operators)` : 'LPT auto-assignment'} · Source bulletin: {yamTemplate.operations.length} operations from {yamTemplate.name}
-        </div>
-      </Card>
-
-      <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:14, marginBottom:14 }}>
+      {tab === 'balance' && (
+      <HideableBox style={{ marginBottom: 14 }}>
         <Card padding={20}>
-          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:14 }}>
+          <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', marginBottom:10, gap: 14, flexWrap: 'wrap', paddingRight: 36 }}>
             <div>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>OUTPUT OVER TIME</div>
-              <div style={{ fontSize:12, color: SW_COLORS.muted }}>Bundles produced per 5-min interval — sampled live from the engine.</div>
-            </div>
-            <div style={{ display:'flex', gap:14, fontSize:11, fontFamily: SW_FONTS.mono, fontWeight:700 }}>
-              <span><span style={{ color: SW_COLORS.brand }}>■</span> Cumulative produced</span>
-              <span><span style={{ color: SW_COLORS.bobbin }}>■</span> WIP</span>
-            </div>
-          </div>
-          <KpiLineChart history={agg.firstHistory}/>
-        </Card>
-
-        <Card padding={20}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>BOTTLENECKS (LIVE)</div>
-          {agg.firstStations.length === 0 ? (
-            <div style={{ fontSize:12, color: SW_COLORS.muted }}>Sim has not run yet.</div>
-          ) : (
-            [...agg.firstStations]
-              .sort((a, b) => b.queueLen - a.queueLen)
-              .slice(0, 6)
-              .map((s, i) => (
-                <div key={s.opId} style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
-                  <span style={{ flex:1, fontSize:12, fontWeight:600 }}>
-                    <span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, fontSize: 10, fontWeight: 700, marginRight: 6 }}>{s.opCode}</span>
-                    {s.opName}
-                  </span>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: s.queueLen > 5 ? SW_COLORS.alarm : SW_COLORS.muted }}>Q={s.queueLen}</span>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: SW_COLORS.thread }}>{(s.utilization * 100).toFixed(0)}%</span>
-                </div>
-              ))
-          )}
-        </Card>
-      </div>
-
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr 1fr', gap: 14, marginBottom:14 }}>
-        <Card padding={20}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>BY SYSTEM</div>
-          {[
-            { k:'PBS',     v: 88, n: '524 pcs', col: SW_COLORS.brand },
-            { k:'Modular', v: 82, n: '312 pcs', col: SW_COLORS.fabric },
-            { k:'UPS',     v: 76, n: '208 pcs', col: SW_COLORS.bobbin },
-            { k:'Straight',v: 64, n: '140 pcs', col: SW_COLORS.thread },
-          ].map(r => (
-            <div key={r.k} style={{ marginBottom: 12 }}>
-              <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:4 }}>
-                <span style={{ fontWeight:700, fontSize:13 }}>{r.k}</span>
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize:12, fontWeight:700, color: r.col }}>{r.v}%</span>
+              <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>YAMAZUMI · LINE BALANCE</div>
+              <div style={{ fontSize:12, color: SW_COLORS.muted }}>
+                Operator-by-operation SMV stack with takt-line overlay. Drag any segment onto another operator's bar to rebalance manually. Bars over the takt line are bottlenecks.
               </div>
-              <Progress value={r.v} color={r.col} height={8}/>
-              <div style={{ fontSize:10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop:2 }}>{r.n}</div>
             </div>
-          ))}
-        </Card>
-
-        <Card padding={20}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>DEFECTS BREAKDOWN</div>
-          <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height: 120 }}>
-            <DonutChart slices={[
-              { v: 38, c: SW_COLORS.alarm, l: 'Stitch' },
-              { v: 22, c: SW_COLORS.thread, l: 'Cut' },
-              { v: 18, c: SW_COLORS.bobbin, l: 'Fabric' },
-              { v: 14, c: SW_COLORS.trim, l: 'Trim' },
-              { v: 8,  c: SW_COLORS.fabric, l: 'Other' },
-            ]}/>
+            <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
+              <ToggleGroup value={yamGarment} onChange={setYamGarment} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
+              <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
+                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPS</span>
+                <input type="number" min={4} max={60} value={yamOperators}
+                  onChange={e => setYamOperators(Math.max(4, Math.min(60, parseInt(e.target.value) || 4)))}
+                  style={{ width: 56, padding: '4px 8px', border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13 }}/>
+              </div>
+              {storedOverride && (
+                <Button variant="ghost" size="sm" onClick={() => clearYamazumiOverride(yamGarment)}>Reset to auto</Button>
+              )}
+            </div>
           </div>
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, fontSize:11, marginTop:8 }}>
+          <Yamazumi assignments={yamAssignments} taktMin={yamTakt} height={300} onChange={handleYamazumiChange}/>
+          <div style={{ display: 'grid', gridTemplateColumns: 'repeat(5, 1fr)', gap: 8, marginTop: 8 }}>
+            <Stat label="GARMENT SAM" value={yamTemplate.totalSmv.toFixed(2)} unit="min"/>
+            <Stat label="TAKT" value={yamTakt.toFixed(3)} unit="min" color={SW_COLORS.brand}/>
+            <Stat label="BOTTLENECK" value={yamBottleneck.toFixed(3)} unit="min" color={SW_COLORS.alarm}/>
+            <Stat label="BALANCE LOSS" value={yamBalance.toFixed(1)} unit="%" color={yamBalance > 25 ? SW_COLORS.alarm : SW_COLORS.thread}/>
+            <Stat label="LINE EFF" value={yamEfficiency.toFixed(1)} unit="%" color={yamEfficiency >= 80 ? SW_COLORS.ok : SW_COLORS.thread}/>
+          </div>
+          <div style={{ marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
+            Smoothness index {yamSmoothness.toFixed(3)} (lower = smoother) · {storedOverride ? `Manual override (${storedOverride.length} operators)` : 'LPT auto-assignment'} · Source bulletin: {yamTemplate.operations.length} operations from {yamTemplate.name}
+          </div>
+        </Card>
+      </HideableBox>
+      )}
+
+      {tab === 'performance' && (
+      <div style={{ display:'grid', gridTemplateColumns:'2fr 1fr', gap:14, marginBottom:14 }}>
+        <HideableBox>
+          <Card padding={20}>
+            <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:14, paddingRight: 36 }}>
+              <div>
+                <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>OUTPUT OVER TIME</div>
+                <div style={{ fontSize:12, color: SW_COLORS.muted }}>Bundles produced per 5-min interval — sampled live from the engine.</div>
+              </div>
+              <div style={{ display:'flex', gap:14, fontSize:11, fontFamily: SW_FONTS.mono, fontWeight:700 }}>
+                <span><span style={{ color: SW_COLORS.brand }}>■</span> Cumulative produced</span>
+                <span><span style={{ color: SW_COLORS.bobbin }}>■</span> WIP</span>
+              </div>
+            </div>
+            <KpiLineChart history={agg.firstHistory}/>
+          </Card>
+        </HideableBox>
+
+        <HideableBox>
+          <Card padding={20}>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14, paddingRight: 36 }}>BOTTLENECKS (LIVE)</div>
+            {agg.firstStations.length === 0 ? (
+              <div style={{ fontSize:12, color: SW_COLORS.muted }}>Sim has not run yet.</div>
+            ) : (
+              [...agg.firstStations]
+                .sort((a, b) => b.queueLen - a.queueLen)
+                .slice(0, 6)
+                .map((s, i) => (
+                  <div key={s.opId} style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
+                    <span style={{ flex:1, fontSize:12, fontWeight:600 }}>
+                      <span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, fontSize: 10, fontWeight: 700, marginRight: 6 }}>{s.opCode}</span>
+                      {s.opName}
+                    </span>
+                    <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: s.queueLen > 5 ? SW_COLORS.alarm : SW_COLORS.muted }}>Q={s.queueLen}</span>
+                    <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: SW_COLORS.thread }}>{(s.utilization * 100).toFixed(0)}%</span>
+                  </div>
+                ))
+            )}
+          </Card>
+        </HideableBox>
+      </div>
+      )}
+
+      {tab === 'performance' && (
+      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 14, marginBottom:14 }}>
+        <HideableBox>
+          <Card padding={20}>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14, paddingRight: 36 }}>BY SYSTEM</div>
             {[
-              { c: SW_COLORS.alarm, l:'Stitch', v:38 },
-              { c: SW_COLORS.thread, l:'Cut', v:22 },
-              { c: SW_COLORS.bobbin, l:'Fabric', v:18 },
-              { c: SW_COLORS.trim, l:'Trim', v:14 },
-            ].map((d, i) => (
-              <div key={i} style={{ display:'flex', alignItems:'center', gap:6 }}>
-                <span style={{ width:8, height:8, background:d.c, borderRadius:2 }}/>
-                <span style={{ flex:1 }}>{d.l}</span>
-                <span style={{ fontFamily: SW_FONTS.mono, fontWeight:700 }}>{d.v}%</span>
+              { k:'PBS',     v: 88, basePcs: 524, col: SW_COLORS.brand },
+              { k:'Modular', v: 82, basePcs: 312, col: SW_COLORS.fabric },
+              { k:'UPS',     v: 76, basePcs: 208, col: SW_COLORS.bobbin },
+              { k:'Straight',v: 64, basePcs: 140, col: SW_COLORS.thread },
+            ].map(r => ({ ...r, n: `${(r.basePcs * periodMultiplier).toLocaleString()} pcs` })).map(r => (
+              <div key={r.k} style={{ marginBottom: 12 }}>
+                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:4 }}>
+                  <span style={{ fontWeight:700, fontSize:13 }}>{r.k}</span>
+                  <span style={{ fontFamily: SW_FONTS.mono, fontSize:12, fontWeight:700, color: r.col }}>{r.v}%</span>
+                </div>
+                <Progress value={r.v} color={r.col} height={8}/>
+                <div style={{ fontSize:10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop:2 }}>{r.n}</div>
               </div>
             ))}
-          </div>
-        </Card>
+          </Card>
+        </HideableBox>
 
-        <Card padding={20}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>COST PER GARMENT</div>
-          {[
-            { k:'Material', v:1.84, col: SW_COLORS.fabric },
-            { k:'Labor',    v:1.20, col: SW_COLORS.brand },
-            { k:'Overhead', v:0.45, col: SW_COLORS.bobbin },
-            { k:'Defect',   v:0.18, col: SW_COLORS.alarm },
-            { k:'Energy',   v:0.17, col: SW_COLORS.thread },
-          ].map((c, i) => {
-            const total = 3.84;
-            return (
-              <div key={i} style={{ marginBottom:8 }}>
-                <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, marginBottom:3 }}>
-                  <span style={{ fontWeight:600 }}>{c.k}</span>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontWeight:700 }}>${c.v.toFixed(2)}</span>
+        <HideableBox>
+          <Card padding={20}>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14, paddingRight: 36 }}>DEFECTS BREAKDOWN</div>
+            <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height: 120 }}>
+              <DonutChart slices={[
+                { v: 38, c: SW_COLORS.alarm, l: 'Stitch' },
+                { v: 22, c: SW_COLORS.thread, l: 'Cut' },
+                { v: 18, c: SW_COLORS.bobbin, l: 'Fabric' },
+                { v: 14, c: SW_COLORS.trim, l: 'Trim' },
+                { v: 8,  c: SW_COLORS.fabric, l: 'Other' },
+              ]}/>
+            </div>
+            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, fontSize:11, marginTop:8 }}>
+              {[
+                { c: SW_COLORS.alarm, l:'Stitch', v:38 },
+                { c: SW_COLORS.thread, l:'Cut', v:22 },
+                { c: SW_COLORS.bobbin, l:'Fabric', v:18 },
+                { c: SW_COLORS.trim, l:'Trim', v:14 },
+              ].map((d, i) => (
+                <div key={i} style={{ display:'flex', alignItems:'center', gap:6 }}>
+                  <span style={{ width:8, height:8, background:d.c, borderRadius:2 }}/>
+                  <span style={{ flex:1 }}>{d.l}</span>
+                  <span style={{ fontFamily: SW_FONTS.mono, fontWeight:700 }}>{d.v}%</span>
                 </div>
-                <Progress value={c.v/total*100} color={c.col} height={5}/>
-              </div>
-            );
-          })}
-          <div style={{ marginTop: 12, padding:'10px 12px', background: SW_COLORS.brandLite, borderRadius: SW_RADIUS.sm, display:'flex', justifyContent:'space-between' }}>
-            <span style={{ fontWeight:800, fontSize:13 }}>TOTAL</span>
-            <span style={{ fontFamily: SW_FONTS.display, fontWeight:900, fontSize:16, color: SW_COLORS.brandDeep }}>$3.84</span>
-          </div>
-        </Card>
+              ))}
+            </div>
+          </Card>
+        </HideableBox>
+
       </div>
+      )}
 
       <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
         <Button variant="secondary" icon="↓">Export PDF</Button>
@@ -684,6 +720,113 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           }}
         />
       )}
+    </div>
+  );
+}
+
+type ReportTab = 'performance' | 'balance' | 'validation';
+
+interface ReportTabBarProps {
+  value: ReportTab;
+  onChange: (next: ReportTab) => void;
+  hasReference: boolean;
+  hasPml: boolean;
+}
+
+/** Underline-style segmented tabs sitting under the Reports SectionHeader.
+ *  The badge on the Validation tab tells the user when there's something
+ *  to look at — a loaded reference paper, or observed PML KPIs. */
+function ReportTabBar({ value, onChange, hasReference, hasPml }: ReportTabBarProps) {
+  const tabs: { id: ReportTab; label: string; hint: string; badge?: string }[] = [
+    { id: 'performance', label: 'Performance', hint: 'KPIs · output · defects' },
+    { id: 'balance',     label: 'Line Balance', hint: 'Yamazumi · takt · efficiency' },
+    {
+      id: 'validation',
+      label: 'Validation',
+      hint: 'Reference paper · PML run',
+      badge: hasReference ? 'PAPER' : hasPml ? 'PML' : undefined,
+    },
+  ];
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 4,
+        marginBottom: 18,
+        borderBottom: `1px solid ${SW_COLORS.line}`,
+      }}
+    >
+      {tabs.map((t) => {
+        const active = t.id === value;
+        return (
+          <button
+            key={t.id}
+            onClick={() => onChange(t.id)}
+            onMouseEnter={(e) => {
+              if (!active) e.currentTarget.style.color = SW_COLORS.ink;
+            }}
+            onMouseLeave={(e) => {
+              if (!active) e.currentTarget.style.color = SW_COLORS.muted;
+            }}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              cursor: 'pointer',
+              padding: '10px 18px 12px',
+              color: active ? SW_COLORS.ink : SW_COLORS.muted,
+              fontFamily: SW_FONTS.body,
+              fontSize: 13,
+              fontWeight: active ? 800 : 600,
+              display: 'flex',
+              alignItems: 'baseline',
+              gap: 10,
+              position: 'relative',
+              transition: 'color 100ms',
+            }}
+          >
+            <span>{t.label}</span>
+            <span
+              style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                fontWeight: 600,
+                color: active ? SW_COLORS.muted : SW_COLORS.faint,
+                letterSpacing: '0.04em',
+              }}
+            >
+              {t.hint}
+            </span>
+            {t.badge && (
+              <span
+                style={{
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 9,
+                  fontWeight: 800,
+                  letterSpacing: '0.08em',
+                  background: SW_COLORS.brandLite,
+                  color: SW_COLORS.brandDeep,
+                  padding: '2px 5px',
+                  borderRadius: 3,
+                }}
+              >
+                {t.badge}
+              </span>
+            )}
+            {active && (
+              <span
+                style={{
+                  position: 'absolute',
+                  left: 0,
+                  right: 0,
+                  bottom: -1,
+                  height: 2,
+                  background: SW_COLORS.brand,
+                }}
+              />
+            )}
+          </button>
+        );
+      })}
     </div>
   );
 }

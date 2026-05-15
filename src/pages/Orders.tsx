@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, SectionHeader, ProductionSystemDiagram } from '../components';
+import { Card, Button, Stat, SectionHeader, ProductionSystemDiagram, HudSelect } from '../components';
 import { useState, type CSSProperties } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
@@ -45,7 +45,10 @@ export function OrdersPage() {
     garmentTemplateId: project.selectedGarmentId,
     target: 'AQL 2.5',
   });
-  const [system, setSystem] = useState<ProductionSystem>('PBS');
+  // Seed the selected system with whatever recommendSystem() suggests for the
+  // initial qty/deadline so the "Recommended" tile is highlighted on first
+  // paint instead of defaulting to PBS.
+  const [system, setSystem] = useState<ProductionSystem>(() => recommendSystem(1200, 5));
   // Hovering a system tile previews its topology + description without
   // committing the selection. Falls back to the active `system` when null.
   const [hoveredSystem, setHoveredSystem] = useState<ProductionSystem | null>(null);
@@ -64,6 +67,7 @@ export function OrdersPage() {
   function commit(target: '/sim') {
     project.setSelectedGarment(order.garmentTemplateId);
     project.setDefaultOperators(crewSize);
+    project.setSelectedProductionSystem(system);
     navigate(target);
   }
 
@@ -534,11 +538,13 @@ function NewGarmentTemplateModal({ onCancel, onCreate }: NewGarmentTemplateModal
           </label>
           <label style={{ gridColumn: '2 / 3' }}>
             <div style={labelStyle}>CLASS</div>
-            <select value={klass} onChange={(e) => setKlass(e.target.value as GarmentClass)} style={inputStyle}>
-              {GARMENT_CLASS_OPTIONS.map((c) => (
-                <option key={c} value={c}>{c}</option>
-              ))}
-            </select>
+            <HudSelect
+              value={klass}
+              onChange={(v) => setKlass(v as GarmentClass)}
+              variant="light"
+              width="100%"
+              options={GARMENT_CLASS_OPTIONS.map((c) => ({ value: c, label: c }))}
+            />
           </label>
 
           <label style={{ gridColumn: '1 / 3' }}>

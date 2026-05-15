@@ -27,6 +27,7 @@ import {
 } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { HudSelect } from '../components';
 import {
   ISO_FIXTURE_CATALOG,
   APPAREL_CATEGORIES,
@@ -770,38 +771,41 @@ export function BuilderPage() {
           FACTORY BUILDER
         </div>
 
-        {/* Active twin name (editable) */}
-        <input
-          value={twin.name}
-          onChange={(e) => renameActive(e.target.value)}
-          style={{
-            ...inputBase,
-            width: 220,
-            background: SW_COLORS.paperDeep,
-            fontWeight: 700,
-          }}
-        />
-
-        {/* Scenario picker */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 12 }}>
-          <span style={{ ...sectionLabel, marginBottom: 0 }}>SCENARIO</span>
-          <select
+        {/* Active factory picker — one control for switching between the
+            canonical twin and any scenario forks. (Previously this slot held
+            a rename input and the dropdown sat to its right; consolidated so
+            the active-factory label IS the picker. Rename moved to a small
+            pencil button.) */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
+          <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
+          <HudSelect
             value={activeScenarioId ?? '__canonical__'}
-            onChange={(e) => {
-              const v = e.target.value;
+            onChange={(v) => {
               setActiveScenario(v === '__canonical__' ? null : v);
               setSelected(null);
             }}
-            style={{ ...inputBase, width: 200 }}
+            variant="light"
+            size="sm"
+            minWidth={280}
+            options={[
+              { value: '__canonical__', label: `◆ Canonical · ${canonical.name}` },
+              ...scenarios.map((scn) => ({
+                value: scn.id,
+                label: `${bestScenario?.id === scn.id ? '★' : '✦'} ${scn.name}`,
+                tag: bestScenario?.id === scn.id ? 'BEST' : undefined,
+              })),
+            ]}
+          />
+          <button
+            onClick={() => {
+              const next = window.prompt('Rename this factory', twin.name);
+              if (next && next.trim()) renameActive(next.trim());
+            }}
+            style={btnSec}
+            title="Rename the active factory"
           >
-            <option value="__canonical__">◆ Canonical · {canonical.name}</option>
-            {scenarios.map((scn) => (
-              <option key={scn.id} value={scn.id}>
-                {bestScenario?.id === scn.id ? '★' : '✦'} {scn.name}
-                {bestScenario?.id === scn.id ? ' · BEST' : ''}
-              </option>
-            ))}
-          </select>
+            ✎
+          </button>
           <button onClick={onForkScenario} style={btnSec} title="Fork the canonical twin into a new scenario">
             ✦ FORK
           </button>
@@ -911,24 +915,19 @@ export function BuilderPage() {
             ➜ CONNECT
           </button>
           {connect.on && (
-            <select
+            <HudSelect
               value={connect.kind}
-              onChange={(e) =>
-                setConnect((c) => ({ ...c, kind: e.target.value as ConnectorKind }))
-              }
-              style={{
-                ...inputBase,
-                width: 110,
-                fontWeight: 800,
-                fontSize: 10,
-                fontFamily: SW_FONTS.display,
-                letterSpacing: '0.06em',
-              }}
-            >
-              <option value="flow">FLOW</option>
-              <option value="operator">OPERATOR</option>
-              <option value="material">MATERIAL</option>
-            </select>
+              onChange={(v) => setConnect((c) => ({ ...c, kind: v as ConnectorKind }))}
+              variant="light"
+              size="sm"
+              mono
+              minWidth={120}
+              options={[
+                { value: 'flow', label: 'FLOW' },
+                { value: 'operator', label: 'OPERATOR' },
+                { value: 'material', label: 'MATERIAL' },
+              ]}
+            />
           )}
         </div>
 
@@ -991,7 +990,7 @@ export function BuilderPage() {
             }
           }}
           style={btnSec}
-          title="Seed the canonical twin with one line per reference paper (Hossain · Elnaggar · Sime · Morshed · Kursun · Koç) stacked on the same floor."
+          title="Seed the canonical twin with one line per reference paper (Hossain · Elnaggar · Morshed · Kursun · Koç) stacked on the same floor."
         >
           📚 LOAD REF FACTORY
         </button>
@@ -1134,12 +1133,17 @@ export function BuilderPage() {
               return;
             }
             const r = runPmlOnTwin(twin, { writeKpiObserved: setKpiObserved });
+            // Two different time kinds appear here: `wallMs` is real
+            // compute time (how long the engine took on this device);
+            // `meanLeadTimeMin` is model time (how long a bundle takes
+            // through the line). Labels disambiguate so the user doesn't
+            // conflate them.
             setLastRun({
               text:
-                `Ran in ${r.wallMs.toFixed(0)} ms · ` +
+                `Ran in ${r.wallMs.toFixed(0)} ms (wall) · ` +
                 `${r.totalProduced} produced · ` +
                 `${r.throughputPerHr}/hr · ` +
-                `lead ${r.meanLeadTimeMin.toFixed(1)} min` +
+                `lead ${r.meanLeadTimeMin.toFixed(1)} min (model)` +
                 (r.bottleneckName ? ` · ⚠ ${r.bottleneckName}` : ''),
               warnings: r.warnings,
               at: Date.now(),
@@ -1241,7 +1245,7 @@ export function BuilderPage() {
           gridRow: '2',
           position: 'relative',
           overflow: 'hidden',
-          background: '#FAF8F2',
+          background: SW_COLORS.paper,
           cursor: spacePan
             ? (isPanning ? 'grabbing' : 'grab')
             : isPanning
@@ -2007,7 +2011,7 @@ function CanvasSVG(props: CanvasSVGProps) {
         y={vbMinY}
         width={W}
         height={H}
-        fill="#FAF8F2"
+        fill={SW_COLORS.paper}
       />
       {/* Pan/zoom transform — applied in SVG-space rather than via CSS on
           the wrapper, so the SVG keeps filling the stage at 100% even when
@@ -2020,7 +2024,7 @@ function CanvasSVG(props: CanvasSVGProps) {
       <polygon
         data-canvas-bg="true"
         points={ptsToStr([floorTL, floorTR, floorBR, floorBL])}
-        fill="#F2EEE3"
+        fill={SW_COLORS.paperDeep}
         stroke="none"
       />
 
@@ -2779,20 +2783,17 @@ function CadExtractModal({
                   onChange={(e) => setRow(idx, { name: e.target.value })}
                   style={{ ...inputBase, width: '100%' }}
                 />
-                <select
+                <HudSelect
                   value={row.preset.kind}
-                  onChange={(e) => {
-                    const next = DEPT_PRESETS.find((p) => p.kind === e.target.value);
+                  onChange={(v) => {
+                    const next = DEPT_PRESETS.find((p) => p.kind === v);
                     if (next) setRow(idx, { preset: next });
                   }}
-                  style={{ ...inputBase, width: '100%' }}
-                >
-                  {DEPT_PRESETS.map((p) => (
-                    <option key={p.kind} value={p.kind}>
-                      {p.label}
-                    </option>
-                  ))}
-                </select>
+                  variant="light"
+                  size="sm"
+                  width="100%"
+                  options={DEPT_PRESETS.map((p) => ({ value: p.kind, label: p.label }))}
+                />
                 <span
                   style={{
                     fontFamily: SW_FONTS.mono,
@@ -3052,6 +3053,42 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
   const H = 720;
   const CARD_W = 230;
   const CARD_H = 150;
+
+  // Pan + zoom for the logic canvas. Wheel listener is non-passive so we can
+  // preventDefault (block page scroll) and stopPropagation (block the parent
+  // stage's wheel zoom from firing in this mode). Convention: ctrlKey/metaKey
+  // or a "mouse-wheel-shaped" delta = zoom; plain trackpad two-finger swipe =
+  // pan. Pan delta is divided by the SVG fit-scale so a screen pixel of swipe
+  // moves the content by exactly one screen pixel regardless of zoom.
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const [zoom, setZoom] = useState(1);
+  const [pan, setPan] = useState({ x: 0, y: 0 });
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (ev: WheelEvent) => {
+      ev.preventDefault();
+      ev.stopPropagation();
+      const isPinch = ev.ctrlKey || ev.metaKey;
+      const isMouseWheel =
+        ev.deltaMode !== 0 || (ev.deltaX === 0 && Math.abs(ev.deltaY) >= 50);
+      if (isPinch || isMouseWheel) {
+        setZoom((z) =>
+          Math.max(0.3, Math.min(4, z * (ev.deltaY < 0 ? 1.05 : 0.95))),
+        );
+        return;
+      }
+      const rect = el.getBoundingClientRect();
+      const fitScale = Math.min(rect.width / W, rect.height / H);
+      if (fitScale <= 0) return;
+      setPan((p) => ({
+        x: p.x - ev.deltaX / fitScale,
+        y: p.y - ev.deltaY / fitScale,
+      }));
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
   const cols = 4;
   const colStep = (W - 80 - CARD_W) / Math.max(1, cols - 1);
   const rowStep = CARD_H + 80;
@@ -3064,14 +3101,17 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
 
   return (
     <div
+      ref={containerRef}
       style={{
         position: 'absolute',
         inset: 0,
-        overflow: 'auto',
+        overflow: 'hidden',
         padding: 0,
-        background:
-          'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px), ' + SW_COLORS.paperDeep,
+        backgroundColor: SW_COLORS.paperDeep,
+        backgroundImage:
+          'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px)',
         backgroundSize: '24px 24px',
+        touchAction: 'none',
       }}
       onClick={(e) => {
         // Click on background clears selection
@@ -3111,6 +3151,10 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
         >
           {twin.name.toUpperCase()} · LOGIC · BLOCK-FLOW DIAGRAM
         </text>
+
+        {/* Pan + zoom group — wraps the diagram content. Title and legend
+            sit outside so they stay anchored to the SVG corners. */}
+        <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
 
         {/* Flow arrows */}
         {ordered.map((_, i) => {
@@ -3296,6 +3340,7 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
           </text>
         )}
 
+        </g>
         {/* Legend */}
         <g transform={`translate(${W - 240}, ${H - 60})`}>
           <rect width={220} height={44} fill={SW_COLORS.paper} stroke={SW_COLORS.line} rx={4} />
@@ -3532,8 +3577,9 @@ function BuilderProcessView({
         position: 'absolute',
         inset: 0,
         overflow: 'auto',
-        background:
-          'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px), ' + SW_COLORS.paperDeep,
+        backgroundColor: SW_COLORS.paperDeep,
+        backgroundImage:
+          'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px)',
         backgroundSize: '24px 24px',
       }}
       onClick={(e) => {
@@ -4373,24 +4419,25 @@ function BlockSection({
       {/* Kind picker */}
       <div style={{ height: 8 }} />
       <label style={fieldLabel}>Kind</label>
-      <select
+      <HudSelect
         value={block.overridden ? block.kind : 'auto'}
-        onChange={(e) => onPickKind(e.target.value as PmlBlockKind | 'auto')}
-        style={{ ...inputBase, width: '100%', fontFamily: SW_FONTS.mono, fontWeight: 700 }}
-      >
-        <option value="auto">
-          ◇ Auto · {PML_BLOCK_LIBRARY[defaultKind].label} (catalog default)
-        </option>
-        {SELECTABLE_BLOCK_KINDS.map((k) => {
-          const spec = PML_BLOCK_LIBRARY[k];
-          return (
-            <option key={k} value={k}>
-              {spec.glyph} {spec.label}
-              {k === defaultKind ? ' · default' : ''}
-            </option>
-          );
-        })}
-      </select>
+        onChange={(v) => onPickKind(v as PmlBlockKind | 'auto')}
+        variant="light"
+        size="sm"
+        mono
+        width="100%"
+        options={[
+          { value: 'auto', label: `◇ Auto · ${PML_BLOCK_LIBRARY[defaultKind].label} (catalog default)` },
+          ...SELECTABLE_BLOCK_KINDS.map((k) => {
+            const spec = PML_BLOCK_LIBRARY[k];
+            return {
+              value: k,
+              label: `${spec.glyph} ${spec.label}`,
+              tag: k === defaultKind ? 'DEFAULT' : undefined,
+            };
+          }),
+        ]}
+      />
 
       {/* Port summary */}
       <div style={{ height: 10 }} />

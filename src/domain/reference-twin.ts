@@ -17,6 +17,7 @@
  */
 
 import type { Operation } from './operations';
+import type { GarmentTemplate } from './garments';
 import { REFERENCE_MODELS, type ReferenceModel, type ReferenceScenario } from './reference-models';
 import {
   type Twin,
@@ -113,7 +114,7 @@ function resolveScenarioKpis(
 /**
  * Build a Twin that reproduces one variant of a published reference model.
  * Returns null when the model carries no operation bulletin (placeholder
- * papers like Sime 2019 where the 54 ops are not enumerated).
+ * papers where the bulletin is not enumerated in the source).
  */
 export function buildReferenceTwin(
   model: ReferenceModel,
@@ -351,6 +352,181 @@ export function buildReferenceTwin(
 }
 
 // ============================================================================
+// GARMENT-TEMPLATE TWIN (Source → ops → Sink, sized by operator pool)
+// ============================================================================
+
+/**
+ * Build a Twin from any GarmentTemplate + operator pool size. Mirrors
+ * `buildReferenceTwin`'s layout (Source · Pool · Sink + per-op Service
+ * stations laid out in snake rows) but without the paper-specific
+ * scenario/reinforcement plumbing, so the LiveSim PML view can render
+ * the project's selected garment without needing a reference paper.
+ *
+ * Returns null when the template carries no operations.
+ */
+export function buildGarmentTwin(
+  garment: GarmentTemplate,
+  operators: number,
+  name?: string,
+): Twin | null {
+  const ops = garment.operations;
+  if (ops.length === 0) return null;
+
+  const totalSmv = garment.totalSmv;
+  const now = new Date().toISOString();
+
+  const STATIONS_PER_ROW = 7;
+  const STATION_DX = 3;
+  const ROW_DY = 4;
+  const ORIGIN_X = 3;
+  const ORIGIN_Y = 6;
+  const rowCount = Math.ceil(ops.length / STATIONS_PER_ROW);
+
+  const gridW = Math.max(36, ORIGIN_X + STATIONS_PER_ROW * STATION_DX + 4);
+  const gridH = Math.max(28, ORIGIN_Y + rowCount * ROW_DY + 8);
+
+  const dSew = newDeptId();
+  const dPlumb = newDeptId();
+  const departments: Department[] = [
+    {
+      id: dPlumb,
+      name: 'Plumbing',
+      kind: 'Logistics',
+      color: 'cream',
+      bounds: { x: 1, y: 1, w: gridW - 2, h: 4 },
+      notes: 'Source · Sink · operator pool. Auto-generated from the selected garment.',
+    },
+    {
+      id: dSew,
+      name: `Sewing line — ${garment.name}`,
+      kind: 'Sewing',
+      color: 'blue',
+      bounds: { x: 1, y: 5, w: gridW - 2, h: rowCount * ROW_DY + 4 },
+      notes:
+        `${ops.length} ops · total SMV ${totalSmv.toFixed(2)} min · ${operators} operators.`,
+    },
+  ];
+
+  const workstations: Workstation[] = [];
+
+  const takt = totalSmv / ops.length;
+  const sourceRatePerHr = Math.max(60, Math.round((60 / takt) * 1.5));
+  const wsSource = makeWorkstation({
+    deptId: dPlumb,
+    catalogId: 'buf_in',
+    position: { x: 2, y: 2 },
+    name: 'Source — orders in',
+  });
+  wsSource.block = {
+    kind: 'Source',
+    params: { sourceRatePerHr, piecesPerAgent: 1 },
+  };
+  wsSource.operation = {
+    ...wsSource.operation,
+    freeText: `${sourceRatePerHr} pcs/hr · seeds the line`,
+  };
+  workstations.push(wsSource);
+
+  const wsPool = makeWorkstation({
+    deptId: dSew,
+    catalogId: 'op_sewer',
+    position: { x: 2, y: 2 + ROW_DY * rowCount + 2 < gridH - 2 ? ORIGIN_Y + rowCount * ROW_DY : gridH - 3 },
+    name: `Operators · ${operators} units`,
+  });
+  wsPool.block = {
+    kind: 'ResourcePool',
+    params: { capacity: operators },
+  };
+  workstations.push(wsPool);
+
+  const wsSink = makeWorkstation({
+    deptId: dPlumb,
+    catalogId: 'buf_out',
+    position: { x: gridW - 4, y: 2 },
+    name: 'Sink — finished pcs',
+  });
+  wsSink.block = { kind: 'Sink' };
+  workstations.push(wsSink);
+
+  const opStations: Workstation[] = [];
+  ops.forEach((op: Operation, i) => {
+    const row = Math.floor(i / STATIONS_PER_ROW);
+    const col = i % STATIONS_PER_ROW;
+    const colInRow = row % 2 === 0 ? col : STATIONS_PER_ROW - 1 - col;
+    const x = ORIGIN_X + colInRow * STATION_DX;
+    const y = ORIGIN_Y + row * ROW_DY;
+
+    const catalogId = catalogForMachine(op.machineCode);
+    const ws = makeWorkstation({
+      deptId: dSew,
+      catalogId,
+      position: { x, y },
+      name: `${i + 1}. ${op.name}`,
+    });
+    ws.block = {
+      kind: 'Service',
+      params: {
+        cycleS: Math.max(1, Math.round(op.smv * 60)),
+        servers: 1,
+      },
+    };
+    ws.operation = {
+      ...ws.operation,
+      opId: op.id,
+      garmentId: garment.id,
+      bundleSize: garment.defaultBundleSize,
+      freeText: op.notes ?? `SMV ${op.smv.toFixed(3)} min`,
+    };
+    ws.kpiTargets = {
+      ...ws.kpiTargets,
+      capacityPerHr: op.smv > 0 ? Math.round(60 / op.smv) : undefined,
+    };
+    ws.props = {
+      ...defaultPropsFor(catalogId),
+      ...ws.props,
+      cycle_s: Math.round(op.smv * 60),
+      servers: 1,
+    };
+    workstations.push(ws);
+    opStations.push(ws);
+  });
+
+  const connectors: Connector[] = [];
+  function link(fromWs: Workstation, toWs: Workstation): void {
+    connectors.push({
+      id: newConnectorId(),
+      kind: 'flow',
+      fromWsId: fromWs.id,
+      toWsId: toWs.id,
+    });
+  }
+  if (opStations.length > 0) {
+    link(wsSource, opStations[0]);
+    for (let i = 0; i < opStations.length - 1; i++) {
+      link(opStations[i], opStations[i + 1]);
+    }
+    link(opStations[opStations.length - 1], wsSink);
+  }
+
+  return {
+    schemaVersion: TWIN_SCHEMA_VERSION as TwinSchemaVersion,
+    id: newTwinId(),
+    name: name ?? `${garment.name} · ${operators} operators`,
+    parentTwinId: null,
+    isCanonical: true,
+    createdAt: now,
+    modifiedAt: now,
+    gridW,
+    gridH,
+    departments,
+    workstations,
+    connectors,
+    cadUnderlay: null,
+    notes: `Auto-built from garment template "${garment.name}" — ${ops.length} ops, total SMV ${totalSmv.toFixed(2)} min, ${operators} operators.`,
+  };
+}
+
+// ============================================================================
 // MULTI-LINE FACTORY (one Twin · one line per reference paper)
 // ============================================================================
 
@@ -363,10 +539,10 @@ export function buildReferenceTwin(
  * Use this to seed a "showcase factory" that lets the user visualise every
  * reproducible reference layout side-by-side on the Factory Builder canvas.
  *
- * Papers without an enumerated bulletin (e.g. Sime 2019 — Ladies' Tunic,
- * which the source paper reports only as aggregate figures) are surfaced as
- * a placeholder Logistics department so the user knows the line exists in
- * the literature but is not yet wired.
+ * Papers without an enumerated bulletin (where the source paper reports
+ * only aggregate figures) are surfaced as a placeholder Logistics
+ * department so the user knows the line exists in the literature but is
+ * not yet wired.
  */
 export interface BuildReferenceFactoryOpts {
   /** Override the twin name. */

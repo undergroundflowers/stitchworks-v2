@@ -30,7 +30,7 @@ export interface VibeDef {
 export const SW_VIBES: Record<'industrial' | 'workshop' | 'arcade', VibeDef> = {
   industrial: {
     brand: '#FF5B26', brandDeep: '#D43E0F', brandLite: '#FFE4D6',
-    ink: '#0F1419', paper: '#FBFAF6', paperDeep: '#F2EEE3', paperEdge: '#E8E2D0',
+    ink: '#0F1419', paper: '#FFFFFF', paperDeep: '#FFFFFF', paperEdge: '#E8E2D0',
     display: '"Archivo Black", "Inter", system-ui, sans-serif',
     radiusMul: 1, sat: 1,
   },

@@ -1,6 +1,9 @@
 import { useNavigate } from 'react-router-dom';
-import { Card, Button, Tag, Logo } from '../components';
+import { Card, Button, Tag, Logo, TimeChip } from '../components';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { useTwin, selectActiveTwin } from '../store/twin';
+import { useProject } from '../store';
+import { fmtCalendar } from '../simulation/timeUnit';
 
 /**
  * Splash / main menu — entry point of the app. Two-column layout:
@@ -12,6 +15,11 @@ import { SW_COLORS, SW_FONTS } from '../design/tokens';
  */
 export function MenuPage() {
   const navigate = useNavigate();
+  const projectTime = useProject((s) => s.time);
+  const dateFormat = useProject((s) => s.units.dateFormat);
+  // No sim run has happened yet on the menu, so "today" anchors to t=0
+  // (i.e. the project's start date). MODEL-time vs CAL is irrelevant here.
+  const todayCal = fmtCalendar(0, projectTime.modelTimeUnit, projectTime.startDate, dateFormat);
 
   return (
     <div style={{
@@ -40,7 +48,7 @@ export function MenuPage() {
             Build it.<br/>Run it.<br/><span style={{ color: SW_COLORS.brand }}>Optimize it.</span>
           </h1>
           <p style={{ fontSize: 16, color: SW_COLORS.muted, marginTop: 16, maxWidth: 480, lineHeight: 1.5 }}>
-            A complete flexible digital twin for your apparel production floor that scales as your enterprises scale.
+            A complete, flexible digital twin for your apparel production floor that scales as your enterprise scales.
           </p>
         </div>
 
@@ -113,28 +121,26 @@ export function MenuPage() {
           </div>
         </Card>
 
-        {/* Today's tasks / events */}
+        {/*
+          Today's tasks / events — model time is anchored to t = 0 here
+          (the project's start date), so the "TODAY" label honestly shows
+          the calendar date the simulation will start on. Mock events were
+          removed: an empty state is more honest than fictitious schedule
+          rows that never updated. A real planner module will fill this.
+        */}
         <Card padding={16}>
           <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 10 }}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 13, fontWeight: 900, color: SW_COLORS.ink }}>TODAY · DAY 14</div>
-            <Tag soft color={SW_COLORS.brand} dot>3 EVENTS</Tag>
-          </div>
-          {[
-            { t: '08:30', label: 'PO-4421 dispatch deadline',          color: SW_COLORS.brand },
-            { t: '11:15', label: 'Operator OPR-09 sick leave',         color: SW_COLORS.alarm },
-            { t: '14:00', label: 'Machine SM-04 scheduled service',    color: SW_COLORS.bobbin },
-          ].map((e, i) => (
-            <div key={i} style={{
-              display: 'flex', alignItems: 'center', gap: 10,
-              padding: '8px 0',
-              borderTop: i > 0 ? `1px solid ${SW_COLORS.line}` : 'none',
-              fontSize: 12, color: SW_COLORS.ink,
-            }}>
-              <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, width: 44 }}>{e.t}</span>
-              <span style={{ width: 6, height: 6, borderRadius: '50%', background: e.color }}/>
-              <span style={{ flex: 1, fontWeight: 600 }}>{e.label}</span>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+              <div style={{ fontFamily: SW_FONTS.display, fontSize: 13, fontWeight: 900, color: SW_COLORS.ink }}>TODAY</div>
+              <TimeChip kind="CAL" />
+              <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 600, color: SW_COLORS.muted }}>{todayCal}</span>
             </div>
-          ))}
+            <Tag soft color={SW_COLORS.muted}>0 EVENTS</Tag>
+          </div>
+          <div style={{ padding: '20px 0', textAlign: 'center', color: SW_COLORS.muted, fontSize: 12, lineHeight: 1.5 }}>
+            No scheduled events. Operator absences and machine service jobs<br/>
+            will appear here once the planner module ships.
+          </div>
         </Card>
 
       </div>
@@ -156,6 +162,10 @@ export function MenuPage() {
 
 // ---------------- Mini Isometric Factory illustration ----------------
 function MiniIsoFactory() {
+  // Pull the live workstation count from the active twin so the splash
+  // caption agrees with what /floor will actually show. The 4×5=20 tiles
+  // below are decorative — the count below is what users compare against.
+  const stationCount = useTwin((s) => selectActiveTwin(s).workstations.length);
   return (
     <svg viewBox="0 0 600 240" style={{ width: '100%', height: '100%', display: 'block' }}>
       <defs>
@@ -197,7 +207,7 @@ function MiniIsoFactory() {
         </circle>
       </g>
 
-      <text x="300" y="232" textAnchor="middle" fill="#ffffff60" fontFamily={SW_FONTS.mono} fontSize="9">FLOOR 01 · SEWING · 20 STATIONS</text>
+      <text x="300" y="232" textAnchor="middle" fill="#ffffff60" fontFamily={SW_FONTS.mono} fontSize="9">FLOOR 01 · SEWING · {stationCount} STATIONS</text>
     </svg>
   );
 }

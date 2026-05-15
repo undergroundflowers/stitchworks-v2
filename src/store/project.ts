@@ -10,9 +10,67 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import type { GarmentTemplate, Operation } from '../domain';
+import { GARMENT_TEMPLATES, type GarmentTemplate, type Operation, type ProductionSystem } from '../domain';
+import type { MachineCode, MachineSpec } from '../domain/machines';
+import type { WorkerArchetype } from '../domain/workers';
+import type { ProductKind } from '../assets';
+import type { ModelTimeUnit } from '../simulation/timeUnit';
 
-export const PROJECT_SCHEMA_VERSION = 1 as const;
+/**
+ * Garment names that should never survive a session — keyboard mashes and
+ * "test" placeholders that accumulate while exploring the editor. Anything
+ * starting with one of these tokens (case-insensitive) is purged on boot by
+ * `purgeTestGarments`.
+ */
+const TEST_GARMENT_PATTERN = /^(dvss|dsvs|asdf|test|casdcz)/i;
+
+/**
+ * Schema version. v2 introduced the `time` slice (model-time-unit, start date,
+ * execution mode, real-time scale) — see `TimeSettings`. Migration in the
+ * persist config fills defaults for projects saved under v1.
+ */
+export const PROJECT_SCHEMA_VERSION = 2 as const;
+
+/**
+ * A user-authored workstation. Carries the same shape as a built-in
+ * `MachineSpec` but with a free-form `code` string instead of the
+ * `MachineCode` union, and a `baseSprite` field so the gallery and layout
+ * canvas can render it using one of the built-in SVG illustrations until
+ * we ship per-asset custom artwork.
+ */
+export interface CustomMachineSpec extends Omit<MachineSpec, 'code'> {
+  code: string;
+  isCustom: true;
+  /** Which built-in sprite to render this asset with. */
+  baseSprite: MachineCode;
+}
+
+/**
+ * A user-authored worker role. Same shape as the built-in
+ * `WorkerArchetype` but with a free-form `role` string and a `baseSprite`
+ * pointing at a built-in role for visual rendering.
+ */
+export interface CustomWorkerArchetype extends Omit<WorkerArchetype, 'role'> {
+  role: string;
+  isCustom: true;
+  baseSprite: import('../domain/workers').WorkerRole;
+}
+
+/**
+ * A user-authored product kind. Products in Stitchworks are mostly visual
+ * sprites with a label — customs piggy-back on a built-in `ProductKind`
+ * for their SVG body and override colour + label.
+ */
+export interface CustomProductSpec {
+  kind: string;
+  isCustom: true;
+  baseSprite: ProductKind;
+  label: string;
+  category: 'raw' | 'wip' | 'finished' | 'packed';
+  /** Hex colour override used by the sprite tinter. */
+  color?: string;
+  description?: string;
+}
 
 export interface ProjectMeta {
   name: string;
@@ -30,6 +88,77 @@ export interface YamazumiAssignment {
   operatorId: string;
   /** Operation ids assigned to this operator, in execution order. */
   opIds: string[];
+}
+
+/** Display preferences. Persisted with the project so they roam with
+ *  an exported `.swproj` file. Render sites must consume these (see
+ *  `lib/format.ts`); never hardcode currency or date formatting. */
+export interface UnitsPrefs {
+  length: 'Meters' | 'Yards';
+  currency: 'USD' | 'EUR' | 'INR' | 'BDT';
+  samDisplay: 'Minutes' | 'Seconds';
+  dateFormat: 'DD/MM' | 'MM/DD' | 'YYYY-MM-DD';
+}
+
+const defaultUnits: UnitsPrefs = {
+  length: 'Meters',
+  currency: 'USD',
+  samDisplay: 'Minutes',
+  dateFormat: 'YYYY-MM-DD',
+};
+
+/**
+ * Time semantics for the simulation. Per *Big Book of Simulation Modelling*
+ * (AnyLogic, Ch. 16), three time concepts must be modelled independently:
+ *
+ *   - Model time:    virtual sim clock, advances in event-jumps inside the
+ *                    engine. Numeric, measured in `modelTimeUnit`.
+ *   - Calendar time: model time projected onto a real `Date` via
+ *                    `date(t) = startDate + t × modelTimeUnit`.
+ *   - Wall time:     the user's device clock. Bound to model time only
+ *                    during playback, via `executionMode` and `realTimeScale`.
+ *
+ * `UnitsPrefs` above stays a *display-formatting* struct (currency, date
+ * format). `TimeSettings` here is *semantics* that affects what the numbers
+ * actually mean.
+ */
+export type ExecutionMode = 'virtual' | 'realtime';
+
+export interface TimeSettings {
+  /** What one tick of engine `time` represents. Default `'minute'`. */
+  modelTimeUnit: ModelTimeUnit;
+  /** ISO datetime that maps to engine `t = 0`. Drives every calendar
+   *  projection. Default = project's `createdAt`. */
+  startDate: string;
+  /** Shift start time-of-day, expressed as minutes-of-day (0..1439).
+   *  Used by the calendar overlay; default 480 = 08:00. */
+  shiftStartMinuteOfDay: number;
+  /** Shift duration in MINUTES. Real-world human concept, so kept in
+   *  minutes regardless of `modelTimeUnit`. Default 480 = 8 h. */
+  shiftDurationMin: number;
+  /** Playback pacing. `virtual` = run as fast as compute allows;
+   *  `realtime` = pace at `realTimeScale` model-time-units per real-second. */
+  executionMode: ExecutionMode;
+  /**
+   * Model-time-units per ONE real second when `executionMode = 'realtime'`.
+   * Examples (with `modelTimeUnit = 'minute'`):
+   *   1   ⇒ 1 model-min per real-sec  (true real time)
+   *   60  ⇒ 60 model-min per real-sec (1 model-hour per real-second)
+   *   480 ⇒ full 8-hr shift in 1 real second
+   * Ignored when `executionMode = 'virtual'`. Default 1.
+   */
+  realTimeScale: number;
+}
+
+function defaultTimeSettings(createdAtISO?: string): TimeSettings {
+  return {
+    modelTimeUnit: 'minute',
+    startDate: createdAtISO ?? new Date().toISOString(),
+    shiftStartMinuteOfDay: 8 * 60,
+    shiftDurationMin: 480,
+    executionMode: 'realtime',
+    realTimeScale: 1,
+  };
 }
 
 /**
@@ -122,6 +251,11 @@ export interface ProjectState {
   /** Default operator count for new sims and balancing views. */
   defaultOperators: number;
 
+  /** The production system the user picked in the Orders wizard. Drives
+   *  bundleSize in the sim and is surfaced in the LiveSim HUD so the user
+   *  can confirm their layout choice is being honoured. */
+  selectedProductionSystem: ProductionSystem;
+
   /** Operator name overrides (id → name). */
   operatorNames: Record<string, string>;
 
@@ -144,10 +278,38 @@ export interface ProjectState {
    */
   garmentEdits: Record<string, GarmentTemplate>;
 
+  /** Per-machine-code edits that shadow the built-in `MACHINE_CATALOG`.
+   *  Editing a built-in (e.g. cost change) clones the spec into here. */
+  machineEdits: Record<string, MachineSpec>;
+  /** User-authored workstations keyed by their custom code. */
+  customMachines: Record<string, CustomMachineSpec>;
+
+  /** Per-role edits that shadow built-in `WORKER_ARCHETYPES`. */
+  workerEdits: Record<string, WorkerArchetype>;
+  /** User-authored worker archetypes keyed by their custom role id. */
+  customWorkers: Record<string, CustomWorkerArchetype>;
+
+  /** User-authored product kinds keyed by their custom kind id. */
+  customProducts: Record<string, CustomProductSpec>;
+
+  /** Display preferences set from the Settings page. Render sites read
+   *  these to format currency, dates, distances and SAM. */
+  units: UnitsPrefs;
+
+  /** Time semantics: model-time-unit, calendar anchor, execution mode and
+   *  real-time scale. See `TimeSettings`. */
+  time: TimeSettings;
+
   // ── Mutators ─────────────────────────────────────────────────────────────
   rename: (name: string) => void;
   setSelectedGarment: (id: string) => void;
   setDefaultOperators: (n: number) => void;
+  setSelectedProductionSystem: (id: ProductionSystem) => void;
+  /** Patch one unit/format preference. The Settings page calls this from
+   *  each toggle's onChange. */
+  setUnit: <K extends keyof UnitsPrefs>(key: K, value: UnitsPrefs[K]) => void;
+  /** Patch one time-semantics field. */
+  setTime: <K extends keyof TimeSettings>(key: K, value: TimeSettings[K]) => void;
   setOperatorName: (id: string, name: string) => void;
   setYamazumiOverride: (garmentId: string, assignments: YamazumiAssignment[]) => void;
   clearYamazumiOverride: (garmentId: string) => void;
@@ -225,6 +387,46 @@ export interface ProjectState {
   /** Drop the override for a garment id; built-in default returns. */
   resetGarment: (id: string) => void;
 
+  // ── Asset library: workstations ──────────────────────────────────────────
+  /** Patch a built-in machine spec (auto-clones into `machineEdits`). */
+  patchMachine: (
+    code: string,
+    builtIn: MachineSpec | undefined,
+    patch: Partial<Omit<MachineSpec, 'code'>>,
+  ) => void;
+  /** Drop the edit override for a built-in machine code. */
+  resetMachine: (code: string) => void;
+  /** Add a brand-new user-authored workstation. */
+  addCustomMachine: (spec: CustomMachineSpec) => void;
+  /** Patch one user-authored machine in-place. */
+  patchCustomMachine: (code: string, patch: Partial<Omit<CustomMachineSpec, 'code' | 'isCustom'>>) => void;
+  /** Remove a user-authored machine. */
+  removeCustomMachine: (code: string) => void;
+
+  // ── Asset library: workers ───────────────────────────────────────────────
+  patchWorker: (
+    role: string,
+    builtIn: WorkerArchetype | undefined,
+    patch: Partial<Omit<WorkerArchetype, 'role'>>,
+  ) => void;
+  resetWorker: (role: string) => void;
+  addCustomWorker: (spec: CustomWorkerArchetype) => void;
+  patchCustomWorker: (role: string, patch: Partial<Omit<CustomWorkerArchetype, 'role' | 'isCustom'>>) => void;
+  removeCustomWorker: (role: string) => void;
+
+  // ── Asset library: products ──────────────────────────────────────────────
+  addCustomProduct: (spec: CustomProductSpec) => void;
+  patchCustomProduct: (kind: string, patch: Partial<Omit<CustomProductSpec, 'kind' | 'isCustom'>>) => void;
+  removeCustomProduct: (kind: string) => void;
+  /**
+   * Sweep custom (non-built-in) garments whose names match the test-name
+   * pattern (dvss/dsvs/asdf/test/casdcz). Idempotent — safe to call on every
+   * boot. Returns the count removed. Also drops any Yamazumi overrides keyed
+   * by a purged garment and snaps `selectedGarmentId` back to the default
+   * built-in if it was pointing at one of the purged rows.
+   */
+  purgeTestGarments: () => number;
+
   // ── Project actions ──────────────────────────────────────────────────────
   /** Wipe everything back to defaults. Caller should confirm first. */
   resetProject: () => void;
@@ -274,6 +476,7 @@ const defaults: Omit<
   | 'rename'
   | 'setSelectedGarment'
   | 'setDefaultOperators'
+  | 'setSelectedProductionSystem'
   | 'setOperatorName'
   | 'setYamazumiOverride'
   | 'clearYamazumiOverride'
@@ -300,18 +503,45 @@ const defaults: Omit<
   | 'removeOperation'
   | 'moveOperation'
   | 'resetGarment'
-> = {
-  schemaVersion: PROJECT_SCHEMA_VERSION,
-  meta: defaultMeta(),
-  selectedGarmentId: 'tshirt',
-  defaultOperators: 25,
-  operatorNames: {},
-  yamazumiOverrides: {},
-  skillMatrix: {},
-  scenarios: [],
-  factory: defaultFactory(),
-  garmentEdits: {},
-};
+  | 'purgeTestGarments'
+  | 'setUnit'
+  | 'setTime'
+  | 'patchMachine'
+  | 'resetMachine'
+  | 'addCustomMachine'
+  | 'patchCustomMachine'
+  | 'removeCustomMachine'
+  | 'patchWorker'
+  | 'resetWorker'
+  | 'addCustomWorker'
+  | 'patchCustomWorker'
+  | 'removeCustomWorker'
+  | 'addCustomProduct'
+  | 'patchCustomProduct'
+  | 'removeCustomProduct'
+> = (() => {
+  const meta = defaultMeta();
+  return {
+    schemaVersion: PROJECT_SCHEMA_VERSION,
+    meta,
+    selectedGarmentId: 'tshirt',
+    defaultOperators: 25,
+    selectedProductionSystem: 'PBS',
+    operatorNames: {},
+    yamazumiOverrides: {},
+    skillMatrix: {},
+    scenarios: [],
+    factory: defaultFactory(),
+    garmentEdits: {},
+    machineEdits: {},
+    customMachines: {},
+    workerEdits: {},
+    customWorkers: {},
+    customProducts: {},
+    units: defaultUnits,
+    time: defaultTimeSettings(meta.createdAt),
+  };
+})();
 
 /** Re-derive totalSmv after operations change. */
 function recomputeSmv(g: GarmentTemplate): GarmentTemplate {
@@ -347,6 +577,15 @@ export const useProject = create<ProjectState>()(
 
       setDefaultOperators: (n) =>
         set((s) => touch({ ...s, defaultOperators: Math.max(1, Math.min(120, Math.round(n))) })),
+
+      setSelectedProductionSystem: (id) =>
+        set((s) => touch({ ...s, selectedProductionSystem: id })),
+
+      setUnit: (key, value) =>
+        set((s) => touch({ ...s, units: { ...s.units, [key]: value } })),
+
+      setTime: (key, value) =>
+        set((s) => touch({ ...s, time: { ...s.time, [key]: value } })),
 
       setOperatorName: (id, name) =>
         set((s) => touch({ ...s, operatorNames: { ...s.operatorNames, [id]: name } })),
@@ -571,6 +810,136 @@ export const useProject = create<ProjectState>()(
           return touch({ ...s, garmentEdits: next });
         }),
 
+      // ── Asset library: workstations ──────────────────────────────────────
+      patchMachine: (code, builtIn, patch) =>
+        set((s) => {
+          const current = s.machineEdits[code] ?? builtIn;
+          if (!current) return s;
+          const next = { ...current, ...patch } as MachineSpec;
+          return touch({ ...s, machineEdits: { ...s.machineEdits, [code]: next } });
+        }),
+
+      resetMachine: (code) =>
+        set((s) => {
+          if (!s.machineEdits[code]) return s;
+          const next = { ...s.machineEdits };
+          delete next[code];
+          return touch({ ...s, machineEdits: next });
+        }),
+
+      addCustomMachine: (spec) =>
+        set((s) => touch({ ...s, customMachines: { ...s.customMachines, [spec.code]: spec } })),
+
+      patchCustomMachine: (code, patch) =>
+        set((s) => {
+          const current = s.customMachines[code];
+          if (!current) return s;
+          return touch({
+            ...s,
+            customMachines: { ...s.customMachines, [code]: { ...current, ...patch } },
+          });
+        }),
+
+      removeCustomMachine: (code) =>
+        set((s) => {
+          if (!s.customMachines[code]) return s;
+          const next = { ...s.customMachines };
+          delete next[code];
+          return touch({ ...s, customMachines: next });
+        }),
+
+      // ── Asset library: workers ───────────────────────────────────────────
+      patchWorker: (role, builtIn, patch) =>
+        set((s) => {
+          const current = s.workerEdits[role] ?? builtIn;
+          if (!current) return s;
+          const next = { ...current, ...patch } as WorkerArchetype;
+          return touch({ ...s, workerEdits: { ...s.workerEdits, [role]: next } });
+        }),
+
+      resetWorker: (role) =>
+        set((s) => {
+          if (!s.workerEdits[role]) return s;
+          const next = { ...s.workerEdits };
+          delete next[role];
+          return touch({ ...s, workerEdits: next });
+        }),
+
+      addCustomWorker: (spec) =>
+        set((s) => touch({ ...s, customWorkers: { ...s.customWorkers, [spec.role]: spec } })),
+
+      patchCustomWorker: (role, patch) =>
+        set((s) => {
+          const current = s.customWorkers[role];
+          if (!current) return s;
+          return touch({
+            ...s,
+            customWorkers: { ...s.customWorkers, [role]: { ...current, ...patch } },
+          });
+        }),
+
+      removeCustomWorker: (role) =>
+        set((s) => {
+          if (!s.customWorkers[role]) return s;
+          const next = { ...s.customWorkers };
+          delete next[role];
+          return touch({ ...s, customWorkers: next });
+        }),
+
+      // ── Asset library: products ──────────────────────────────────────────
+      addCustomProduct: (spec) =>
+        set((s) => touch({ ...s, customProducts: { ...s.customProducts, [spec.kind]: spec } })),
+
+      patchCustomProduct: (kind, patch) =>
+        set((s) => {
+          const current = s.customProducts[kind];
+          if (!current) return s;
+          return touch({
+            ...s,
+            customProducts: { ...s.customProducts, [kind]: { ...current, ...patch } },
+          });
+        }),
+
+      removeCustomProduct: (kind) =>
+        set((s) => {
+          if (!s.customProducts[kind]) return s;
+          const next = { ...s.customProducts };
+          delete next[kind];
+          return touch({ ...s, customProducts: next });
+        }),
+
+      purgeTestGarments: () => {
+        let removed = 0;
+        set((s) => {
+          const next: Record<string, GarmentTemplate> = {};
+          const purgedIds: string[] = [];
+          for (const [id, g] of Object.entries(s.garmentEdits)) {
+            // Only sweep custom rows. A user who renamed a built-in to
+            // "test something" still owns that edit — leave it alone.
+            const isBuiltIn = !!GARMENT_TEMPLATES[id];
+            if (!isBuiltIn && TEST_GARMENT_PATTERN.test((g.name ?? '').trim())) {
+              purgedIds.push(id);
+              continue;
+            }
+            next[id] = g;
+          }
+          if (purgedIds.length === 0) return s;
+          removed = purgedIds.length;
+          const nextOverrides = { ...s.yamazumiOverrides };
+          for (const id of purgedIds) delete nextOverrides[id];
+          const selected = purgedIds.includes(s.selectedGarmentId)
+            ? defaults.selectedGarmentId
+            : s.selectedGarmentId;
+          return touch({
+            ...s,
+            garmentEdits: next,
+            yamazumiOverrides: nextOverrides,
+            selectedGarmentId: selected,
+          });
+        });
+        return removed;
+      },
+
       resetProject: () =>
         set(() => ({
           ...defaults,
@@ -578,6 +947,9 @@ export const useProject = create<ProjectState>()(
           rename: get().rename,
           setSelectedGarment: get().setSelectedGarment,
           setDefaultOperators: get().setDefaultOperators,
+          setSelectedProductionSystem: get().setSelectedProductionSystem,
+          setUnit: get().setUnit,
+          setTime: get().setTime,
           setOperatorName: get().setOperatorName,
           setYamazumiOverride: get().setYamazumiOverride,
           clearYamazumiOverride: get().clearYamazumiOverride,
@@ -601,6 +973,20 @@ export const useProject = create<ProjectState>()(
           removeOperation: get().removeOperation,
           moveOperation: get().moveOperation,
           resetGarment: get().resetGarment,
+          purgeTestGarments: get().purgeTestGarments,
+          patchMachine: get().patchMachine,
+          resetMachine: get().resetMachine,
+          addCustomMachine: get().addCustomMachine,
+          patchCustomMachine: get().patchCustomMachine,
+          removeCustomMachine: get().removeCustomMachine,
+          patchWorker: get().patchWorker,
+          resetWorker: get().resetWorker,
+          addCustomWorker: get().addCustomWorker,
+          patchCustomWorker: get().patchCustomWorker,
+          removeCustomWorker: get().removeCustomWorker,
+          addCustomProduct: get().addCustomProduct,
+          patchCustomProduct: get().patchCustomProduct,
+          removeCustomProduct: get().removeCustomProduct,
           resetProject: get().resetProject,
           loadProject: get().loadProject,
           exportProject: get().exportProject,
@@ -609,10 +995,11 @@ export const useProject = create<ProjectState>()(
       loadProject: (snapshot) => {
         if (!snapshot || typeof snapshot !== 'object') return { ok: false, reason: 'Not an object' };
         const s = snapshot as Partial<ProjectState>;
-        if (s.schemaVersion !== PROJECT_SCHEMA_VERSION) {
+        // Accept v1 and v2; v1 imports get default TimeSettings filled in.
+        if (s.schemaVersion !== 1 && s.schemaVersion !== 2) {
           return {
             ok: false,
-            reason: `Schema version mismatch: file is v${s.schemaVersion}, app expects v${PROJECT_SCHEMA_VERSION}`,
+            reason: `Schema version mismatch: file is v${s.schemaVersion}, app supports v1 or v2`,
           };
         }
         set((cur) => ({
@@ -627,6 +1014,18 @@ export const useProject = create<ProjectState>()(
           scenarios: s.scenarios ?? [],
           factory: s.factory ?? defaultFactory(),
           garmentEdits: s.garmentEdits ?? {},
+          machineEdits: s.machineEdits ?? {},
+          customMachines: s.customMachines ?? {},
+          workerEdits: s.workerEdits ?? {},
+          customWorkers: s.customWorkers ?? {},
+          customProducts: s.customProducts ?? {},
+          units: { ...defaultUnits, ...s.units },
+          // v1 files have no `time` field — fill from defaults anchored on
+          // the project's creation date so calendar projections are sensible.
+          time: {
+            ...defaultTimeSettings(s.meta?.createdAt ?? defaults.meta.createdAt),
+            ...(s.time ?? {}),
+          },
         }));
         return { ok: true };
       },
@@ -644,6 +1043,13 @@ export const useProject = create<ProjectState>()(
           scenarios: s.scenarios,
           factory: s.factory,
           garmentEdits: s.garmentEdits,
+          machineEdits: s.machineEdits,
+          customMachines: s.customMachines,
+          workerEdits: s.workerEdits,
+          customWorkers: s.customWorkers,
+          customProducts: s.customProducts,
+          units: s.units,
+          time: s.time,
         } as ProjectState;
       },
     }),
@@ -663,7 +1069,45 @@ export const useProject = create<ProjectState>()(
         scenarios: state.scenarios,
         factory: state.factory,
         garmentEdits: state.garmentEdits,
+        machineEdits: state.machineEdits,
+        customMachines: state.customMachines,
+        workerEdits: state.workerEdits,
+        customWorkers: state.customWorkers,
+        customProducts: state.customProducts,
+        units: state.units,
+        time: state.time,
       }),
+      // v1 → v2: add the `time` slice with sensible defaults anchored on
+      // the existing project's creation date.
+      migrate: (persisted, fromVersion) => {
+        const p = (persisted as Partial<ProjectState>) ?? {};
+        if (fromVersion < 2) {
+          const createdAt = p.meta?.createdAt ?? new Date().toISOString();
+          return {
+            ...p,
+            schemaVersion: PROJECT_SCHEMA_VERSION,
+            time: defaultTimeSettings(createdAt),
+          } as Partial<ProjectState>;
+        }
+        return p as Partial<ProjectState>;
+      },
+      // Existing localStorage payloads predate `units` and the asset-library
+      // edit maps. Without this, the first boot after upgrade hydrates them
+      // as undefined and any consumer that iterates over them crashes.
+      merge: (persisted, current) => {
+        const p = (persisted as Partial<ProjectState>) ?? {};
+        return {
+          ...current,
+          ...p,
+          units: { ...defaultUnits, ...(p.units ?? {}) },
+          machineEdits: p.machineEdits ?? {},
+          customMachines: p.customMachines ?? {},
+          workerEdits: p.workerEdits ?? {},
+          customWorkers: p.customWorkers ?? {},
+          customProducts: p.customProducts ?? {},
+          time: { ...defaultTimeSettings(p.meta?.createdAt ?? current.meta.createdAt), ...(p.time ?? {}) },
+        };
+      },
     },
   ),
 );
