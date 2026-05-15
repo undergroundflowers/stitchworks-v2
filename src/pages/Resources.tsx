@@ -1,6 +1,7 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup } from '../components';
+import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, TimeChip } from '../components';
 import { Fragment, useState, useMemo } from 'react';
+import { useSearchParams } from 'react-router-dom';
 import {
   ALL_WORKER_ARCHETYPES,
   type WorkerArchetype,
@@ -16,24 +17,43 @@ import {
 import { useProject, useGarments, type EffectiveGarments } from '../store';
 
 /**
- * Resources page — operators, machines, inventory and roster.
+ * Resources page — operators, machines and roster.
  *
  * Operators and machines are now derived from the apparel domain layer
  * (WORKER_ARCHETYPES + MACHINE_CATALOG) instead of hardcoded mock arrays.
  * Names and instance counts are seeded deterministically so the table is
- * stable across renders. Inventory and roster remain demo data for now;
- * those become live once the project file format and roster scheduler land.
+ * stable across renders. Roster remains demo data for now; it becomes live
+ * once the project file format and roster scheduler land.
  */
 export function ResourcesPage() {
-  const [tab, setTab] = useState<'operators' | 'machines' | 'inventory' | 'roster' | 'skills' | 'operations'>('operators');
+  // ?tab=operations&garment=<id> lets pages like Orders deep-link straight to
+  // the operations editor for a specific garment.
+  const [searchParams] = useSearchParams();
+  const initialTab = (searchParams.get('tab') as
+    | 'operators' | 'machines' | 'roster' | 'skills' | 'operations'
+    | null) ?? 'operators';
+  const initialGarment = searchParams.get('garment') ?? undefined;
+  const [tab, setTab] = useState<'operators' | 'machines' | 'roster' | 'skills' | 'operations'>(initialTab);
   const project = useProject();
   const garments = useGarments();
   const skillMatrix = project.skillMatrix;
   const setSkill = project.setSkill;
   const resetSkillMatrix = project.resetSkillMatrix;
   const [skillsGarment, setSkillsGarment] = useState<string>(project.selectedGarmentId);
+  // Roster anchors on day 1 of the model run, not a hardcoded "DAY 14".
+  // A future planner module can drive this from the active sim's current day.
+  const rosterDayN = 1;
 
-  const operators = useMemo(() => buildOperators(), []);
+  // Target headcount = total operators configured across every factory line.
+  // Without this, the page showed a hardcoded 33 even when the factory had
+  // 131 operators across 8 lines — the pill, the WORKFORCE card and the
+  // ROLE COVERAGE breakdown all printed numbers that didn't match anywhere
+  // else in the app.
+  const factoryHeadcount = useMemo(
+    () => project.factory.lines.reduce((s, l) => s + (l.operators || 0), 0),
+    [project.factory.lines],
+  );
+  const operators = useMemo(() => buildOperators(factoryHeadcount), [factoryHeadcount]);
   const machines = useMemo(() => buildMachines(), []);
 
   const activeCount = operators.filter((o) => o.status === 'ACTIVE').length;
@@ -44,7 +64,7 @@ export function ResourcesPage() {
   return (
     <div style={{ width:'100%', height:'100%', display:'flex', flexDirection:'column', background: SW_COLORS.paperDeep }}>
       <div style={{ padding:'18px 24px', background: SW_COLORS.paper, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-        <SectionHeader kicker="Resources" title="People, machines & inventory"
+        <SectionHeader kicker="Resources" title="People & machines"
           sub="Manage your factory's workforce and equipment. Operators and machines are seeded from the apparel domain catalog."
           right={
             <div style={{ display:'flex', gap:8 }}>
@@ -58,7 +78,6 @@ export function ResourcesPage() {
             { value:'machines',   label:`⚙ Machines · ${machines.length}` },
             { value:'operations', label:`🪡 Operations · ${garments.all.length} garments` },
             { value:'skills',     label:`🎯 Skill matrix` },
-            { value:'inventory',  label:'📦 Inventory' },
             { value:'roster',     label:'🗓 Shift roster' },
           ]}/>
         </div>
@@ -171,51 +190,8 @@ export function ResourcesPage() {
           </div>
         )}
 
-        {tab==='inventory' && (
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(2, 1fr)', gap:18 }}>
-            <Card padding={20}>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>RAW MATERIALS</div>
-              {[
-                { name:'Cotton jersey 180gsm', qty:1840, unit:'m', stock:'OK', col: SW_COLORS.fabric },
-                { name:'Polyester blend',     qty:420,  unit:'m', stock:'LOW', col: SW_COLORS.alarm },
-                { name:'White thread #40',    qty:120,  unit:'cones', stock:'OK', col: SW_COLORS.ok },
-                { name:'Black thread #40',    qty:8,    unit:'cones', stock:'CRITICAL', col: SW_COLORS.alarm },
-                { name:'Buttons 12mm white',  qty:15400,unit:'pcs', stock:'OK', col: SW_COLORS.ok },
-                { name:'Care labels',         qty:2200, unit:'pcs', stock:'OK', col: SW_COLORS.ok },
-              ].map((r, i) => (
-                <div key={i} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
-                  <div style={{ width: 8, height:36, background: r.col, borderRadius: 2 }}/>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontWeight:700, fontSize:13 }}>{r.name}</div>
-                    <div style={{ fontSize:11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>{r.qty.toLocaleString()} {r.unit}</div>
-                  </div>
-                  <Tag soft color={r.col} dot>{r.stock}</Tag>
-                </div>
-              ))}
-            </Card>
-            <Card padding={20}>
-              <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>FINISHED GOODS</div>
-              {[
-                { name:'Polo S/S Classic — Navy', qty:840,  status:'READY TO SHIP', col: SW_COLORS.ok },
-                { name:'Polo S/S Classic — White', qty:1200, status:'READY TO SHIP', col: SW_COLORS.ok },
-                { name:'T-shirt Crew — Black', qty:240, status:'PACKING', col: SW_COLORS.thread },
-                { name:'Dress shirt — Blue', qty:60, status:'INSPECT', col: SW_COLORS.bobbin },
-              ].map((g, i) => (
-                <div key={i} style={{ display:'flex', alignItems:'center', gap:12, padding:'10px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
-                  <div style={{ width:36, height:36, background:`${g.col}20`, color: g.col, borderRadius: SW_RADIUS.sm, display:'flex', alignItems:'center', justifyContent:'center', fontSize:18 }}>👕</div>
-                  <div style={{ flex:1 }}>
-                    <div style={{ fontWeight:700, fontSize:13 }}>{g.name}</div>
-                    <div style={{ fontSize:11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>{g.qty} pcs</div>
-                  </div>
-                  <Tag soft color={g.col} dot>{g.status}</Tag>
-                </div>
-              ))}
-            </Card>
-          </div>
-        )}
-
         {tab==='operations' && (
-          <OperationsPanel garments={garments}/>
+          <OperationsPanel garments={garments} initialGarmentId={initialGarment}/>
         )}
 
         {tab==='skills' && (
@@ -232,7 +208,10 @@ export function ResourcesPage() {
 
         {tab==='roster' && (
           <Card padding={20}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14 }}>WEEKLY ROSTER · DAY 14-20</div>
+            <div style={{ display: 'flex', alignItems: 'center', gap: 10, marginBottom: 14 }}>
+              <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>WEEKLY ROSTER · DAY {rosterDayN}–{rosterDayN + 6}</div>
+              <TimeChip kind="MODEL" />
+            </div>
             <div style={{ display:'grid', gridTemplateColumns:'120px repeat(7, 1fr)', gap: 1, background: SW_COLORS.line }}>
               <div style={{ background: SW_COLORS.paperDeep, padding:8, fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700 }}>OPERATOR</div>
               {['MON','TUE','WED','THU','FRI','SAT','SUN'].map(d => (
@@ -276,6 +255,9 @@ const ALL_OPERATION_CATEGORIES: OperationCategory[] = [
 
 interface OperationsPanelProps {
   garments: EffectiveGarments;
+  /** Optional deep-link target — when set, the panel opens with this garment
+   *  pre-selected (e.g. from Orders ?garment=<id>). */
+  initialGarmentId?: string;
 }
 
 /**
@@ -284,9 +266,13 @@ interface OperationsPanelProps {
  * custom) and flow through `useGarments()` so every read site (LiveSim,
  * Yamazumi, Twin run-line, etc.) picks them up immediately.
  */
-function OperationsPanel({ garments }: OperationsPanelProps) {
+function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
   const project = useProject();
-  const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
+  const [garmentId, setGarmentId] = useState<string>(
+    initialGarmentId && garments.byId[initialGarmentId]
+      ? initialGarmentId
+      : project.selectedGarmentId,
+  );
   const garment = garments.byId[garmentId] ?? garments.all[0];
   const builtIn = GARMENT_TEMPLATES[garmentId];
   const isEdited = project.garmentEdits[garmentId] !== undefined;
@@ -334,53 +320,85 @@ function OperationsPanel({ garments }: OperationsPanelProps) {
       <Card padding={16}>
         <div style={{ display: 'flex', alignItems: 'center', gap: 14, flexWrap: 'wrap', marginBottom: 12 }}>
           <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>GARMENT</span>
-          <ToggleGroup value={garmentId} onChange={setGarmentId} options={garments.all.map((g) => ({
-            value: g.id,
-            label: g.name.replace(/\s*\(.*\)/, '') + (project.garmentEdits[g.id] ? ' ●' : ''),
-          }))}/>
+          <HudSelect
+            value={garmentId}
+            onChange={setGarmentId}
+            variant="light"
+            width={280}
+            options={garments.all.map((g) => ({
+              value: g.id,
+              label: g.name.replace(/\s*\(.*\)/, '') + (project.garmentEdits[g.id] ? ' ●' : ''),
+              meta: `${g.operations.length} ops`,
+            }))}
+          />
           <div style={{ flex: 1 }}/>
           <Button variant="secondary" size="sm" icon="+" onClick={newCustomGarment}>New garment</Button>
-          {isEdited && isBuiltIn && (
-            <Button variant="ghost" size="sm" onClick={() => {
-              if (confirm(`Reset ${garment.name} back to its built-in defaults? Your edits will be discarded.`)) {
-                project.resetGarment(garmentId);
+          {/* Single Delete button covers both modes:
+              - built-in unedited → disabled (nothing to remove)
+              - built-in edited   → discards edits, reverts to template defaults
+              - custom            → removes the garment entirely */}
+          <Button
+            variant="danger"
+            size="sm"
+            disabled={isBuiltIn && !isEdited}
+            onClick={() => {
+              if (isBuiltIn) {
+                if (confirm(`Reset ${garment.name} back to its built-in defaults? Your edits will be discarded.`)) {
+                  project.resetGarment(garmentId);
+                }
+              } else {
+                if (confirm(`Delete ${garment.name}?`)) {
+                  project.resetGarment(garmentId);
+                  setGarmentId('tshirt');
+                }
               }
-            }}>Reset to built-in</Button>
-          )}
-          {!isBuiltIn && (
-            <Button variant="ghost" size="sm" onClick={() => {
-              if (confirm(`Delete ${garment.name}?`)) {
-                project.resetGarment(garmentId);
-                setGarmentId('tshirt');
-              }
-            }}>Delete custom</Button>
-          )}
+            }}
+          >
+            {isBuiltIn ? 'Reset to built-in' : 'Delete garment'}
+          </Button>
         </div>
 
-        <div style={{ display: 'grid', gridTemplateColumns: '2fr 1fr 1fr', gap: 10 }}>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Name</div>
-            <input value={garment.name} onChange={(e) => patch({ name: e.target.value })}
-              style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700 }}/>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Default bundle size</div>
-            <input type="number" min={1} max={500} value={garment.defaultBundleSize}
-              onChange={(e) => patch({ defaultBundleSize: Math.max(1, parseInt(e.target.value) || 1) })}
-              style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700 }}/>
-          </div>
-          <div>
-            <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Total SAM</div>
-            <div style={{ padding: '8px 10px', borderRadius: SW_RADIUS.sm, background: SW_COLORS.paperDeep, fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700 }}>
-              {garment.totalSmv.toFixed(3)} min
-              <span style={{ color: SW_COLORS.muted, fontWeight: 600, marginLeft: 6, fontSize: 11 }}>· {garment.operations.length} ops</span>
+        <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'start' }}>
+          {/* Left column — Name and Description as peer text fields. They sit
+              at the same visual level (same label style, same input style,
+              stacked) so neither one feels more important than the other. */}
+          <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Name</div>
+              <input value={garment.name} onChange={(e) => patch({ name: e.target.value })}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700 }}/>
+            </div>
+            <div>
+              <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Description</div>
+              <input value={garment.description} onChange={(e) => patch({ description: e.target.value })}
+                style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: SW_COLORS.ink }}/>
             </div>
           </div>
-        </div>
-        <div style={{ marginTop: 8 }}>
-          <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Description</div>
-          <input value={garment.description} onChange={(e) => patch({ description: e.target.value })}
-            style={{ width: '100%', padding: '8px 10px', borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.body, fontSize: 12, fontWeight: 600, color: SW_COLORS.ink }}/>
+          {/* Bundle size + Total SAM share one card — they're both "size of a
+              run" measurements and read more naturally as a pair than as two
+              separate columns. */}
+          <div style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            border: `1px solid ${SW_COLORS.line}`,
+            borderRadius: SW_RADIUS.sm,
+            background: SW_COLORS.paperDeep,
+            overflow: 'hidden',
+          }}>
+            <label style={{ padding: '6px 10px', borderRight: `1px solid ${SW_COLORS.line}`, display: 'block', cursor: 'text' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Default bundle size</div>
+              <input type="number" min={1} max={500} value={garment.defaultBundleSize}
+                onChange={(e) => patch({ defaultBundleSize: Math.max(1, parseInt(e.target.value) || 1) })}
+                style={{ width: '100%', padding: 0, border: 'none', background: 'transparent', fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700, outline: 'none' }}/>
+            </label>
+            <div style={{ padding: '6px 10px' }}>
+              <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Total SAM</div>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 700 }}>
+                {garment.totalSmv.toFixed(3)} min
+                <span style={{ color: SW_COLORS.muted, fontWeight: 600, marginLeft: 6, fontSize: 11 }}>· {garment.operations.length} ops</span>
+              </div>
+            </div>
+          </div>
         </div>
       </Card>
 
@@ -423,28 +441,37 @@ function OperationsPanel({ garments }: OperationsPanelProps) {
                   />
                 </td>
                 <td style={{ padding: '6px 6px' }}>
-                  <select value={op.machineCode}
-                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { machineCode: e.target.value as MachineCode })}
-                    style={cellSelect()}
-                  >
-                    {ALL_MACHINES.map((m) => <option key={m.code} value={m.code}>{m.code} · {m.shortName}</option>)}
-                  </select>
+                  <HudSelect
+                    value={op.machineCode}
+                    onChange={(v) => project.updateOperation(garmentId, builtIn, op.id, { machineCode: v as MachineCode })}
+                    variant="light"
+                    size="sm"
+                    mono
+                    width="100%"
+                    options={ALL_MACHINES.map((m) => ({ value: m.code, label: `${m.code} · ${m.shortName}` }))}
+                  />
                 </td>
                 <td style={{ padding: '6px 6px' }}>
-                  <select value={op.skill}
-                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { skill: e.target.value as SkillId })}
-                    style={cellSelect()}
-                  >
-                    {ALL_SKILL_IDS.map((s) => <option key={s} value={s}>{s.replace(/_/g, ' ')}</option>)}
-                  </select>
+                  <HudSelect
+                    value={op.skill}
+                    onChange={(v) => project.updateOperation(garmentId, builtIn, op.id, { skill: v as SkillId })}
+                    variant="light"
+                    size="sm"
+                    mono
+                    width="100%"
+                    options={ALL_SKILL_IDS.map((s) => ({ value: s, label: s.replace(/_/g, ' ') }))}
+                  />
                 </td>
                 <td style={{ padding: '6px 6px' }}>
-                  <select value={op.category}
-                    onChange={(e) => project.updateOperation(garmentId, builtIn, op.id, { category: e.target.value as OperationCategory })}
-                    style={cellSelect()}
-                  >
-                    {ALL_OPERATION_CATEGORIES.map((c) => <option key={c} value={c}>{c}</option>)}
-                  </select>
+                  <HudSelect
+                    value={op.category}
+                    onChange={(v) => project.updateOperation(garmentId, builtIn, op.id, { category: v as OperationCategory })}
+                    variant="light"
+                    size="sm"
+                    mono
+                    width="100%"
+                    options={ALL_OPERATION_CATEGORIES.map((c) => ({ value: c, label: c }))}
+                  />
                 </td>
                 <td style={{ padding: '6px 10px', textAlign: 'right' }}>
                   <button onClick={() => {
@@ -680,11 +707,35 @@ const ROLE_DISTRIBUTION: Partial<Record<WorkerArchetype['role'], number>> = {
   mechanic: 1, supervisor: 1,
 };
 
-function buildOperators(): SeededOperator[] {
+/**
+ * Build a synthetic operator roster sized to match the factory headcount
+ * configured across all lines. Roles are scaled proportionally from
+ * `ROLE_DISTRIBUTION`; rounding drift is absorbed by the largest role
+ * (sew_op) so the total exactly equals `target`. Falls back to the
+ * unscaled distribution when `target` is 0 / undefined.
+ */
+function buildOperators(target?: number): SeededOperator[] {
+  const baseSum = Object.values(ROLE_DISTRIBUTION).reduce((s, v) => s + (v || 0), 0);
+  const scale = target && baseSum ? target / baseSum : 1;
+  const counts = new Map<WorkerArchetype['role'], number>();
+  let assigned = 0;
+  for (const archetype of ALL_WORKER_ARCHETYPES) {
+    const base = ROLE_DISTRIBUTION[archetype.role] ?? 0;
+    if (base === 0) continue;
+    const scaled = scale === 1 ? base : Math.max(1, Math.round(base * scale));
+    counts.set(archetype.role, scaled);
+    assigned += scaled;
+  }
+  // Absorb rounding drift into sew_op so the total matches the factory.
+  if (target && assigned !== target) {
+    const drift = target - assigned;
+    const sewCount = counts.get('sew_op') ?? 0;
+    counts.set('sew_op', Math.max(1, sewCount + drift));
+  }
   const out: SeededOperator[] = [];
   let n = 1;
   for (const archetype of ALL_WORKER_ARCHETYPES) {
-    const count = ROLE_DISTRIBUTION[archetype.role] ?? 0;
+    const count = counts.get(archetype.role) ?? 0;
     for (let i = 0; i < count; i++) {
       const idx = (n - 1) % NAMES.length;
       // Deterministic eff/wage variations seeded by id.

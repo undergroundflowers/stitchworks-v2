@@ -8,8 +8,8 @@
 export const SW_COLORS = {
   // Surface
   ink: '#0F1419',
-  paper: '#FBFAF6',
-  paperDeep: '#F2EEE3',
+  paper: '#FFFFFF',
+  paperDeep: '#FFFFFF',
   paperEdge: '#E8E2D0',
   steel: '#2A3340',
   steelLite: '#3D4856',

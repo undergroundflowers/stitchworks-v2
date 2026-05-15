@@ -3,6 +3,7 @@ import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat } from '../componen
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, useGarments, type Scenario, type ScenarioKpis, type EffectiveGarments } from '../store';
+import { formatDate } from '../lib/format';
 
 type Mode = 'list' | 'compare';
 
@@ -147,7 +148,7 @@ export function ScenariosPage() {
                           </div>
                         )}
                         <div style={{ fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop: 4 }}>
-                          {new Date(s.createdAt).toLocaleString()} · {garmentName} · {s.config.operators} ops
+                          {formatDate(s.createdAt, project.units.dateFormat)} · {garmentName} · {s.config.operators} ops
                         </div>
                       </div>
                       <input
@@ -341,7 +342,7 @@ function exportComparisonCsv(scenarios: Scenario[], garments: EffectiveGarments)
     'Utilisation mean', 'Utilisation std',
     'Mean lead mean', 'Mean lead std',
     'WIP mean', 'WIP std',
-    'Bottleneck', 'Bottleneck Q', 'Saved at'];
+    'Bottleneck', 'Bottleneck Q', 'Saved at (device wall time)'];
   const lines = [cols.map(csvCell).join(',')];
   for (const s of scenarios) {
     const garment = garments.byId[s.config.garmentTemplateId];

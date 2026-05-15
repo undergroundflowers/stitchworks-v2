@@ -499,6 +499,12 @@ export interface PmlBlockParams {
    *  case where one cut stroke produces N panels in a single emission.
    *  Default 1. */
   piecesPerAgent?: number;
+  /** Service — number of parallel servers (machines) at this station.
+   *  An apparel sewing station typically has one machine and therefore
+   *  one server; doubling-up at a bottleneck means servers = 2. Caps
+   *  parallelism even when the dept's ResourcePool has spare units.
+   *  Default 1. */
+  servers?: number;
 }
 
 /**
@@ -647,6 +653,8 @@ export interface ResolvedBlockParams {
   batchSize: number;
   /** Source — pieces per generated agent. */
   piecesPerAgent: number;
+  /** Service — parallel-server cap at the station. Default 1. */
+  servers: number;
 }
 
 function numProp(props: Record<string, unknown> | undefined, key: string): number | null {
@@ -700,7 +708,11 @@ export function getBlockParams(
   // Pieces per Source-generated agent — explicit > default 1.
   const piecesPerAgent = Math.max(1, Math.round(p.piecesPerAgent ?? 1));
 
-  return { sourceRatePerHr, cycleS, passProb, capacity, queueCapacity, batchSize, piecesPerAgent };
+  // Parallel-server cap for Service blocks. Stations are single-server by
+  // default (one machine per workstation); reinforced stations bump this.
+  const servers = Math.max(1, Math.round(p.servers ?? numProp(fx, 'servers') ?? 1));
+
+  return { sourceRatePerHr, cycleS, passProb, capacity, queueCapacity, batchSize, piecesPerAgent, servers };
 }
 
 /**

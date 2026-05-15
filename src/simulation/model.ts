@@ -8,6 +8,8 @@
 
 import type { GarmentTemplate } from '../domain';
 import type { SimConfig } from './engine';
+import type { ServiceDist, QueueDiscipline } from './index';
+import type { ModelTimeUnit } from './timeUnit';
 
 export interface BuildModelOptions {
   garment: GarmentTemplate;
@@ -22,6 +24,12 @@ export interface BuildModelOptions {
    * proficiency on the operations they're running.
    */
   opEfficiency?: Record<string, number>;
+  /**
+   * Engine time unit — what one tick of `state.time` represents. Defaults
+   * to 'minute' (matches the SMV unit in the apparel domain). Pass the
+   * project's `time.modelTimeUnit` to keep UI labels honest.
+   */
+  modelTimeUnit?: ModelTimeUnit;
 }
 
 export function buildSimConfig(opts: BuildModelOptions): SimConfig {
@@ -70,6 +78,18 @@ export function buildSimConfig(opts: BuildModelOptions): SimConfig {
   // 10 % headroom keeps the head of the line loaded.
   const arrivalRatePerHour = opts.arrivalRatePerHour ?? bundlesPerHour * 1.1;
 
+  // Queueing-theory overrides per station — extracted from the operation
+  // record. The engine treats undefined entries as "use the default".
+  const serviceDistributions: (ServiceDist | undefined)[] = ops.map(
+    (op) => op.serviceDistribution,
+  );
+  const stationCapacities: (number | undefined)[] = ops.map(
+    (op) => op.queueCapacity,
+  );
+  const queueDisciplines: (QueueDiscipline | undefined)[] = ops.map(
+    (op) => op.queueDiscipline,
+  );
+
   return {
     garmentTemplateId: garment.id,
     operations: ops,
@@ -79,6 +99,10 @@ export function buildSimConfig(opts: BuildModelOptions): SimConfig {
     smvVariance: opts.smvVariance ?? 0.15,
     randomSeed: opts.randomSeed ?? 42,
     opEfficiency: opts.opEfficiency,
+    serviceDistributions,
+    stationCapacities,
+    queueDisciplines,
+    modelTimeUnit: opts.modelTimeUnit ?? 'minute',
   };
 }
 

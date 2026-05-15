@@ -13,6 +13,7 @@ import {
   type PointerEvent as ReactPointerEvent,
   type ReactNode,
 } from 'react';
+import { HudSelect } from '../components';
 
 // ── Option types ─────────────────────────────────────────────────────────────
 
@@ -248,23 +249,27 @@ export function TweakSelect<V extends string | number | boolean>({
   options,
   onChange,
 }: TweakSelectProps<V>) {
+  // Normalise the option list and remember each original value so we can
+  // map the string the HudSelect emits back to its native type (number,
+  // bool, etc.) before handing it to the caller.
+  const norm = options.map((o) => {
+    const v = typeof o === 'object' && o !== null ? (o as { value: V }).value : (o as V);
+    const l = typeof o === 'object' && o !== null ? (o as { label: string }).label : String(o);
+    return { value: v, key: String(v), label: l };
+  });
   return (
     <TweakRow label={label}>
-      <select
-        className="twk-field"
+      <HudSelect
         value={String(value)}
-        onChange={(e) => onChange(e.target.value as unknown as V)}
-      >
-        {options.map((o) => {
-          const v = typeof o === 'object' && o !== null ? (o as { value: V }).value : (o as V);
-          const l = typeof o === 'object' && o !== null ? (o as { label: string }).label : String(o);
-          return (
-            <option key={String(v)} value={String(v)}>
-              {l}
-            </option>
-          );
-        })}
-      </select>
+        onChange={(v) => {
+          const hit = norm.find((o) => o.key === v);
+          if (hit) onChange(hit.value);
+        }}
+        variant="light"
+        size="sm"
+        width="100%"
+        options={norm.map((o) => ({ value: o.key, label: o.label }))}
+      />
     </TweakRow>
   );
 }

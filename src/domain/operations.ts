@@ -10,6 +10,7 @@
 
 import type { MachineCode } from './machines';
 import type { SkillId } from './workers';
+import type { ServiceDist, QueueDiscipline } from '../simulation';
 
 export type OperationCategory =
   | 'sewing'
@@ -45,6 +46,23 @@ export interface Operation {
   reworkable?: boolean;
   /** Free-form notes (e.g. "uses pattern guide", "watch needle gauge"). */
   notes?: string;
+  // ── Queueing-theory overrides ────────────────────────────────────────────
+  /**
+   * Service-time distribution for the station running this operation. When
+   * present, drives the simulator's sampling and the analytical Kendall
+   * classification (M/M/c, M/D/1, M/Ek/1, M/G/1, etc.).
+   * Missing ⇒ engine falls back to uniform ±15 % around `smv` (legacy).
+   */
+  serviceDistribution?: ServiceDist;
+  /**
+   * System capacity (queue + in-service) at this station. Models cart /
+   * hanger / conveyor buffer between stations. Missing ⇒ unbounded.
+   */
+  queueCapacity?: number;
+  /**
+   * Queue discipline for tickets at this station. Missing ⇒ FCFS.
+   */
+  queueDiscipline?: QueueDiscipline;
 }
 
 /**
