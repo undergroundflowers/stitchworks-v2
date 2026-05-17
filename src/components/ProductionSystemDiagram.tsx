@@ -192,7 +192,7 @@ function renderTopology(system: ProductionSystem) {
           />
           <path d="M 168 105 L 162 102 L 162 108 Z" fill={SW_COLORS.brand} />
           <text x={140} y={20} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={800} fill={SW_COLORS.muted} letterSpacing={2}>
-            5–8 OPS · 1-PIECE FLOW · ROTATE
+            5–8 OPERATORS · 1-PIECE FLOW · ROTATE
           </text>
         </g>
       );
@@ -242,7 +242,7 @@ function renderTopology(system: ProductionSystem) {
             FULL GARMENT
           </text>
           <text x={140} y={20} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={800} fill={SW_COLORS.muted} letterSpacing={2}>
-            1 OP · ALL OPERATIONS
+            1 OPERATOR · ALL OPERATIONS
           </text>
         </g>
       );
@@ -355,7 +355,7 @@ function renderTopology(system: ProductionSystem) {
             strokeDasharray="2 2"
           />
           <text x={140} y={20} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={800} fill={SW_COLORS.muted} letterSpacing={2}>
-            UNEVEN BATCHES · SHARED OPS
+            UNEVEN BATCHES · SHARED OPERATIONS
           </text>
         </g>
       );

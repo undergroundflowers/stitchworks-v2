@@ -27,7 +27,7 @@ import {
 } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
-import { HudSelect } from '../components';
+import { HudSelect, StageOverlay } from '../components';
 import {
   ISO_FIXTURE_CATALOG,
   APPAREL_CATEGORIES,
@@ -43,13 +43,12 @@ import {
   selectActiveTwin,
   type DepartmentColorKey,
 } from '../store/twin';
+import { useProject, useFactoryLibrary } from '../store';
 import type {
   Department,
   Workstation,
   Connector,
   ConnectorKind,
-  CadUnderlay,
-  DetectedRegion,
 } from '../domain/twin';
 import {
   getBlockSpec,
@@ -69,7 +68,6 @@ import {
   type PmlCategory,
   type PmlPort,
 } from '../domain/pml';
-import { importCadFile, regionToWorldRect } from '../lib/cadImport';
 import { buildReferenceFactoryTwin } from '../domain/reference-twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
@@ -77,9 +75,6 @@ import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
 // ============================================================================
 // CONSTANTS
 // ============================================================================
-
-const ISO_TILE = 32;
-const ISO_THIN = ISO_TILE / 2;
 
 type Lens = 'operations' | 'resources' | 'kpis';
 /** Canvas render mode:
@@ -249,15 +244,23 @@ export function BuilderPage() {
   const setBlock = useTwin((s) => s.setBlock);
   const addConnector = useTwin((s) => s.addConnector);
   const removeConnector = useTwin((s) => s.removeConnector);
-  const setCadUnderlay = useTwin((s) => s.setCadUnderlay);
-  const updateCadTransform = useTwin((s) => s.updateCadTransform);
   const renameActive = useTwin((s) => s.renameActive);
   const loadCanonical = useTwin((s) => s.loadCanonical);
   const createScenarioFromCanonical = useTwin(
     (s) => s.createScenarioFromCanonical,
   );
+  const forkScenario = useTwin((s) => s.forkScenario);
   const setActiveScenario = useTwin((s) => s.setActiveScenario);
   const deleteScenario = useTwin((s) => s.deleteScenario);
+  const touchActive = useTwin((s) => s.touchActive);
+  // Project meta name (the authoritative label the TopBar shows) — the
+  // Builder's factory picker mirrors this so both surfaces agree.
+  const projectName = useProject((s) => s.meta.name);
+  const renameProject = useProject((s) => s.rename);
+  // Saved factories from the library so the picker can switch to any
+  // archived factory (not just scenarios of the active canonical).
+  const savedFactories = useFactoryLibrary((s) => s.savedFactories);
+  const loadSavedFactory = useFactoryLibrary((s) => s.loadFactory);
 
   // ── Local UI state ─────────────────────────────────────────────────────────
   const [drop, setDrop] = useState<DropTool>({ kind: 'none' });
@@ -345,10 +348,6 @@ export function BuilderPage() {
    *  canvas user-space matches stage pixels 1:1 — required for the cursor
    *  → world projection to be exact regardless of element aspect ratio. */
   const [stageSize, setStageSize] = useState({ w: 1200, h: 800 });
-  /** When true the Auto-Extract modal is open over the canvas. Reads its
-   *  candidate list from the active twin's CAD underlay. */
-  const [extractOpen, setExtractOpen] = useState(false);
-
   // Side-panel widths. User drags the splitters; values persist in
   // localStorage so the layout survives reloads.
   const [paletteWidth, setPaletteWidth] = useState<number>(() => {
@@ -388,7 +387,6 @@ export function BuilderPage() {
   }, [paletteWidth, inspectorWidth]);
 
   const stageRef = useRef<HTMLDivElement | null>(null);
-  const cadFileInputRef = useRef<HTMLInputElement | null>(null);
   const panRef = useRef(pan);
   panRef.current = pan;
   const spacePanRef = useRef(false);
@@ -692,30 +690,6 @@ export function BuilderPage() {
     };
   }, [selected, rotateWorkstation, removeWorkstation, removeDepartment, duplicateWorkstation, resetView]);
 
-  // ── CAD import ─────────────────────────────────────────────────────────────
-  const onImportCadClick = useCallback(() => {
-    cadFileInputRef.current?.click();
-  }, []);
-
-  const onCadFileChosen = useCallback(
-    async (e: React.ChangeEvent<HTMLInputElement>) => {
-      const file = e.target.files?.[0];
-      // Reset the input so re-importing the same file fires onChange again.
-      e.target.value = '';
-      if (!file) return;
-      const result = await importCadFile(file, {
-        gridW: twin.gridW,
-        gridH: twin.gridH,
-      });
-      if (!result.ok) {
-        window.alert(`Could not import CAD file.\n\n${result.reason}`);
-        return;
-      }
-      setCadUnderlay(result.underlay);
-    },
-    [twin.gridW, twin.gridH, setCadUnderlay],
-  );
-
   // ── Export JSON ────────────────────────────────────────────────────────────
   const onExportJson = useCallback(() => {
     const data = JSON.stringify(twin, null, 2);
@@ -730,15 +704,76 @@ export function BuilderPage() {
     URL.revokeObjectURL(url);
   }, [twin]);
 
-  // ── Scenario picker ────────────────────────────────────────────────────────
-  const onForkScenario = () => {
-    const name = window.prompt(
-      'Scenario name?',
-      `Scenario ${scenarios.length + 1}`,
-    );
+  // ── Save / Save As ─────────────────────────────────────────────────────────
+  // Two flows:
+  //   • Save     — re-stamps modifiedAt on the active twin (canonical or
+  //                scenario) and flashes a "Saved" toast. Edits are already
+  //                auto-persisted by the zustand persist middleware; the
+  //                button exists to give the user a clear commit moment.
+  //   • Save As… — opens a small inline modal that asks for a scenario
+  //                name + optional notes, then forks the *active* twin
+  //                (canonical → new scenario, or scenario → branched
+  //                scenario via forkScenario). Activates the new scenario
+  //                so the user immediately edits the fork rather than the
+  //                source.
+  /** Transient "Saved · HH:MM:SS" indicator next to the Save button. */
+  const [savedAt, setSavedAt] = useState<string | null>(null);
+  /** Open state + draft fields for the Save-As modal. */
+  const [saveAs, setSaveAs] = useState<{
+    open: boolean;
+    name: string;
+    notes: string;
+    activate: boolean;
+  }>({ open: false, name: '', notes: '', activate: true });
+
+  const onSave = useCallback(() => {
+    touchActive();
+    const t = new Date();
+    const hh = String(t.getHours()).padStart(2, '0');
+    const mm = String(t.getMinutes()).padStart(2, '0');
+    const ss = String(t.getSeconds()).padStart(2, '0');
+    setSavedAt(`${hh}:${mm}:${ss}`);
+    // Clear after a short window so the chip doesn't linger forever.
+    window.setTimeout(() => {
+      setSavedAt((cur) => (cur === `${hh}:${mm}:${ss}` ? null : cur));
+    }, 2400);
+  }, [touchActive]);
+
+  const onSaveAsOpen = useCallback(() => {
+    // Default name: "<active name> (copy)" so the user sees the lineage; if
+    // that would collide with an existing scenario name we suffix a counter.
+    const base = `${twin.name || 'Factory'} (copy)`;
+    const existing = new Set(scenarios.map((s) => s.name));
+    let candidate = base;
+    let i = 2;
+    while (existing.has(candidate)) {
+      candidate = `${base} ${i++}`;
+    }
+    setSaveAs({ open: true, name: candidate, notes: '', activate: true });
+  }, [twin.name, scenarios]);
+
+  const onSaveAsConfirm = useCallback(() => {
+    const name = saveAs.name.trim();
     if (!name) return;
-    createScenarioFromCanonical({ name, activate: true });
-  };
+    if (activeScenarioId === null) {
+      createScenarioFromCanonical({
+        name,
+        notes: saveAs.notes.trim() || undefined,
+        activate: saveAs.activate,
+      });
+    } else {
+      forkScenario(activeScenarioId, {
+        name,
+        notes: saveAs.notes.trim() || undefined,
+        activate: saveAs.activate,
+      });
+    }
+    setSaveAs({ open: false, name: '', notes: '', activate: true });
+  }, [saveAs, activeScenarioId, createScenarioFromCanonical, forkScenario]);
+
+  const onSaveAsCancel = useCallback(() => {
+    setSaveAs({ open: false, name: '', notes: '', activate: true });
+  }, []);
 
   // ── Render ─────────────────────────────────────────────────────────────────
   return (
@@ -758,10 +793,13 @@ export function BuilderPage() {
           gridColumn: '1 / 6',
           display: 'flex',
           alignItems: 'center',
+          flexWrap: 'wrap',
+          rowGap: 8,
           gap: 12,
           padding: '10px 16px',
           background: SW_COLORS.paper,
           borderBottom: `1px solid ${SW_COLORS.line}`,
+          minWidth: 0,
         }}
       >
         <button onClick={() => navigate('/')} style={btnSec}>
@@ -781,6 +819,12 @@ export function BuilderPage() {
           <HudSelect
             value={activeScenarioId ?? '__canonical__'}
             onChange={(v) => {
+              if (v.startsWith('lib:')) {
+                loadSavedFactory(v.slice(4));
+                setSelected(null);
+                return;
+              }
+              if (v === '__divider_saved__') return;
               setActiveScenario(v === '__canonical__' ? null : v);
               setSelected(null);
             }}
@@ -788,26 +832,102 @@ export function BuilderPage() {
             size="sm"
             minWidth={280}
             options={[
-              { value: '__canonical__', label: `◆ Canonical · ${canonical.name}` },
+              {
+                value: '__canonical__',
+                label: `◆ Canonical · ${projectName || canonical.name}`,
+              },
               ...scenarios.map((scn) => ({
                 value: scn.id,
                 label: `${bestScenario?.id === scn.id ? '★' : '✦'} ${scn.name}`,
                 tag: bestScenario?.id === scn.id ? 'BEST' : undefined,
               })),
+              ...(savedFactories.length > 0
+                ? [
+                    {
+                      value: '__divider_saved__',
+                      label: `── SAVED FACTORIES · ${savedFactories.length} ──`,
+                      disabled: true,
+                    },
+                    ...savedFactories.map((f) => ({
+                      value: `lib:${f.id}`,
+                      label: `📚 ${f.name}`,
+                      tag: `${f.stationCount} STN`,
+                    })),
+                  ]
+                : []),
             ]}
           />
           <button
             onClick={() => {
-              const next = window.prompt('Rename this factory', twin.name);
-              if (next && next.trim()) renameActive(next.trim());
+              const seed = activeScenarioId === null ? (projectName || twin.name) : twin.name;
+              const next = window.prompt('Rename this factory', seed);
+              const trimmed = next?.trim();
+              if (!trimmed) return;
+              renameActive(trimmed);
+              // When the canonical is the active entity, also rename the
+              // project meta so the TopBar label stays in sync.
+              if (activeScenarioId === null) renameProject(trimmed);
             }}
             style={btnSec}
             title="Rename the active factory"
           >
             ✎
           </button>
-          <button onClick={onForkScenario} style={btnSec} title="Fork the canonical twin into a new scenario">
-            ✦ FORK
+          <button
+            onClick={onSave}
+            style={{
+              ...btnPrim,
+              background: savedAt ? SW_COLORS.ok : SW_COLORS.brand,
+              transition: 'background 160ms',
+            }}
+            title={
+              activeScenarioId === null
+                ? 'Save the current configuration into the canonical factory'
+                : 'Save the current configuration into this scenario'
+            }
+          >
+            {savedAt ? `✓ SAVED · ${savedAt}` : '💾 SAVE'}
+          </button>
+          {(() => {
+            const simulatableCount = twin.workstations.filter(
+              (ws) => ws.operation.opId != null,
+            ).length;
+            const canSimulate = simulatableCount > 0;
+            return (
+              <button
+                onClick={() => {
+                  if (!canSimulate) return;
+                  touchActive();
+                  navigate('/sim?source=twin');
+                }}
+                disabled={!canSimulate}
+                style={{
+                  ...btnPrim,
+                  background: canSimulate ? SW_COLORS.ok : SW_COLORS.line,
+                  color: canSimulate ? '#fff' : SW_COLORS.muted,
+                  cursor: canSimulate ? 'pointer' : 'not-allowed',
+                  opacity: canSimulate ? 1 : 0.65,
+                }}
+                title={
+                  canSimulate
+                    ? `Simulate this factory · ${simulatableCount} workstation${simulatableCount === 1 ? '' : 's'} ready`
+                    : 'Assign an operation to at least one workstation before simulating.'
+                }
+              >
+                ▶ SIMULATE THIS FACTORY
+              </button>
+            );
+          })()}
+          <button
+            onClick={onSaveAsOpen}
+            style={btnSec}
+            title={
+              activeScenarioId === null
+                ? 'Fork the canonical twin into a new scenario'
+                : 'Fork this scenario into a new branched scenario'
+            }
+          >
+            ✦ SAVE AS…
           </button>
           {bestScenario && (
             <button
@@ -931,44 +1051,6 @@ export function BuilderPage() {
           )}
         </div>
 
-        {/* Lens toggles — overlay choice for the iso canvas */}
-        <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}`, opacity: canvasMode === 'iso' ? 1 : 0.55 }}>
-          {(['operations', 'resources', 'kpis'] as const).map((l) => (
-            <button
-              key={l}
-              onClick={() => setLens(l)}
-              style={{
-                background: lens === l ? SW_COLORS.ink : 'transparent',
-                color: lens === l ? '#fff' : SW_COLORS.steel,
-                border: 'none',
-                padding: '6px 12px',
-                fontFamily: SW_FONTS.display,
-                fontSize: 10,
-                fontWeight: 900,
-                letterSpacing: '0.08em',
-                cursor: 'pointer',
-                borderRadius: 4,
-              }}
-            >
-              {l.toUpperCase()}
-            </button>
-          ))}
-        </div>
-
-        <button
-          onClick={onImportCadClick}
-          style={btnSec}
-          title="Import a DXF or SVG floor plan as a tracing reference"
-        >
-          ⌂ IMPORT CAD
-        </button>
-        <input
-          ref={cadFileInputRef}
-          type="file"
-          accept=".dxf,.svg,.dwg,image/svg+xml"
-          onChange={onCadFileChosen}
-          style={{ display: 'none' }}
-        />
         <button onClick={onExportJson} style={btnSec} title="Download the active twin as JSON">
           ⤓ EXPORT JSON
         </button>
@@ -1426,48 +1508,28 @@ export function BuilderPage() {
           />
         )}
 
-        {/* CAD-underlay control strip — only shown when an underlay exists */}
-        {twin.cadUnderlay && (
-          <CadUnderlayControls
-            underlay={twin.cadUnderlay}
-            onPatch={updateCadTransform}
-            onRemove={() => {
-              if (window.confirm('Remove the CAD underlay from this twin?')) {
-                setCadUnderlay(null);
-              }
-            }}
-            onExtract={() => setExtractOpen(true)}
-          />
-        )}
-
-        {/* CAD Auto-Extract modal — closed shapes → Departments */}
-        {extractOpen && twin.cadUnderlay && (
-          <CadExtractModal
-            underlay={twin.cadUnderlay}
-            gridW={twin.gridW}
-            gridH={twin.gridH}
-            existingDeptCount={twin.departments.length}
-            onCancel={() => setExtractOpen(false)}
-            onConfirm={(rows) => {
-              for (const row of rows) {
-                const rect = regionToWorldRect(row.region, twin.cadUnderlay!, {
-                  gridW: twin.gridW,
-                  gridH: twin.gridH,
-                });
-                addDepartment({
-                  name: row.name,
-                  kind: row.preset.kind,
-                  color: row.preset.color,
-                  bounds: rect,
-                });
-              }
-              setExtractOpen(false);
-            }}
+        {/* Save-As modal — fork the active twin into a new scenario */}
+        {saveAs.open && (
+          <SaveAsScenarioModal
+            sourceLabel={
+              activeScenarioId === null
+                ? `Canonical · ${twin.name}`
+                : twin.name
+            }
+            isForkOfScenario={activeScenarioId !== null}
+            name={saveAs.name}
+            notes={saveAs.notes}
+            activate={saveAs.activate}
+            onNameChange={(name) => setSaveAs((s) => ({ ...s, name }))}
+            onNotesChange={(notes) => setSaveAs((s) => ({ ...s, notes }))}
+            onActivateChange={(activate) => setSaveAs((s) => ({ ...s, activate }))}
+            onCancel={onSaveAsCancel}
+            onConfirm={onSaveAsConfirm}
           />
         )}
 
         {/* Zoom & view controls */}
-        <div
+        <StageOverlay
           style={{
             position: 'absolute',
             bottom: 14,
@@ -1509,7 +1571,7 @@ export function BuilderPage() {
           >
             ⤒
           </button>
-        </div>
+        </StageOverlay>
 
         {/* Bottom-left counter strip */}
         <div
@@ -1563,6 +1625,7 @@ export function BuilderPage() {
         twin={twin}
         selected={selected}
         lens={lens}
+        onLensChange={setLens}
         onUpdateDept={(id, patch) => updateDepartment(id, patch)}
         onRemoveDept={(id) => {
           removeDepartment(id);
@@ -2028,14 +2091,6 @@ function CanvasSVG(props: CanvasSVGProps) {
         stroke="none"
       />
 
-      {/* CAD UNDERLAY — projected onto the iso ground plane between the floor
-          and the grid so the user can trace it with departments. Hidden when
-          the underlay is invisible; pointer-events suppressed always so it
-          never steals clicks from layout entities. */}
-      {twin.cadUnderlay && twin.cadUnderlay.transform.visible && (
-        <CadUnderlayLayer underlay={twin.cadUnderlay} />
-      )}
-
       {/* Grid lines — sub-cell tier first (drawn under the integer tier so
           the cell boundaries stay visually dominant). Sub-cell density grows
           with zoom; at zoom 1× there are none. Range tracks the visible
@@ -2109,12 +2164,16 @@ function CanvasSVG(props: CanvasSVGProps) {
       />
 
 
-      {/* DEPARTMENTS — drawn first so they sit under workstations */}
+      {/* DEPARTMENTS — drawn first so they sit under workstations.
+          While a drop tool is armed (drop.kind !== 'none'), entity shapes must
+          let clicks pass through to the stage's onCanvasClick so placement
+          works *inside* a department instead of getting eaten by dept select. */}
       {twin.departments.map((d) => (
         <DepartmentShape
           key={d.id}
           dept={d}
           selected={selected?.kind === 'dept' && selected.id === d.id}
+          placing={props.drop.kind !== 'none'}
           onClick={() => props.onSelect({ kind: 'dept', id: d.id })}
           onMouseDown={(e) => props.onStartDrag('dept', d.id, e)}
         />
@@ -2133,6 +2192,7 @@ function CanvasSVG(props: CanvasSVGProps) {
               selected={selected?.kind === 'ws' && selected.id === w.id}
               connectSource={isConnectSource}
               lens={lens}
+              placing={props.drop.kind !== 'none'}
               onClick={() => props.onSelect({ kind: 'ws', id: w.id })}
               onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
             />
@@ -2160,11 +2220,13 @@ function CanvasSVG(props: CanvasSVGProps) {
 function DepartmentShape({
   dept,
   selected,
+  placing,
   onClick,
   onMouseDown,
 }: {
   dept: Department;
   selected: boolean;
+  placing: boolean;
   onClick: () => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
@@ -2179,11 +2241,15 @@ function DepartmentShape({
   return (
     <g
       onClick={(e) => {
+        if (placing) return; // let stage's onCanvasClick handle placement
         e.stopPropagation();
         onClick();
       }}
-      onMouseDown={onMouseDown}
-      style={{ cursor: 'move' }}
+      onMouseDown={(e) => {
+        if (placing) return; // don't start a dept drag while a tool is armed
+        onMouseDown(e);
+      }}
+      style={{ cursor: placing ? 'crosshair' : 'move' }}
     >
       <polygon
         points={ptsToStr([tl, tr, br, bl])}
@@ -2218,6 +2284,7 @@ function WorkstationSprite({
   selected,
   connectSource,
   lens,
+  placing,
   onClick,
   onMouseDown,
 }: {
@@ -2225,6 +2292,7 @@ function WorkstationSprite({
   selected: boolean;
   connectSource: boolean;
   lens: Lens;
+  placing: boolean;
   onClick: () => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
@@ -2250,11 +2318,15 @@ function WorkstationSprite({
     <g
       transform={`translate(${origin.sx}, ${origin.sy}) rotate(${ws.rotation})`}
       onClick={(e) => {
+        if (placing) return; // let placement click bubble to the stage
         e.stopPropagation();
         onClick();
       }}
-      onMouseDown={onMouseDown}
-      style={{ cursor: 'move' }}
+      onMouseDown={(e) => {
+        if (placing) return; // don't start a ws drag while a tool is armed
+        onMouseDown(e);
+      }}
+      style={{ cursor: placing ? 'crosshair' : 'move' }}
     >
       {selected && (
         <polygon
@@ -2340,499 +2412,187 @@ function heatColor(util: number): string {
   return SW_COLORS.alarm;
 }
 
-// ── CAD UNDERLAY ─────────────────────────────────────────────────────────────
 
 /**
- * Render an imported floor plan onto the iso ground plane.
+ * Save-As-Scenario dialog. Pure form: parent owns the field state so the
+ * Builder can pre-fill the name with "<active> (copy)" and so the confirm
+ * handler can decide whether to fork from canonical or branch a scenario.
  *
- * Coordinate stack, outermost first:
- *   1. Iso projection: map world (x, y) → screen (sx, sy).
- *   2. Translate to the underlay's center in world cells.
- *   3. Rotate by the user-set angle.
- *   4. Scale source-units → world-cells.
- *   5. Translate so the source viewBox is centred at the origin.
- *
- * `vector-effect: non-scaling-stroke` keeps the trace lines visually thin no
- * matter how aggressively the user scales the underlay. `pointer-events: none`
- * means the underlay never steals clicks from departments / workstations.
+ * Keyboard: Enter on the name field confirms, Esc cancels.
  */
-function CadUnderlayLayer({ underlay }: { underlay: CadUnderlay }) {
-  const [vbX, vbY, vbW, vbH] = underlay.viewBox;
-  const cxSrc = vbX + vbW / 2;
-  const cySrc = vbY + vbH / 2;
-  const t = underlay.transform;
-
-  const isoMatrix = `matrix(${ISO_TILE} ${ISO_THIN} ${-ISO_TILE} ${ISO_THIN} 0 0)`;
-  const place =
-    `translate(${t.cx} ${t.cy}) ` +
-    `rotate(${t.rotation}) ` +
-    `scale(${t.scale}) ` +
-    `translate(${-cxSrc} ${-cySrc})`;
-
-  return (
-    <g
-      data-cad-underlay="true"
-      transform={isoMatrix}
-      opacity={t.opacity}
-      style={{ pointerEvents: 'none' }}
-    >
-      <g transform={place}>
-        <g
-          stroke={SW_COLORS.ink}
-          strokeWidth={1.5}
-          fill="none"
-          style={{ vectorEffect: 'non-scaling-stroke' } as CSSProperties}
-          // Inner content was emitted by the importer; safe because we never
-          // accept anything other than the user's own DXF/SVG file.
-          dangerouslySetInnerHTML={{ __html: underlay.svg }}
-        />
-      </g>
-    </g>
-  );
-}
-
-/**
- * Floating control strip for the CAD underlay. Mirrors the visual language of
- * the zoom strip (paper background, hairline border) so it doesn't compete
- * with the toolbar; lives just above the count chips.
- */
-function CadUnderlayControls({
-  underlay,
-  onPatch,
-  onRemove,
-  onExtract,
-}: {
-  underlay: CadUnderlay;
-  onPatch: (patch: Partial<CadUnderlay['transform']>) => void;
-  onRemove: () => void;
-  onExtract: () => void;
-}) {
-  const t = underlay.transform;
-  const tinyBtn: CSSProperties = {
-    ...btnSec,
-    padding: '4px 8px',
-    minWidth: 28,
-    fontSize: 11,
-  };
-  const labelStyle: CSSProperties = {
-    fontFamily: SW_FONTS.display,
-    fontSize: 9,
-    fontWeight: 900,
-    letterSpacing: '0.08em',
-    color: SW_COLORS.muted,
-  };
-  return (
-    <div
-      style={{
-        position: 'absolute',
-        bottom: 60,
-        right: 14,
-        display: 'flex',
-        flexDirection: 'column',
-        gap: 6,
-        background: SW_COLORS.paper,
-        padding: '8px 10px',
-        borderRadius: 6,
-        border: `1px solid ${SW_COLORS.line}`,
-        zIndex: 5,
-        minWidth: 240,
-        boxShadow: '0 4px 14px rgba(0,0,0,0.06)',
-      }}
-    >
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-        <span
-          style={{
-            fontFamily: SW_FONTS.display,
-            fontSize: 10,
-            fontWeight: 900,
-            letterSpacing: '0.1em',
-            color: SW_COLORS.ink,
-          }}
-        >
-          ⌂ CAD
-        </span>
-        <span
-          title={underlay.name}
-          style={{
-            fontFamily: SW_FONTS.body,
-            fontSize: 11,
-            color: SW_COLORS.steel,
-            whiteSpace: 'nowrap',
-            overflow: 'hidden',
-            textOverflow: 'ellipsis',
-            maxWidth: 110,
-          }}
-        >
-          {underlay.name}
-        </span>
-        <span style={{ ...labelStyle, marginLeft: 'auto' }}>
-          {underlay.format.toUpperCase()}
-        </span>
-      </div>
-
-      {/* Visibility · Lock · Remove */}
-      <div style={{ display: 'flex', gap: 4 }}>
-        <button
-          onClick={() => onPatch({ visible: !t.visible })}
-          style={{
-            ...tinyBtn,
-            background: t.visible ? SW_COLORS.brand : 'transparent',
-            color: t.visible ? '#fff' : SW_COLORS.steel,
-            borderColor: t.visible ? SW_COLORS.brand : SW_COLORS.line,
-          }}
-          title={t.visible ? 'Hide underlay' : 'Show underlay'}
-        >
-          {t.visible ? '◉ SHOW' : '○ HIDE'}
-        </button>
-        <button
-          onClick={() => onPatch({ locked: !t.locked })}
-          style={{
-            ...tinyBtn,
-            background: t.locked ? SW_COLORS.ink : 'transparent',
-            color: t.locked ? '#fff' : SW_COLORS.steel,
-            borderColor: t.locked ? SW_COLORS.ink : SW_COLORS.line,
-          }}
-          title="When locked, controls are dimmed and accidental nudges are prevented"
-        >
-          {t.locked ? '🔒 LOCKED' : '🔓 LOCK'}
-        </button>
-        <button
-          onClick={onRemove}
-          style={{
-            ...tinyBtn,
-            color: SW_COLORS.alarm,
-            borderColor: SW_COLORS.alarm + '60',
-            marginLeft: 'auto',
-          }}
-          title="Remove the underlay"
-        >
-          ✕
-        </button>
-      </div>
-
-      {/* Auto-extract — promote detected closed shapes into Departments */}
-      <button
-        onClick={onExtract}
-        disabled={underlay.regions.length === 0}
-        style={{
-          ...tinyBtn,
-          width: '100%',
-          marginTop: 2,
-          background: underlay.regions.length > 0 ? SW_COLORS.ink : 'transparent',
-          color: underlay.regions.length > 0 ? '#fff' : SW_COLORS.muted,
-          borderColor: underlay.regions.length > 0 ? SW_COLORS.ink : SW_COLORS.line,
-          cursor: underlay.regions.length > 0 ? 'pointer' : 'not-allowed',
-          fontFamily: SW_FONTS.display,
-          letterSpacing: '0.08em',
-          fontSize: 10,
-        }}
-        title={
-          underlay.regions.length > 0
-            ? `Promote ${underlay.regions.length} detected region${underlay.regions.length === 1 ? '' : 's'} into Departments`
-            : 'No closed shapes were detected in this drawing'
-        }
-      >
-        🪄 AUTO-EXTRACT ({underlay.regions.length})
-      </button>
-
-      {/* Opacity slider */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 8, opacity: t.locked ? 0.5 : 1 }}>
-        <span style={{ ...labelStyle, width: 56 }}>OPACITY</span>
-        <input
-          type="range"
-          min={0.1}
-          max={1}
-          step={0.05}
-          value={t.opacity}
-          disabled={t.locked}
-          onChange={(e) => onPatch({ opacity: parseFloat(e.target.value) })}
-          style={{ flex: 1 }}
-        />
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, width: 30, textAlign: 'right', color: SW_COLORS.steel }}>
-          {Math.round(t.opacity * 100)}%
-        </span>
-      </div>
-
-      {/* Scale */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: t.locked ? 0.5 : 1 }}>
-        <span style={{ ...labelStyle, width: 56 }}>SCALE</span>
-        <button onClick={() => onPatch({ scale: t.scale / 1.1 })} style={tinyBtn} disabled={t.locked} title="Smaller">−</button>
-        <button onClick={() => onPatch({ scale: t.scale * 1.1 })} style={tinyBtn} disabled={t.locked} title="Larger">+</button>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.steel, marginLeft: 'auto' }}>
-          {t.scale.toExponential(1)}
-        </span>
-      </div>
-
-      {/* Rotate */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: t.locked ? 0.5 : 1 }}>
-        <span style={{ ...labelStyle, width: 56 }}>ROTATE</span>
-        <button onClick={() => onPatch({ rotation: t.rotation - 15 })} style={tinyBtn} disabled={t.locked} title="Rotate −15°">⟲</button>
-        <button onClick={() => onPatch({ rotation: t.rotation + 15 })} style={tinyBtn} disabled={t.locked} title="Rotate +15°">⟳</button>
-        <button onClick={() => onPatch({ rotation: 0 })} style={tinyBtn} disabled={t.locked} title="Reset rotation">0°</button>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.steel, marginLeft: 'auto' }}>
-          {Math.round(t.rotation)}°
-        </span>
-      </div>
-
-      {/* Nudge position — moves the underlay center in world cells */}
-      <div style={{ display: 'flex', alignItems: 'center', gap: 4, opacity: t.locked ? 0.5 : 1 }}>
-        <span style={{ ...labelStyle, width: 56 }}>NUDGE</span>
-        <button onClick={() => onPatch({ cx: t.cx - 1 })} style={tinyBtn} disabled={t.locked} title="Move left 1 cell">←</button>
-        <button onClick={() => onPatch({ cy: t.cy - 1 })} style={tinyBtn} disabled={t.locked} title="Move up 1 cell">↑</button>
-        <button onClick={() => onPatch({ cy: t.cy + 1 })} style={tinyBtn} disabled={t.locked} title="Move down 1 cell">↓</button>
-        <button onClick={() => onPatch({ cx: t.cx + 1 })} style={tinyBtn} disabled={t.locked} title="Move right 1 cell">→</button>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.steel, marginLeft: 'auto' }}>
-          {Math.round(t.cx)},{Math.round(t.cy)}
-        </span>
-      </div>
-    </div>
-  );
-}
-
-// ── CAD AUTO-EXTRACT MODAL ───────────────────────────────────────────────────
-
-interface ExtractRow {
-  region: DetectedRegion;
-  /** User-editable name; defaults to "Region 1", "Region 2", … */
-  name: string;
-  /** Department preset (kind + colour + label). */
-  preset: DeptPreset;
-  /** When false the row is skipped on confirm. */
-  include: boolean;
-}
-
-/**
- * Modal that lists every closed shape detected in the underlay, lets the user
- * pick a Department kind for each, and creates them in one go. The user can:
- *   • Toggle individual rows on/off (top-K by area are pre-selected).
- *   • Edit the name and the preset (kind + colour) per row.
- *   • Use Select-all / Select-none for bulk action.
- *
- * The modal computes each region's world-cell footprint live so the user can
- * sanity-check that "this big shape" maps to "a 24×16 cell rectangle" before
- * committing. Once confirmed, the parent runs `addDepartment` per row.
- */
-function CadExtractModal({
-  underlay,
-  gridW,
-  gridH,
-  existingDeptCount,
+function SaveAsScenarioModal({
+  sourceLabel,
+  isForkOfScenario,
+  name,
+  notes,
+  activate,
+  onNameChange,
+  onNotesChange,
+  onActivateChange,
   onCancel,
   onConfirm,
 }: {
-  underlay: CadUnderlay;
-  gridW: number;
-  gridH: number;
-  existingDeptCount: number;
+  sourceLabel: string;
+  isForkOfScenario: boolean;
+  name: string;
+  notes: string;
+  activate: boolean;
+  onNameChange: (v: string) => void;
+  onNotesChange: (v: string) => void;
+  onActivateChange: (v: boolean) => void;
   onCancel: () => void;
-  onConfirm: (rows: ExtractRow[]) => void;
+  onConfirm: () => void;
 }) {
-  // Pre-select the top-N largest regions; everything else starts unchecked.
-  // Anything tinier than 0.05% of the drawing's bbox area is almost certainly
-  // a fixture, not a room — leave it off by default.
-  const PRE_SELECT_TOP = 6;
-  const drawingArea = (() => {
-    const [, , w, h] = underlay.viewBox;
-    return Math.max(1, w * h);
-  })();
-  const initialRows = useMemo<ExtractRow[]>(
-    () =>
-      underlay.regions.map((r, i) => ({
-        region: r,
-        name: `Region ${existingDeptCount + i + 1}`,
-        preset: DEPT_PRESETS[DEPT_PRESETS.length - 1], // default "Custom"
-        include:
-          i < PRE_SELECT_TOP && r.area / drawingArea >= 0.0005,
-      })),
-    // eslint-disable-next-line react-hooks/exhaustive-deps
-    [underlay.regions],
-  );
-  const [rows, setRows] = useState<ExtractRow[]>(initialRows);
-
-  const setRow = (idx: number, patch: Partial<ExtractRow>) =>
-    setRows((rs) => rs.map((r, i) => (i === idx ? { ...r, ...patch } : r)));
-
-  const selectedCount = rows.filter((r) => r.include).length;
-
+  const trimmed = name.trim();
+  const canConfirm = trimmed.length > 0;
+  useEffect(() => {
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') onCancel();
+    };
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onCancel]);
   return (
     <div
-      role="dialog"
-      aria-label="Auto-extract Departments from CAD"
-      onClick={onCancel}
       style={{
-        position: 'absolute',
+        position: 'fixed',
         inset: 0,
-        background: 'rgba(15, 20, 25, 0.4)',
-        zIndex: 20,
+        zIndex: 40,
         display: 'flex',
         alignItems: 'center',
         justifyContent: 'center',
+        background: 'rgba(15, 20, 25, 0.45)',
+      }}
+      onMouseDown={(e) => {
+        if (e.target === e.currentTarget) onCancel();
       }}
     >
       <div
-        onClick={(e) => e.stopPropagation()}
         style={{
-          width: 'min(720px, 92%)',
-          maxHeight: '88%',
+          width: 'min(460px, 92%)',
           background: SW_COLORS.paper,
-          borderRadius: 8,
           border: `1px solid ${SW_COLORS.line}`,
-          boxShadow: '0 18px 50px rgba(0,0,0,0.25)',
-          display: 'flex',
-          flexDirection: 'column',
+          borderRadius: 8,
+          boxShadow: '0 24px 64px rgba(0,0,0,0.25)',
           overflow: 'hidden',
         }}
       >
-        {/* Header */}
         <div
           style={{
-            display: 'flex',
-            alignItems: 'center',
-            gap: 12,
             padding: '14px 18px',
             borderBottom: `1px solid ${SW_COLORS.line}`,
+            display: 'flex',
+            alignItems: 'baseline',
+            justifyContent: 'space-between',
+            gap: 12,
           }}
         >
-          <div
+          <div>
+            <div
+              style={{
+                fontFamily: SW_FONTS.display,
+                fontSize: 14,
+                fontWeight: 900,
+                letterSpacing: '-0.01em',
+                color: SW_COLORS.ink,
+              }}
+            >
+              SAVE AS NEW SCENARIO
+            </div>
+            <div
+              style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                color: SW_COLORS.muted,
+                marginTop: 3,
+                letterSpacing: '0.04em',
+              }}
+            >
+              FORK FROM · {sourceLabel}
+            </div>
+          </div>
+          <button
+            onClick={onCancel}
             style={{
-              fontFamily: SW_FONTS.display,
-              fontSize: 14,
-              fontWeight: 900,
-              letterSpacing: '0.04em',
-              color: SW_COLORS.ink,
+              background: 'transparent',
+              border: 'none',
+              color: SW_COLORS.muted,
+              fontSize: 18,
+              cursor: 'pointer',
+              padding: '0 4px',
+              lineHeight: 1,
             }}
+            title="Cancel (Esc)"
           >
-            🪄 AUTO-EXTRACT DEPARTMENTS
-          </div>
-          <div style={{ fontFamily: SW_FONTS.body, fontSize: 12, color: SW_COLORS.muted }}>
-            from <strong style={{ color: SW_COLORS.steel }}>{underlay.name}</strong>
-            {' · '}
-            {underlay.regions.length} closed shape{underlay.regions.length === 1 ? '' : 's'} detected
-          </div>
-          <button onClick={onCancel} style={{ ...btnSec, marginLeft: 'auto' }} title="Close">
             ✕
           </button>
         </div>
-
-        {/* Bulk actions */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 8,
-            padding: '8px 18px',
-            borderBottom: `1px solid ${SW_COLORS.line}`,
-            background: SW_COLORS.paperDeep,
-          }}
-        >
-          <button
-            onClick={() => setRows((rs) => rs.map((r) => ({ ...r, include: true })))}
-            style={btnSec}
-          >
-            ☑ Select all
-          </button>
-          <button
-            onClick={() => setRows((rs) => rs.map((r) => ({ ...r, include: false })))}
-            style={btnSec}
-          >
-            ☐ Select none
-          </button>
-          <span
+        <div style={{ padding: 18, display: 'flex', flexDirection: 'column', gap: 14 }}>
+          <div>
+            <label style={fieldLabel}>SCENARIO NAME</label>
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => onNameChange(e.target.value)}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canConfirm) onConfirm();
+              }}
+              placeholder="e.g. Sewing line — 2 extra operators"
+              style={inputBase}
+            />
+          </div>
+          <div>
+            <label style={fieldLabel}>NOTES · OPTIONAL</label>
+            <textarea
+              value={notes}
+              onChange={(e) => onNotesChange(e.target.value)}
+              placeholder="What does this fork explore? (visible in the Scenarios list)"
+              rows={3}
+              style={{ ...inputBase, resize: 'vertical', minHeight: 64, fontFamily: SW_FONTS.body }}
+            />
+          </div>
+          <label
             style={{
-              marginLeft: 'auto',
-              alignSelf: 'center',
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
               fontFamily: SW_FONTS.mono,
               fontSize: 11,
               color: SW_COLORS.steel,
+              cursor: 'pointer',
             }}
           >
-            {selectedCount} / {rows.length} selected
-          </span>
+            <input
+              type="checkbox"
+              checked={activate}
+              onChange={(e) => onActivateChange(e.target.checked)}
+            />
+            Switch to the new scenario after saving
+          </label>
+          <div
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              color: SW_COLORS.muted,
+              lineHeight: 1.5,
+              padding: '8px 10px',
+              background: SW_COLORS.paperDeep,
+              border: `1px dashed ${SW_COLORS.line}`,
+              borderRadius: 6,
+            }}
+          >
+            {isForkOfScenario
+              ? 'This creates a new scenario branched from the current scenario. The source scenario keeps its own state.'
+              : 'This creates a new scenario forked from the canonical factory. The canonical stays untouched.'}
+          </div>
         </div>
-
-        {/* Body — scrollable list */}
-        <div style={{ overflowY: 'auto', padding: '4px 0' }}>
-          {rows.map((row, idx) => {
-            const rect = regionToWorldRect(row.region, underlay, { gridW, gridH });
-            const [bx0, by0, bx1, by1] = row.region.bbox;
-            const srcW = (bx1 - bx0).toFixed(0);
-            const srcH = (by1 - by0).toFixed(0);
-            return (
-              <div
-                key={row.region.id}
-                style={{
-                  display: 'grid',
-                  gridTemplateColumns: '32px 64px 1fr 130px 130px 100px',
-                  alignItems: 'center',
-                  gap: 12,
-                  padding: '10px 18px',
-                  borderBottom: `1px solid ${SW_COLORS.line}`,
-                  opacity: row.include ? 1 : 0.55,
-                }}
-              >
-                <input
-                  type="checkbox"
-                  checked={row.include}
-                  onChange={(e) => setRow(idx, { include: e.target.checked })}
-                  style={{ width: 18, height: 18, cursor: 'pointer' }}
-                />
-                {/* Tiny preview of the region's bbox proportions */}
-                <RegionThumb region={row.region} />
-                <input
-                  type="text"
-                  value={row.name}
-                  onChange={(e) => setRow(idx, { name: e.target.value })}
-                  style={{ ...inputBase, width: '100%' }}
-                />
-                <HudSelect
-                  value={row.preset.kind}
-                  onChange={(v) => {
-                    const next = DEPT_PRESETS.find((p) => p.kind === v);
-                    if (next) setRow(idx, { preset: next });
-                  }}
-                  variant="light"
-                  size="sm"
-                  width="100%"
-                  options={DEPT_PRESETS.map((p) => ({ value: p.kind, label: p.label }))}
-                />
-                <span
-                  style={{
-                    fontFamily: SW_FONTS.mono,
-                    fontSize: 10,
-                    color: SW_COLORS.muted,
-                    whiteSpace: 'nowrap',
-                  }}
-                  title={`Source: ${srcW} × ${srcH} units · ${row.region.source}`}
-                >
-                  src {srcW}×{srcH}
-                </span>
-                <span
-                  style={{
-                    fontFamily: SW_FONTS.mono,
-                    fontSize: 10,
-                    color: SW_COLORS.steel,
-                    whiteSpace: 'nowrap',
-                  }}
-                >
-                  {rect.w}×{rect.h} cells
-                </span>
-              </div>
-            );
-          })}
-          {rows.length === 0 && (
-            <div style={{ padding: 24, textAlign: 'center', color: SW_COLORS.muted, fontFamily: SW_FONTS.body, fontSize: 13 }}>
-              No closed shapes were detected. Try tracing on top of the underlay by hand.
-            </div>
-          )}
-        </div>
-
-        {/* Footer */}
         <div
           style={{
-            display: 'flex',
-            gap: 8,
             padding: '12px 18px',
             borderTop: `1px solid ${SW_COLORS.line}`,
+            display: 'flex',
             justifyContent: 'flex-end',
+            gap: 8,
             background: SW_COLORS.paperDeep,
           }}
         >
@@ -2840,15 +2600,15 @@ function CadExtractModal({
             CANCEL
           </button>
           <button
-            onClick={() => onConfirm(rows.filter((r) => r.include))}
-            disabled={selectedCount === 0}
+            onClick={onConfirm}
+            disabled={!canConfirm}
             style={{
               ...btnPrim,
-              opacity: selectedCount === 0 ? 0.45 : 1,
-              cursor: selectedCount === 0 ? 'not-allowed' : 'pointer',
+              opacity: canConfirm ? 1 : 0.5,
+              cursor: canConfirm ? 'pointer' : 'not-allowed',
             }}
           >
-            CREATE {selectedCount} DEPARTMENT{selectedCount === 1 ? '' : 'S'}
+            ✦ SAVE SCENARIO
           </button>
         </div>
       </div>
@@ -2856,29 +2616,6 @@ function CadExtractModal({
   );
 }
 
-/** Tiny SVG thumbnail of a region's source bbox shape — gives the modal a
- *  visual cue that "this row is wide" or "this row is square" at a glance. */
-function RegionThumb({ region }: { region: DetectedRegion }) {
-  const [x0, y0, x1, y1] = region.bbox;
-  const w = Math.max(1e-6, x1 - x0);
-  const h = Math.max(1e-6, y1 - y0);
-  const max = Math.max(w, h);
-  const tw = (w / max) * 32;
-  const th = (h / max) * 32;
-  return (
-    <svg width={48} height={36} viewBox="-24 -18 48 36" style={{ display: 'block' }}>
-      <rect
-        x={-tw / 2}
-        y={-th / 2}
-        width={tw}
-        height={th}
-        fill={SW_COLORS.brand + '22'}
-        stroke={SW_COLORS.brand}
-        strokeWidth={1.4}
-      />
-    </svg>
-  );
-}
 
 // ── CONNECTOR LAYER ───────────────────────────────────────────────────────────
 
@@ -4028,10 +3765,61 @@ function BuilderProcessView({
 // INSPECTOR (right)
 // ============================================================================
 
+/**
+ * Lens picker shown at the top of the Inspector. The chosen lens drives both
+ * the iso canvas badge above each workstation and which group of fields the
+ * Inspector highlights (Operations · Resources · KPI targets) — keeping the
+ * toggle next to the highlighted section makes the wiring legible.
+ */
+function LensToggle({
+  lens,
+  onChange,
+}: {
+  lens: Lens;
+  onChange: (l: Lens) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        gap: 4,
+        background: SW_COLORS.paperDeep,
+        padding: 3,
+        borderRadius: 6,
+        border: `1px solid ${SW_COLORS.line}`,
+        marginBottom: 12,
+      }}
+    >
+      {(['operations', 'resources', 'kpis'] as const).map((l) => (
+        <button
+          key={l}
+          onClick={() => onChange(l)}
+          style={{
+            flex: 1,
+            background: lens === l ? SW_COLORS.ink : 'transparent',
+            color: lens === l ? '#fff' : SW_COLORS.steel,
+            border: 'none',
+            padding: '6px 8px',
+            fontFamily: SW_FONTS.display,
+            fontSize: 10,
+            fontWeight: 900,
+            letterSpacing: '0.08em',
+            cursor: 'pointer',
+            borderRadius: 4,
+          }}
+        >
+          {l.toUpperCase()}
+        </button>
+      ))}
+    </div>
+  );
+}
+
 interface InspectorProps {
   twin: ReturnType<typeof selectActiveTwin>;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
   lens: Lens;
+  onLensChange: (l: Lens) => void;
   onUpdateDept: (id: string, patch: Partial<Department>) => void;
   onRemoveDept: (id: string) => void;
   onUpdateWs: (id: string, patch: Partial<Workstation>) => void;
@@ -4054,9 +3842,14 @@ function Inspector(props: InspectorProps) {
     padding: 14,
   };
 
+  const lensToggle = (
+    <LensToggle lens={props.lens} onChange={props.onLensChange} />
+  );
+
   if (!props.selected) {
     return (
       <div style={wrapper}>
+        {lensToggle}
         <div style={sectionLabel}>Inspector</div>
         <div style={{ color: SW_COLORS.muted, fontSize: 12 }}>
           Click a department or workstation to inspect its parameters.
@@ -4070,6 +3863,7 @@ function Inspector(props: InspectorProps) {
     if (!dept) return <div style={wrapper}>Selection lost.</div>;
     return (
       <div style={wrapper}>
+        {lensToggle}
         <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
           <div style={sectionLabel}>Department</div>
           <button onClick={() => props.onRemoveDept(dept.id)} style={{ ...btnSec, color: SW_COLORS.alarm, padding: '3px 8px' }}>
@@ -4136,6 +3930,7 @@ function Inspector(props: InspectorProps) {
 
   return (
     <div style={wrapper}>
+      {lensToggle}
       <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
         <div style={sectionLabel}>Workstation</div>
         <button onClick={() => props.onRemoveWs(ws.id)} style={{ ...btnSec, color: SW_COLORS.alarm, padding: '3px 8px' }}>
@@ -4262,13 +4057,6 @@ function Inspector(props: InspectorProps) {
         />
         <div style={{ height: 8 }} />
         <NumField
-          label="Defect %"
-          step={0.1}
-          value={ws.kpiTargets.defectPct ?? 0}
-          onChange={(v) => props.onSetKpiTargets(ws.id, { defectPct: v })}
-        />
-        <div style={{ height: 8 }} />
-        <NumField
           label="Utilisation %"
           value={ws.kpiTargets.utilizationPct ?? 0}
           onChange={(v) => props.onSetKpiTargets(ws.id, { utilizationPct: v })}
@@ -4279,7 +4067,6 @@ function Inspector(props: InspectorProps) {
             <ObservedRow label="Capacity / hr" value={ws.kpiObserved.capacityPerHr.toFixed(0)} />
             <ObservedRow label="Efficiency %" value={ws.kpiObserved.efficiencyPct.toFixed(1)} />
             <ObservedRow label="Utilisation %" value={ws.kpiObserved.utilizationPct.toFixed(1)} />
-            <ObservedRow label="Defect %" value={ws.kpiObserved.defectPct.toFixed(2)} />
             {ws.kpiObserved.bottleneck && (
               <div style={{ marginTop: 6, fontSize: 11, fontWeight: 700, color: SW_COLORS.alarm }}>
                 ◆ Bottleneck in last run

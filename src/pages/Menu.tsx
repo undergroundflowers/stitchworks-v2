@@ -1,8 +1,14 @@
+import { useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card, Button, Tag, Logo, TimeChip } from '../components';
-import { SW_COLORS, SW_FONTS } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import { useProject } from '../store';
+import {
+  useProject,
+  useFactoryLibrary,
+  archiveAndStartFresh,
+  FACTORY_LIBRARY_MAX,
+} from '../store';
 import { fmtCalendar } from '../simulation/timeUnit';
 
 /**
@@ -17,9 +23,55 @@ export function MenuPage() {
   const navigate = useNavigate();
   const projectTime = useProject((s) => s.time);
   const dateFormat = useProject((s) => s.units.dateFormat);
+  const factoryName = useProject((s) => s.meta.name);
+  const activeScenarioCount = useProject((s) => s.scenarios.length);
+  const activeStationCount = useTwin((s) => selectActiveTwin(s).workstations.length);
+  const savedFactories = useFactoryLibrary((s) => s.savedFactories);
+  const loadFactory = useFactoryLibrary((s) => s.loadFactory);
+  const deleteFactory = useFactoryLibrary((s) => s.deleteFactory);
   // No sim run has happened yet on the menu, so "today" anchors to t=0
   // (i.e. the project's start date). MODEL-time vs CAL is irrelevant here.
   const todayCal = fmtCalendar(0, projectTime.modelTimeUnit, projectTime.startDate, dateFormat);
+
+  // New-factory dialog state. Native `window.prompt` is suppressed in
+  // embedded preview / iframe contexts (and looks unstyled even when it
+  // does fire), so we drive the flow through an in-app modal.
+  const [newFactoryOpen, setNewFactoryOpen] = useState(false);
+  const [newFactoryName, setNewFactoryName] = useState('New Factory');
+
+  const slotsUsed = savedFactories.length + 1; // active counts toward the cap
+  const atCap = slotsUsed >= FACTORY_LIBRARY_MAX;
+
+  const openNewFactoryDialog = () => {
+    setNewFactoryName('New Factory');
+    setNewFactoryOpen(true);
+  };
+  const confirmNewFactory = () => {
+    const name = newFactoryName.trim();
+    if (!name) return;
+    if (atCap) return; // belt + braces; button is disabled in this state
+    archiveAndStartFresh(name);
+    setNewFactoryOpen(false);
+    navigate('/builder');
+  };
+  const handleLoadSaved = (id: string) => {
+    if (loadFactory(id)) navigate('/builder');
+  };
+  const handleOpenScenariosForActive = () => {
+    navigate('/scenarios');
+  };
+  const handleOpenScenariosForSaved = (id: string) => {
+    if (loadFactory(id)) navigate('/scenarios');
+  };
+  const handleDeleteSaved = (id: string, label: string) => {
+    // Plain confirm is enough here — slot deletion is destructive and the
+    // user has nowhere else to undo from. Skip if running in a sandbox
+    // that suppresses confirm() (treat suppression as cancellation).
+    const ok = typeof window === 'undefined'
+      ? true
+      : window.confirm(`Delete saved factory "${label}"? This cannot be undone.`);
+    if (ok) deleteFactory(id);
+  };
 
   return (
     <div style={{
@@ -54,11 +106,14 @@ export function MenuPage() {
 
         {/* Continue / New */}
         <div style={{ display: 'flex', gap: 12, flexWrap: 'wrap' }}>
-          <Button variant="primary" size="lg" onClick={() => navigate('/builder')} icon="+">
+          <Button
+            variant="primary"
+            size="lg"
+            onClick={openNewFactoryDialog}
+            icon="+"
+            disabled={atCap}
+          >
             CREATE NEW DIGITAL FACTORY
-          </Button>
-          <Button variant="secondary" size="lg" onClick={() => navigate('/scenarios')} icon="✦">
-            NEW SCENARIO
           </Button>
           <Button variant="secondary" size="lg" onClick={() => navigate('/reference')} icon="📖">
             REFERENCE MODELS
@@ -68,26 +123,28 @@ export function MenuPage() {
         {/* Save slots */}
         <div style={{ marginTop: 8 }}>
           <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1.5px', marginBottom: 8 }}>
-            SAVED FACTORIES · 1 / 5
+            SAVED FACTORIES · {slotsUsed} / {FACTORY_LIBRARY_MAX}
           </div>
-          <div style={{ display: 'flex', gap: 10 }}>
-            {[
-              { name: 'Test Factory', day: 14, eff: 78 },
-            ].map((slot, i) => (
-              <Card key={i} hover padding={14} style={{ flex: 1, minWidth: 0 }} onClick={() => navigate('/builder')}>
-                <div style={{ display: 'flex', justifyContent: 'flex-end', alignItems: 'center', marginBottom: 6 }}>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>D{slot.day}</span>
-                </div>
-                <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
-                  {slot.name}
-                </div>
-                <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700, color: slot.eff >= 80 ? SW_COLORS.ok : SW_COLORS.thread }}>
-                    {slot.eff}%
-                  </span>
-                  <span style={{ fontSize: 9, color: SW_COLORS.muted, fontWeight: 600 }}>EFFICIENCY</span>
-                </div>
-              </Card>
+          <div style={{ display: 'flex', gap: 10, flexWrap: 'wrap' }}>
+            <FactorySlot
+              label={factoryName || 'Untitled Factory'}
+              caption={`${activeStationCount} STATIONS`}
+              badge="ACTIVE"
+              badgeColor={SW_COLORS.ok}
+              scenarioCount={activeScenarioCount}
+              onClick={() => navigate('/builder')}
+              onOpenScenarios={handleOpenScenariosForActive}
+            />
+            {savedFactories.map((slot) => (
+              <FactorySlot
+                key={slot.id}
+                label={slot.name}
+                caption={`${slot.stationCount} STATIONS · ${fmtSavedAt(slot.savedAt)}`}
+                scenarioCount={slot.project.scenarios?.length ?? 0}
+                onClick={() => handleLoadSaved(slot.id)}
+                onOpenScenarios={() => handleOpenScenariosForSaved(slot.id)}
+                onDelete={() => handleDeleteSaved(slot.id, slot.name)}
+              />
             ))}
           </div>
         </div>
@@ -156,6 +213,223 @@ export function MenuPage() {
       }}>
         BUILD 0.4.2 · OFFLINE
       </span>
+
+      {newFactoryOpen && (
+        <NewFactoryModal
+          name={newFactoryName}
+          archiving={factoryName}
+          onNameChange={setNewFactoryName}
+          onCancel={() => setNewFactoryOpen(false)}
+          onConfirm={confirmNewFactory}
+        />
+      )}
+    </div>
+  );
+}
+
+interface FactorySlotProps {
+  label: string;
+  caption: string;
+  badge?: string;
+  badgeColor?: string;
+  scenarioCount?: number;
+  onClick: () => void;
+  onOpenScenarios?: () => void;
+  onDelete?: () => void;
+}
+
+function FactorySlot({ label, caption, badge, badgeColor, scenarioCount, onClick, onOpenScenarios, onDelete }: FactorySlotProps) {
+  const count = scenarioCount ?? 0;
+  return (
+    <Card
+      hover
+      padding={14}
+      style={{ flex: '1 1 180px', minWidth: 160, position: 'relative', display: 'flex', flexDirection: 'column' }}
+      onClick={onClick}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 6, minHeight: 16 }}>
+        {badge ? (
+          <Tag soft color={badgeColor ?? SW_COLORS.brand}>{badge}</Tag>
+        ) : <span />}
+        {onDelete && (
+          <button
+            type="button"
+            aria-label={`Delete saved factory ${label}`}
+            onClick={(e) => { e.stopPropagation(); onDelete(); }}
+            style={{
+              background: 'transparent',
+              border: 'none',
+              color: SW_COLORS.muted,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 14,
+              fontWeight: 700,
+              cursor: 'pointer',
+              padding: '0 4px',
+              lineHeight: 1,
+            }}
+          >
+            ×
+          </button>
+        )}
+      </div>
+      <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 4, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {label}
+      </div>
+      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, fontWeight: 600, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>
+        {caption}
+      </div>
+      {onOpenScenarios && (
+        <button
+          type="button"
+          onClick={(e) => { e.stopPropagation(); onOpenScenarios(); }}
+          title={count > 0 ? `Open ${count} saved scenario${count === 1 ? '' : 's'}` : 'Create a new scenario for this factory'}
+          style={{
+            marginTop: 10,
+            padding: '6px 8px',
+            background: count > 0 ? SW_COLORS.brandLite : 'transparent',
+            border: `1px solid ${count > 0 ? `${SW_COLORS.brand}40` : SW_COLORS.line}`,
+            borderRadius: 4,
+            cursor: 'pointer',
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 6,
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 700,
+            letterSpacing: '0.5px',
+            color: count > 0 ? SW_COLORS.brand : SW_COLORS.muted,
+          }}
+        >
+          <span>✦ {count > 0 ? `${count} SCENARIO${count === 1 ? '' : 'S'}` : 'NEW SCENARIO'}</span>
+          <span>→</span>
+        </button>
+      )}
+    </Card>
+  );
+}
+
+function fmtSavedAt(iso: string): string {
+  const d = new Date(iso);
+  if (Number.isNaN(d.getTime())) return 'SAVED';
+  const today = new Date();
+  const sameDay = d.toDateString() === today.toDateString();
+  if (sameDay) {
+    const hh = String(d.getHours()).padStart(2, '0');
+    const mm = String(d.getMinutes()).padStart(2, '0');
+    return `SAVED ${hh}:${mm}`;
+  }
+  const mo = String(d.getMonth() + 1).padStart(2, '0');
+  const dy = String(d.getDate()).padStart(2, '0');
+  return `SAVED ${mo}/${dy}`;
+}
+
+interface NewFactoryModalProps {
+  name: string;
+  archiving: string | null | undefined;
+  onNameChange: (s: string) => void;
+  onCancel: () => void;
+  onConfirm: () => void;
+}
+
+function NewFactoryModal({
+  name,
+  archiving,
+  onNameChange,
+  onCancel,
+  onConfirm,
+}: NewFactoryModalProps) {
+  const canCreate = name.trim().length > 0;
+  return (
+    <div
+      role="dialog"
+      aria-label="Create new factory"
+      onClick={onCancel}
+      style={{
+        position: 'fixed',
+        inset: 0,
+        background: 'rgba(15, 20, 25, 0.45)',
+        zIndex: 100,
+        display: 'flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(440px, 92%)',
+          background: SW_COLORS.paper,
+          borderRadius: 8,
+          border: `1px solid ${SW_COLORS.line}`,
+          boxShadow: '0 18px 50px rgba(0,0,0,0.25)',
+          display: 'flex',
+          flexDirection: 'column',
+          overflow: 'hidden',
+        }}
+      >
+        <div
+          style={{
+            padding: '14px 18px',
+            borderBottom: `1px solid ${SW_COLORS.line}`,
+            fontFamily: SW_FONTS.display,
+            fontSize: 14,
+            fontWeight: 900,
+            letterSpacing: '0.1em',
+          }}
+        >
+          + CREATE NEW FACTORY
+        </div>
+
+        <div style={{ padding: '16px 18px', display: 'flex', flexDirection: 'column', gap: 12 }}>
+          <label style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '1px' }}>
+              FACTORY NAME
+            </span>
+            <input
+              autoFocus
+              value={name}
+              onChange={(e) => onNameChange(e.target.value)}
+              onFocus={(e) => e.currentTarget.select()}
+              onKeyDown={(e) => {
+                if (e.key === 'Enter' && canCreate) onConfirm();
+                if (e.key === 'Escape') onCancel();
+              }}
+              style={{
+                padding: '8px 10px',
+                border: `1px solid ${SW_COLORS.line}`,
+                borderRadius: SW_RADIUS.sm,
+                background: '#fff',
+                fontFamily: SW_FONTS.body,
+                fontSize: 13,
+                color: SW_COLORS.ink,
+              }}
+            />
+          </label>
+
+          {archiving && (
+            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4 }}>
+              Your current factory <b style={{ color: SW_COLORS.ink }}>{archiving}</b> will be saved to the slots panel before the new one starts.
+            </div>
+          )}
+        </div>
+
+        <div
+          style={{
+            padding: '12px 18px',
+            borderTop: `1px solid ${SW_COLORS.line}`,
+            display: 'flex',
+            justifyContent: 'flex-end',
+            gap: 8,
+            background: SW_COLORS.paperEdge,
+          }}
+        >
+          <Button variant="ghost" onClick={onCancel}>Cancel</Button>
+          <Button variant="primary" onClick={onConfirm} disabled={!canCreate} icon="+">
+            CREATE
+          </Button>
+        </div>
+      </div>
     </div>
   );
 }

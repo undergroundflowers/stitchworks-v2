@@ -76,7 +76,6 @@ export function runPmlOnTwin(twin: Twin, opts: RunPmlOnTwinOpts = {}): RunReport
         efficiencyPct: ws.kpiTargets.capacityPerHr
           ? round1((obs.throughputPerHr / ws.kpiTargets.capacityPerHr) * 100)
           : 100,
-        defectPct: 0, // SelectOutput captures pass/fail per-block, not per-station
         utilizationPct: round1(obs.utilization * 100),
         bottleneck: obs.bottleneck,
       };

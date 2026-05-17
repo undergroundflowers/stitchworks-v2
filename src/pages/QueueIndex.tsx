@@ -362,9 +362,9 @@ function Col({
         width: undefined,
         textAlign: right ? 'right' : 'left',
         fontFamily: mono ? SW_FONTS.mono : undefined,
-        overflow: 'hidden',
-        textOverflow: 'ellipsis',
-        whiteSpace: 'nowrap',
+        whiteSpace: 'normal',
+        overflowWrap: 'anywhere',
+        minWidth: 0,
       }}
       data-w={w}
     >

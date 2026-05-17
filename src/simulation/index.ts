@@ -18,6 +18,14 @@ export {
   type StationHistoryPoint,
 } from './engine';
 export { buildSimConfig, efficiencyFromSkillMatrix, type BuildModelOptions } from './model';
+export {
+  buildSimConfigFromTwin,
+  type BuildFromTwinOptions,
+  type BuildFromTwinResult,
+  type BuildFromTwinMeta,
+  type SkippedWorkstation,
+  type TwinStationMeta,
+} from './model-from-twin';
 export { useSim, type UseSimResult } from './useSim';
 export { MinHeap, mulberry32 } from './priority-queue';
 export { runReplications, type ReplicationResult, type AggregateKpis } from './replications';

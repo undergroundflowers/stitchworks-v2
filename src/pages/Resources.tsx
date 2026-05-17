@@ -15,6 +15,7 @@ import {
   GARMENT_TEMPLATES,
 } from '../domain';
 import { useProject, useGarments, type EffectiveGarments } from '../store';
+import { AssetsGalleryPage } from './AssetsGallery';
 
 /**
  * Resources page — operators, machines and roster.
@@ -30,10 +31,10 @@ export function ResourcesPage() {
   // the operations editor for a specific garment.
   const [searchParams] = useSearchParams();
   const initialTab = (searchParams.get('tab') as
-    | 'operators' | 'machines' | 'roster' | 'skills' | 'operations'
+    | 'operators' | 'machines' | 'roster' | 'skills' | 'operations' | 'assets'
     | null) ?? 'operators';
   const initialGarment = searchParams.get('garment') ?? undefined;
-  const [tab, setTab] = useState<'operators' | 'machines' | 'roster' | 'skills' | 'operations'>(initialTab);
+  const [tab, setTab] = useState<'operators' | 'machines' | 'roster' | 'skills' | 'operations' | 'assets'>(initialTab);
   const project = useProject();
   const garments = useGarments();
   const skillMatrix = project.skillMatrix;
@@ -67,10 +68,7 @@ export function ResourcesPage() {
         <SectionHeader kicker="Resources" title="People & machines"
           sub="Manage your factory's workforce and equipment. Operators and machines are seeded from the apparel domain catalog."
           right={
-            <div style={{ display:'flex', gap:8 }}>
-              <Button variant="secondary" size="sm" icon="↑">Import</Button>
-              <Button variant="primary" size="sm" icon="+">Add new</Button>
-            </div>
+            <Button variant="primary" size="sm" icon="+">Add new</Button>
           }/>
         <div style={{ marginTop: 8 }}>
           <ToggleGroup value={tab} onChange={setTab} options={[
@@ -79,10 +77,20 @@ export function ResourcesPage() {
             { value:'operations', label:`🪡 Operations · ${garments.all.length} garments` },
             { value:'skills',     label:`🎯 Skill matrix` },
             { value:'roster',     label:'🗓 Shift roster' },
+            { value:'assets',     label:'◇ Assets' },
           ]}/>
         </div>
       </div>
 
+      {/* Assets tab embeds the full AssetsGalleryPage, which manages its own
+          scrolling and a right-side editor drawer; rendering it inside the
+          padded scroll wrapper below would double-scroll and clip the drawer.
+          Every other tab uses the standard padded scroll area. */}
+      {tab==='assets' ? (
+        <div style={{ flex:1, minHeight:0, overflow:'hidden' }}>
+          <AssetsGalleryPage/>
+        </div>
+      ) : (
       <div style={{ flex:1, overflow:'auto', padding:'24px' }}>
         {tab==='operators' && (
           <div style={{ display:'grid', gridTemplateColumns:'1fr 280px', gap: 18 }}>
@@ -234,6 +242,7 @@ export function ResourcesPage() {
           </Card>
         )}
       </div>
+      )}
     </div>
   );
 }
@@ -277,6 +286,7 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
   const builtIn = GARMENT_TEMPLATES[garmentId];
   const isEdited = project.garmentEdits[garmentId] !== undefined;
   const isBuiltIn = !!builtIn;
+  const hiddenIds = garments.hidden;
 
   function patch(p: Partial<Omit<GarmentTemplate, 'operations'>>) {
     project.patchGarment(garmentId, builtIn, p);
@@ -333,30 +343,74 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
           />
           <div style={{ flex: 1 }}/>
           <Button variant="secondary" size="sm" icon="+" onClick={newCustomGarment}>New garment</Button>
-          {/* Single Delete button covers both modes:
-              - built-in unedited → disabled (nothing to remove)
-              - built-in edited   → discards edits, reverts to template defaults
-              - custom            → removes the garment entirely */}
-          <Button
-            variant="danger"
-            size="sm"
-            disabled={isBuiltIn && !isEdited}
-            onClick={() => {
-              if (isBuiltIn) {
+          {/* Built-in edited rows expose a Reset that drops the override but
+              keeps the garment in the picker — separate from the delete
+              action, which removes it from the library entirely. */}
+          {isBuiltIn && isEdited && (
+            <Button
+              variant="secondary"
+              size="sm"
+              onClick={() => {
                 if (confirm(`Reset ${garment.name} back to its built-in defaults? Your edits will be discarded.`)) {
                   project.resetGarment(garmentId);
                 }
+              }}
+            >
+              Reset to built-in
+            </Button>
+          )}
+          {/* Delete works for every garment — built-ins are hidden from the
+              picker (and their edits dropped) while customs are removed. */}
+          <Button
+            variant="danger"
+            size="sm"
+            onClick={() => {
+              if (!confirm(`Delete ${garment.name}?`)) return;
+              const remaining = garments.all.filter((g) => g.id !== garmentId);
+              const nextId = remaining[0]?.id ?? 'tshirt';
+              if (isBuiltIn) {
+                project.hideGarment(garmentId);
               } else {
-                if (confirm(`Delete ${garment.name}?`)) {
-                  project.resetGarment(garmentId);
-                  setGarmentId('tshirt');
-                }
+                project.resetGarment(garmentId);
               }
+              setGarmentId(nextId);
             }}
           >
-            {isBuiltIn ? 'Reset to built-in' : 'Delete garment'}
+            Delete garment
           </Button>
         </div>
+        {hiddenIds.length > 0 && (
+          <div style={{
+            display: 'flex', alignItems: 'center', flexWrap: 'wrap', gap: 6,
+            margin: '0 0 10px', padding: '6px 10px',
+            background: SW_COLORS.paperEdge, borderRadius: SW_RADIUS.md,
+            fontSize: 11, color: SW_COLORS.muted,
+          }}>
+            <span style={{ fontFamily: SW_FONTS.mono, fontWeight: 700, letterSpacing: '0.5px' }}>HIDDEN</span>
+            <span>· {hiddenIds.length} built-in{hiddenIds.length === 1 ? '' : 's'} removed from the picker:</span>
+            {hiddenIds.map((id) => {
+              const def = GARMENT_TEMPLATES[id];
+              const label = def?.name ?? id;
+              return (
+                <button
+                  key={id}
+                  onClick={() => {
+                    project.unhideGarment(id);
+                    setGarmentId(id);
+                  }}
+                  style={{
+                    background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`,
+                    borderRadius: SW_RADIUS.sm, padding: '2px 8px', cursor: 'pointer',
+                    fontSize: 11, color: SW_COLORS.ink, fontFamily: SW_FONTS.body,
+                  }}
+                  title={`Restore ${label} to the garment picker`}
+                >
+                  ↺ {label}
+                </button>
+              );
+            })}
+          </div>
+        )}
 
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 10, alignItems: 'start' }}>
           {/* Left column — Name and Description as peer text fields. They sit

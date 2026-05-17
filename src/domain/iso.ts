@@ -1126,35 +1126,35 @@ export type IsoFixturePropValue = string | number | boolean | null | undefined;
 export type IsoFixtureProps = Record<string, IsoFixturePropValue>;
 
 /** Apparel-IE-tuned defaults per apparel asset id. Values reflect typical
- *  knit-garment factory baselines (cycle time in seconds, defect % in %,
- *  cost USD/hr, power kW, MTBF hr, operators needed). They're starting
- *  points — the user is expected to tune them per machine + line. */
+ *  knit-garment factory baselines (cycle time in seconds, cost USD/hr,
+ *  power kW, MTBF hr, operators needed). They're starting points — the
+ *  user is expected to tune them per machine + line. */
 const APPAREL_DEFAULT_PROPS: Record<string, IsoFixtureProps> = {
-  a_snls:        { capacity_per_hr: 144, cycle_s: 25, cost_per_hr: 8,  power_kw: 0.40, mtbf_hr:  800, defect_pct: 0.8, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'seamed-pieces' },
-  a_dnls:        { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 9,  power_kw: 0.50, mtbf_hr:  800, defect_pct: 0.7, skill_required: 4, operators_needed: 1, accepts: 'panels',          produces: 'topstitched-pieces' },
-  a_3ol:         { capacity_per_hr: 164, cycle_s: 22, cost_per_hr: 9,  power_kw: 0.45, mtbf_hr:  700, defect_pct: 0.6, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-edges' },
-  a_4ol:         { capacity_per_hr: 144, cycle_s: 25, cost_per_hr: 9,  power_kw: 0.50, mtbf_hr:  700, defect_pct: 0.6, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-seams' },
-  a_5ol:         { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 11, power_kw: 0.55, mtbf_hr:  700, defect_pct: 0.7, skill_required: 4, operators_needed: 1, accepts: 'panels-heavy',    produces: 'safety-stitched-seams' },
-  a_flatlock:    { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 9,  power_kw: 0.55, mtbf_hr:  700, defect_pct: 0.7, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'flatlocked-pieces' },
-  a_bartack:     { capacity_per_hr: 300, cycle_s: 12, cost_per_hr: 10, power_kw: 0.60, mtbf_hr: 1000, defect_pct: 0.4, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'reinforced-pieces' },
-  a_buttonhole:  { capacity_per_hr: 257, cycle_s: 14, cost_per_hr: 11, power_kw: 0.55, mtbf_hr:  900, defect_pct: 0.4, skill_required: 3, operators_needed: 1, accepts: 'placket',         produces: 'buttonholed-placket' },
-  a_buttonsew:   { capacity_per_hr: 360, cycle_s: 10, cost_per_hr: 10, power_kw: 0.50, mtbf_hr:  900, defect_pct: 0.3, skill_required: 2, operators_needed: 1, accepts: 'placket+button',  produces: 'buttoned-placket' },
-  a_foa:         { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 11, power_kw: 0.60, mtbf_hr:  800, defect_pct: 0.6, skill_required: 4, operators_needed: 1, accepts: 'tube-pieces',     produces: 'finished-cuffs' },
-  a_kansai:      { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 12, power_kw: 0.65, mtbf_hr:  800, defect_pct: 0.5, skill_required: 3, operators_needed: 1, accepts: 'waistband-strip', produces: 'multi-needle-band' },
-  a_embroidery:  { capacity_per_hr:  20, cycle_s:180, cost_per_hr: 18, power_kw: 1.50, mtbf_hr: 1500, defect_pct: 0.2, skill_required: 2, operators_needed: 1, accepts: 'panel',           produces: 'embroidered-panel' },
+  a_snls:        { capacity_per_hr: 144, cycle_s: 25, cost_per_hr: 8,  power_kw: 0.40, mtbf_hr:  800, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'seamed-pieces' },
+  a_dnls:        { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 9,  power_kw: 0.50, mtbf_hr:  800, skill_required: 4, operators_needed: 1, accepts: 'panels',          produces: 'topstitched-pieces' },
+  a_3ol:         { capacity_per_hr: 164, cycle_s: 22, cost_per_hr: 9,  power_kw: 0.45, mtbf_hr:  700, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-edges' },
+  a_4ol:         { capacity_per_hr: 144, cycle_s: 25, cost_per_hr: 9,  power_kw: 0.50, mtbf_hr:  700, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'overlocked-seams' },
+  a_5ol:         { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 11, power_kw: 0.55, mtbf_hr:  700, skill_required: 4, operators_needed: 1, accepts: 'panels-heavy',    produces: 'safety-stitched-seams' },
+  a_flatlock:    { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 9,  power_kw: 0.55, mtbf_hr:  700, skill_required: 3, operators_needed: 1, accepts: 'panels',          produces: 'flatlocked-pieces' },
+  a_bartack:     { capacity_per_hr: 300, cycle_s: 12, cost_per_hr: 10, power_kw: 0.60, mtbf_hr: 1000, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'reinforced-pieces' },
+  a_buttonhole:  { capacity_per_hr: 257, cycle_s: 14, cost_per_hr: 11, power_kw: 0.55, mtbf_hr:  900, skill_required: 3, operators_needed: 1, accepts: 'placket',         produces: 'buttonholed-placket' },
+  a_buttonsew:   { capacity_per_hr: 360, cycle_s: 10, cost_per_hr: 10, power_kw: 0.50, mtbf_hr:  900, skill_required: 2, operators_needed: 1, accepts: 'placket+button',  produces: 'buttoned-placket' },
+  a_foa:         { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 11, power_kw: 0.60, mtbf_hr:  800, skill_required: 4, operators_needed: 1, accepts: 'tube-pieces',     produces: 'finished-cuffs' },
+  a_kansai:      { capacity_per_hr: 128, cycle_s: 28, cost_per_hr: 12, power_kw: 0.65, mtbf_hr:  800, skill_required: 3, operators_needed: 1, accepts: 'waistband-strip', produces: 'multi-needle-band' },
+  a_embroidery:  { capacity_per_hr:  20, cycle_s:180, cost_per_hr: 18, power_kw: 1.50, mtbf_hr: 1500, skill_required: 2, operators_needed: 1, accepts: 'panel',           produces: 'embroidered-panel' },
 
-  a_iron_inline: { capacity_per_hr: 180, cycle_s: 20, cost_per_hr: 6,  power_kw: 1.80, mtbf_hr: 1200, defect_pct: 0.2, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'pressed-pieces' },
+  a_iron_inline: { capacity_per_hr: 180, cycle_s: 20, cost_per_hr: 6,  power_kw: 1.80, mtbf_hr: 1200, skill_required: 2, operators_needed: 1, accepts: 'sewn-pieces',     produces: 'pressed-pieces' },
   a_wip_rack:    { capacity_units: 60, occupied_units: 0 },
   a_op_desk:     { occupants: 1, surface_m2: 1.0 },
 
-  a_spread_manual:  { capacity_per_hr:  72, cycle_s: 50, cost_per_hr: 7,  power_kw: 0.0,  defect_pct: 0.4, skill_required: 3, operators_needed: 2, accepts: 'fabric-rolls', produces: 'fabric-lay' },
-  a_spread_auto:    { capacity_per_hr: 150, cycle_s: 24, cost_per_hr: 14, power_kw: 3.5,  mtbf_hr: 1200, defect_pct: 0.2, skill_required: 3, operators_needed: 1, accepts: 'fabric-rolls', produces: 'fabric-lay' },
-  a_knife_straight: { capacity_per_hr:  60, cycle_s: 60, cost_per_hr: 9,  power_kw: 1.4,  mtbf_hr:  600, defect_pct: 0.6, skill_required: 4, operators_needed: 1, accepts: 'fabric-lay',   produces: 'cut-panels' },
-  a_knife_band:     { capacity_per_hr:  90, cycle_s: 40, cost_per_hr: 10, power_kw: 2.1,  mtbf_hr:  800, defect_pct: 0.4, skill_required: 4, operators_needed: 1, accepts: 'block-panels', produces: 'cut-panels-precise' },
-  a_cnc_cutter:     { capacity_per_hr: 200, cycle_s: 18, cost_per_hr: 22, power_kw: 5.0,  mtbf_hr: 2000, defect_pct: 0.15, skill_required: 3, operators_needed: 1, accepts: 'fabric-lay',  produces: 'cut-panels' },
-  a_marker_plotter: { capacity_per_hr:  60, cycle_s: 60, cost_per_hr: 6,  power_kw: 0.8,  mtbf_hr: 1500, defect_pct: 0.1, skill_required: 2, operators_needed: 1, accepts: 'marker-file',  produces: 'paper-marker' },
+  a_spread_manual:  { capacity_per_hr:  72, cycle_s: 50, cost_per_hr: 7,  power_kw: 0.0,  skill_required: 3, operators_needed: 2, accepts: 'fabric-rolls', produces: 'fabric-lay' },
+  a_spread_auto:    { capacity_per_hr: 150, cycle_s: 24, cost_per_hr: 14, power_kw: 3.5,  mtbf_hr: 1200, skill_required: 3, operators_needed: 1, accepts: 'fabric-rolls', produces: 'fabric-lay' },
+  a_knife_straight: { capacity_per_hr:  60, cycle_s: 60, cost_per_hr: 9,  power_kw: 1.4,  mtbf_hr:  600, skill_required: 4, operators_needed: 1, accepts: 'fabric-lay',   produces: 'cut-panels' },
+  a_knife_band:     { capacity_per_hr:  90, cycle_s: 40, cost_per_hr: 10, power_kw: 2.1,  mtbf_hr:  800, skill_required: 4, operators_needed: 1, accepts: 'block-panels', produces: 'cut-panels-precise' },
+  a_cnc_cutter:     { capacity_per_hr: 200, cycle_s: 18, cost_per_hr: 22, power_kw: 5.0,  mtbf_hr: 2000, skill_required: 3, operators_needed: 1, accepts: 'fabric-lay',  produces: 'cut-panels' },
+  a_marker_plotter: { capacity_per_hr:  60, cycle_s: 60, cost_per_hr: 6,  power_kw: 0.8,  mtbf_hr: 1500, skill_required: 2, operators_needed: 1, accepts: 'marker-file',  produces: 'paper-marker' },
   a_cut_table:      { capacity_per_hr:   0, cost_per_hr: 8, power_kw: 0.0, surface_m2: 8 },
-  a_inspect_table:  { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 7,  power_kw: 0.15, defect_pct: 0,   skill_required: 3, operators_needed: 1, accepts: 'fabric-roll', produces: 'inspected-roll · 4pt' },
+  a_inspect_table:  { capacity_per_hr: 120, cycle_s: 30, cost_per_hr: 7,  power_kw: 0.15, skill_required: 3, operators_needed: 1, accepts: 'fabric-roll', produces: 'inspected-roll · 4pt' },
 
   a_fabric_rack:    { capacity_units: 24, occupied_units: 0, accepts: 'fabric-rolls' },
   a_bundle_trolley: { capacity_units: 30, occupied_units: 0, accepts: 'cut-bundles,sewn-bundles' },
@@ -1181,7 +1181,6 @@ export function defaultPropsFor(catalogId: string): IsoFixtureProps {
       cost_per_hr: 9,
       power_kw: 0.5,
       mtbf_hr: 800,
-      defect_pct: 0.6,
       downtime_pct: 4,
       skill_required: 3,
       operators_needed: 1,

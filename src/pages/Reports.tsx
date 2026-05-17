@@ -17,16 +17,6 @@ import { REFERENCE_MODELS } from '../domain/reference-models';
 import { compareToPaper, type ReferenceVariant } from '../domain/reference-twin';
 import { useReferenceContext } from '../store/reference';
 
-interface DonutSlice {
-  v: number;
-  c: string;
-  l: string;
-}
-
-interface DonutChartProps {
-  slices: DonutSlice[];
-}
-
 const SHIFT_MIN = 480;
 
 /**
@@ -245,7 +235,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       <SectionHeader
         kicker="Reports"
         title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Model validation' : 'Production performance'}
-        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} ops respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
+        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
@@ -545,7 +535,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
               <ToggleGroup value={yamGarment} onChange={setYamGarment} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
               <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
-                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPS</span>
+                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPERATORS</span>
                 <input type="number" min={4} max={60} value={yamOperators}
                   onChange={e => setYamOperators(Math.max(4, Math.min(60, parseInt(e.target.value) || 4)))}
                   style={{ width: 56, padding: '4px 8px', border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 13 }}/>
@@ -614,7 +604,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       )}
 
       {tab === 'performance' && (
-      <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap: 14, marginBottom:14 }}>
+      <div style={{ marginBottom:14 }}>
         <HideableBox>
           <Card padding={20}>
             <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14, paddingRight: 36 }}>BY SYSTEM</div>
@@ -635,36 +625,6 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             ))}
           </Card>
         </HideableBox>
-
-        <HideableBox>
-          <Card padding={20}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14, paddingRight: 36 }}>DEFECTS BREAKDOWN</div>
-            <div style={{ display:'flex', alignItems:'center', justifyContent:'center', height: 120 }}>
-              <DonutChart slices={[
-                { v: 38, c: SW_COLORS.alarm, l: 'Stitch' },
-                { v: 22, c: SW_COLORS.thread, l: 'Cut' },
-                { v: 18, c: SW_COLORS.bobbin, l: 'Fabric' },
-                { v: 14, c: SW_COLORS.trim, l: 'Trim' },
-                { v: 8,  c: SW_COLORS.fabric, l: 'Other' },
-              ]}/>
-            </div>
-            <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:6, fontSize:11, marginTop:8 }}>
-              {[
-                { c: SW_COLORS.alarm, l:'Stitch', v:38 },
-                { c: SW_COLORS.thread, l:'Cut', v:22 },
-                { c: SW_COLORS.bobbin, l:'Fabric', v:18 },
-                { c: SW_COLORS.trim, l:'Trim', v:14 },
-              ].map((d, i) => (
-                <div key={i} style={{ display:'flex', alignItems:'center', gap:6 }}>
-                  <span style={{ width:8, height:8, background:d.c, borderRadius:2 }}/>
-                  <span style={{ flex:1 }}>{d.l}</span>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontWeight:700 }}>{d.v}%</span>
-                </div>
-              ))}
-            </div>
-          </Card>
-        </HideableBox>
-
       </div>
       )}
 
@@ -738,7 +698,7 @@ interface ReportTabBarProps {
  *  to look at — a loaded reference paper, or observed PML KPIs. */
 function ReportTabBar({ value, onChange, hasReference, hasPml }: ReportTabBarProps) {
   const tabs: { id: ReportTab; label: string; hint: string; badge?: string }[] = [
-    { id: 'performance', label: 'Performance', hint: 'KPIs · output · defects' },
+    { id: 'performance', label: 'Performance', hint: 'KPIs · output · efficiency' },
     { id: 'balance',     label: 'Line Balance', hint: 'Yamazumi · takt · efficiency' },
     {
       id: 'validation',
@@ -1078,27 +1038,3 @@ function KpiLineChart({ history }: KpiLineChartProps) {
   );
 }
 
-function DonutChart({ slices }: DonutChartProps) {
-  const total = slices.reduce((s, x) => s + x.v, 0);
-  const r = 50, R = 60;
-  let acc = 0;
-  return (
-    <svg viewBox="-70 -70 140 140" style={{ width:140, height:140 }}>
-      {slices.map((s, i) => {
-        const a0 = (acc/total) * Math.PI*2 - Math.PI/2;
-        acc += s.v;
-        const a1 = (acc/total) * Math.PI*2 - Math.PI/2;
-        const big = a1 - a0 > Math.PI ? 1 : 0;
-        const x0 = Math.cos(a0)*R, y0 = Math.sin(a0)*R;
-        const x1 = Math.cos(a1)*R, y1 = Math.sin(a1)*R;
-        const xx0 = Math.cos(a0)*r, yy0 = Math.sin(a0)*r;
-        const xx1 = Math.cos(a1)*r, yy1 = Math.sin(a1)*r;
-        return (
-          <path key={i} d={`M ${x0} ${y0} A ${R} ${R} 0 ${big} 1 ${x1} ${y1} L ${xx1} ${yy1} A ${r} ${r} 0 ${big} 0 ${xx0} ${yy0} Z`} fill={s.c}/>
-        );
-      })}
-      <text x="0" y="0" textAnchor="middle" fontFamily={SW_FONTS.display} fontSize="14" fontWeight="900" fill={SW_COLORS.ink}>1.2%</text>
-      <text x="0" y="14" textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize="8" fill={SW_COLORS.muted}>DEFECT RATE</text>
-    </svg>
-  );
-}

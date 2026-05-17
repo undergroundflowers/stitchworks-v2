@@ -16,6 +16,12 @@ export {
   type CustomWorkerArchetype,
   type CustomProductSpec,
 } from './project';
+export {
+  useFactoryLibrary,
+  archiveAndStartFresh,
+  FACTORY_LIBRARY_MAX,
+  type SavedFactory,
+} from './factoryLibrary';
 export { useGarments, effectiveGarments, type EffectiveGarments } from './garments';
 export {
   useMachines,

@@ -122,7 +122,7 @@ export const WORKER_ARCHETYPES: Record<WorkerRole, WorkerArchetype> = {
   },
   qc_inline: {
     role: 'qc_inline', label: 'In-line QC Inspector',
-    description: 'Checks bundles between operations, flags defects mid-line.',
+    description: 'Checks bundles between operations, flags issues mid-line.',
     icon: '◎', color: SW_COLORS.alarm,
     primarySkills: ['inspection'],
     baseEfficiency: 0.9, baseCostHr: 9, walkSpeedMps: 1.2, ownsStation: false,

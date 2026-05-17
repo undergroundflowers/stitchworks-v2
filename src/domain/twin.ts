@@ -130,7 +130,6 @@ export interface ResourceAttrs {
 export interface KpiTargetAttrs {
   capacityPerHr?: number;
   efficiencyPct?: number;
-  defectPct?: number;
   utilizationPct?: number;
   /** Authored notes about KPI intent (e.g. "stretch goal post-rebalance"). */
   notes?: string;
@@ -143,81 +142,9 @@ export interface KpiObservedAttrs {
   runId: string;
   capacityPerHr: number;
   efficiencyPct: number;
-  defectPct: number;
   utilizationPct: number;
   /** True if this station was the bottleneck in the captured run. */
   bottleneck: boolean;
-}
-
-// ============================================================================
-// CAD UNDERLAY — an imported floor-plan that sits *under* the canvas as a
-// trace reference. The user draws Departments on top of it; the underlay
-// itself never participates in simulation.
-// ============================================================================
-
-/** Placement of the imported drawing on the iso ground plane. All coordinates
- *  are in *world cells* (1 cell = ISO_TILE on the iso canvas) so the underlay
- *  scales with the rest of the twin. */
-export interface CadUnderlayTransform {
-  /** Center position of the underlay in world cells. */
-  cx: number;
-  cy: number;
-  /** Source-SVG-unit → world-cell scale factor. e.g. if the source is a
-   *  100×60 m plan in metres and the user wants 1 cell = 1 m, scale = 1.
-   *  If the source is in millimetres, scale ≈ 0.001. The Import dialog
-   *  defaults this so the drawing fits the current grid; the user nudges
-   *  from the on-canvas controls. */
-  scale: number;
-  /** Rotation in degrees, clockwise. */
-  rotation: number;
-  /** 0..1 — display opacity. */
-  opacity: number;
-  /** When false the underlay is not rendered. Kept in the file so a quick
-   *  toggle doesn't lose the drawing. */
-  visible: boolean;
-  /** When true the controls hide and pointer events skip the layer (so the
-   *  user can place workstations without grabbing the underlay). */
-  locked: boolean;
-}
-
-/** A closed shape detected in the imported drawing — candidate for being
- *  promoted to a Department by the Auto-Extract flow. Coordinates are in the
- *  underlay's *source* units; the renderer (and the extract modal) projects
- *  them into world cells through the underlay transform on demand. */
-export interface DetectedRegion {
-  /** Stable id within this import (`r-0`, `r-1`, …). Lets the modal preserve
-   *  user choices across re-renders. */
-  id: string;
-  /** Source-space axis-aligned bounding box: [minX, minY, maxX, maxY]. */
-  bbox: [number, number, number, number];
-  /** Approximate enclosed area in source-units². Used to sort biggest-first
-   *  and to pre-select the regions most likely to be rooms. */
-  area: number;
-  /** What primitive yielded this region. Informational; the extractor treats
-   *  them all the same. */
-  source: 'rect' | 'polygon' | 'lwpolyline' | 'polyline' | 'circle';
-}
-
-export interface CadUnderlay {
-  /** Display name (filename minus extension, by default). */
-  name: string;
-  /** What we ingested. 'svg' = direct SVG; 'dxf' = parsed DXF projected to
-   *  SVG primitives at import time. The on-disk format is always SVG markup
-   *  in `svg` regardless. */
-  format: 'svg' | 'dxf';
-  /** Inner SVG markup — the contents that go *between* `<svg>…</svg>`. The
-   *  outer <svg> wrapper is supplied by the renderer so we can apply
-   *  transforms cleanly. Stored as a string for simplicity. */
-  svg: string;
-  /** Source viewBox: [minX, minY, width, height] in source units. */
-  viewBox: [number, number, number, number];
-  /** Closed shapes detected during import. The Auto-Extract flow promotes
-   *  selected regions into Departments. Empty when nothing closed was found
-   *  (e.g. wireframe walls only) — the user can still trace by hand. */
-  regions: DetectedRegion[];
-  /** ISO timestamp at import. */
-  importedAt: string;
-  transform: CadUnderlayTransform;
 }
 
 // ============================================================================
@@ -317,10 +244,6 @@ export interface Twin {
    *  is computed from the source + target workstation footprints; this list
    *  stores only the topology. */
   connectors: Connector[];
-  /** Optional CAD underlay (imported DXF/SVG floor plan) shown beneath the
-   *  canvas as a tracing reference. The underlay never participates in
-   *  simulation — it is purely a visual aid for placing departments. */
-  cadUnderlay?: CadUnderlay | null;
   notes?: string;
 }
 
@@ -417,7 +340,6 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
     departments: [],
     workstations: [],
     connectors: [],
-    cadUnderlay: null,
   };
 }
 
@@ -441,15 +363,6 @@ export function normalizeTwin(input: unknown): Twin {
     departments: t.departments ?? [],
     workstations: t.workstations ?? [],
     connectors: t.connectors ?? [],
-    cadUnderlay: t.cadUnderlay
-      ? {
-          ...(t.cadUnderlay as CadUnderlay),
-          // Older underlays (saved before v3 → v4) didn't carry detected
-          // regions. Default to an empty list so the Auto-Extract button is
-          // simply disabled rather than crashing.
-          regions: (t.cadUnderlay as CadUnderlay).regions ?? [],
-        }
-      : null,
     notes: t.notes,
   };
 }
@@ -589,7 +502,6 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
     departments,
     workstations,
     connectors: [],
-    cadUnderlay: null,
     notes: 'Demo factory — T-shirt line, PBS, single shift. Use as a starting point.',
   };
 }
@@ -729,20 +641,6 @@ export function forkTwin(
     departments,
     workstations,
     connectors,
-    // Carry the CAD underlay across forks — it's a tracing aid that should
-    // be just as useful when authoring a what-if scenario as on the
-    // canonical twin.
-    cadUnderlay: source.cadUnderlay
-      ? {
-          ...source.cadUnderlay,
-          transform: { ...source.cadUnderlay.transform },
-          viewBox: [...source.cadUnderlay.viewBox] as [number, number, number, number],
-          regions: source.cadUnderlay.regions.map((r) => ({
-            ...r,
-            bbox: [...r.bbox] as [number, number, number, number],
-          })),
-        }
-      : null,
     notes: options.notes,
   };
 }
@@ -922,7 +820,6 @@ export function migrateLegacyFactoryToTwin(
     departments,
     workstations,
     connectors: [],
-    cadUnderlay: null,
     notes: 'Auto-migrated from legacy floors+lines structure',
   };
 }

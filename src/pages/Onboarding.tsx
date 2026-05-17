@@ -41,14 +41,14 @@ const STEPS: StepDef[] = [
   {
     kicker: 'STEP 03 / 03',
     title: 'Your first shift',
-    sub: "Hit play. Tweak the role knobs at the bottom — add cutters when QC starves, drop sewing ops when WIP piles up. Hit on-time targets to earn XP and unlock new scenarios.",
+    sub: "Hit play. Tweak the role knobs at the bottom — add cutters when QC starves, drop sewing operators when WIP piles up. Hit on-time targets to earn XP and unlock new scenarios.",
   },
 ];
 
 const FACTORIES: FactoryDef[] = [
-  { id: 'small', name: 'Small Workshop', sub: '1 line · 18 ops · $40k', best: 'Learn the basics', cells: '5×7' },
-  { id: 'mid', name: 'Mid Factory', sub: '3 lines · 35 ops · $120k', best: 'Most balanced', cells: '10×12' },
-  { id: 'large', name: 'Large Plant', sub: '6 lines · 80 ops · $300k', best: 'Real challenge', cells: '18×16' },
+  { id: 'small', name: 'Small Workshop', sub: '1 line · 18 operators · $40k', best: 'Learn the basics', cells: '5×7' },
+  { id: 'mid', name: 'Mid Factory', sub: '3 lines · 35 operators · $120k', best: 'Most balanced', cells: '10×12' },
+  { id: 'large', name: 'Large Plant', sub: '6 lines · 80 operators · $300k', best: 'Real challenge', cells: '18×16' },
 ];
 
 export function Onboarding({ onFinish }: OnboardingProps) {

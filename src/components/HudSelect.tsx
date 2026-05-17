@@ -223,7 +223,7 @@ export function HudSelect<T extends string>({
         aria-haspopup="listbox"
         aria-expanded={open}
         aria-controls={listboxId}
-        title={title}
+        title={title ?? current?.label}
         style={{
           width: '100%',
           display: 'flex',
@@ -305,7 +305,9 @@ export function HudSelect<T extends string>({
           position: 'absolute',
           top: 'calc(100% + 4px)',
           left: 0,
-          right: 0,
+          minWidth: '100%',
+          width: 'max-content',
+          maxWidth: 'min(560px, 96vw)',
           maxHeight: open ? panelHeight : 0,
           overflowY: open ? 'auto' : 'hidden',
           background: palette.panelBg,
@@ -363,9 +365,7 @@ export function HudSelect<T extends string>({
                     alignItems: 'center',
                     gap: 8,
                     minWidth: 0,
-                    overflow: 'hidden',
-                    textOverflow: 'ellipsis',
-                    whiteSpace: 'nowrap',
+                    flex: 1,
                   }}
                 >
                   {opt.tag && (
@@ -386,7 +386,7 @@ export function HudSelect<T extends string>({
                       {opt.tag}
                     </span>
                   )}
-                  <span style={{ overflow: 'hidden', textOverflow: 'ellipsis' }}>
+                  <span style={{ overflowWrap: 'anywhere', whiteSpace: 'normal' }}>
                     {opt.label}
                   </span>
                 </span>

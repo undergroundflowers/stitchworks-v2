@@ -22,3 +22,4 @@ export {
   type StationMetric,
 } from './StationTimeseriesChart';
 export { TimeChip, TimeDisplay, type TimeKind } from './TimeDisplay';
+export { StageOverlay } from './StageOverlay';

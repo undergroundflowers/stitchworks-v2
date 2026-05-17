@@ -286,13 +286,21 @@ export function buildReferenceTwin(
   wsSink.block = { kind: 'Sink' };
   workstations.push(wsSink);
 
-  // Count of extra servers per op index (1-based). Reinforced ops listed
-  // in the scenario get +1 server each; the rest stay at 1 (single machine).
-  // Pool capacity is sized to match (one operator per server).
-  const extraServersByIdx1 = new Map<number, number>();
+  // Per-op machine count (1-based). Starts from the paper's "Qty" column —
+  // the variant or scenario base — then layers scenario reinforcements on top.
+  // Scenarios are framed as deltas off the baseline in the literature, so
+  // they merge against baseline.machineQtyByOp1 rather than the variant's.
+  const baseQty: number[] = scenario
+    ? (model.baseline.machineQtyByOp1 ?? new Array(ops.length).fill(1))
+    : (variant === 'proposed' && model.proposed?.machineQtyByOp1
+        ? model.proposed.machineQtyByOp1
+        : (model.baseline.machineQtyByOp1 ?? new Array(ops.length).fill(1)));
+  const serversByIdx1: number[] = ops.map((_, i) => Math.max(1, baseQty[i] ?? 1));
   if (scenario?.reinforcedOpIndices) {
     for (const idx1 of scenario.reinforcedOpIndices) {
-      extraServersByIdx1.set(idx1, (extraServersByIdx1.get(idx1) ?? 0) + 1);
+      if (idx1 >= 1 && idx1 <= serversByIdx1.length) {
+        serversByIdx1[idx1 - 1] += 1;
+      }
     }
   }
 
@@ -308,7 +316,7 @@ export function buildReferenceTwin(
     const y = ORIGIN_Y + row * ROW_DY;
 
     const catalogId = catalogForMachine(op.machineCode);
-    const stationServers = 1 + (extraServersByIdx1.get(i + 1) ?? 0);
+    const stationServers = serversByIdx1[i];
     const ws = makeWorkstation({
       deptId: dSew,
       catalogId,
@@ -393,7 +401,6 @@ export function buildReferenceTwin(
     departments,
     workstations,
     connectors,
-    cadUnderlay: null,
     notes:
       `Auto-built from ${model.authorYear}. ${model.citation}\n\n` +
       `Variant: ${variantLabel}. ` +
@@ -579,7 +586,6 @@ export function buildGarmentTwin(
     departments,
     workstations,
     connectors,
-    cadUnderlay: null,
     notes: `Auto-built from garment template "${garment.name}" — ${ops.length} ops, total SMV ${totalSmv.toFixed(2)} min, ${operators} operators.`,
   };
 }
@@ -703,7 +709,6 @@ export function buildReferenceFactoryTwin(
     departments: allDepartments,
     workstations: allWorkstations,
     connectors: allConnectors,
-    cadUnderlay: null,
     notes:
       'Multi-line showcase factory · auto-built from every reference paper ' +
       'with an enumerated operation bulletin. Each line carries its own ' +
@@ -731,6 +736,17 @@ export interface ValidationRow {
   unit: string;
   deltaPct: number;
   withinTolerance: boolean;
+  /**
+   * When true, the row is shown for context but is NOT used to compute the
+   * card's overall ±-tolerance verdict. Used for KPIs whose definition is
+   * paper-specific (e.g. "line efficiency" — Hossain reports Arena's
+   * resource utilization, Morshed reports the work-study figure, Koç
+   * reports a balance ratio; none of those match each other or our
+   * `(throughput × ΣSMV) / (operators × shiftMin)` standard formula).
+   */
+  informational?: boolean;
+  /** Free-form note explaining why this row may not match (formula gap). */
+  noteWhy?: string;
 }
 
 export function compareToPaper(input: {
@@ -748,7 +764,7 @@ export function compareToPaper(input: {
   tolerancePct?: number;
 }): ValidationRow[] {
   const { model, variant, observed } = input;
-  const tol = (input.tolerancePct ?? 10) / 100;
+  const tol = (input.tolerancePct ?? 5) / 100;
   const scenario =
     input.scenarioId && model.scenarios
       ? model.scenarios.find((s) => s.id === input.scenarioId) ?? null
@@ -789,7 +805,12 @@ export function compareToPaper(input: {
     });
   }
 
-  // Line efficiency — recompute observed from throughput × SMV.
+  // Line efficiency — recompute observed from throughput × SMV using the
+  // standard textbook formula. Each paper, however, defines "line efficiency"
+  // differently (Arena resource utilization, balance ratio, work-study
+  // figures), so this row is INFORMATIONAL: the engine reports a coherent
+  // number and shows the gap, but the row does not count toward the
+  // card's ±-tolerance verdict.
   if (paperKpis.lineEfficiencyPct) {
     const observedOutputPerShift = observed.throughputPerHr * (observed.shiftMin / 60);
     const observedLineEff =
@@ -806,6 +827,12 @@ export function compareToPaper(input: {
       unit: '%',
       deltaPct: delta,
       withinTolerance: Math.abs(delta) <= tol * 100,
+      informational: true,
+      noteWhy:
+        'Each paper defines line efficiency with its own formula (Arena ' +
+        'resource utilization, balance ratio, work-study quote). Stitchworks ' +
+        'shows the textbook (throughput × ΣSMV) / (operators × shiftMin) ' +
+        'figure for transparency; not a model error.',
     });
   }
 

@@ -283,7 +283,7 @@ export function OrdersPage() {
                 </div>
                 <div style={{ display: 'flex', gap: 14, flexWrap: 'wrap', fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
                   <span>bundle <b style={{ color: SW_COLORS.ink }}>{previewSystem.typicalBatchSize}</b></span>
-                  <span>line ~<b style={{ color: SW_COLORS.ink }}>{previewSystem.typicalLineSize}</b> ops</span>
+                  <span>line ~<b style={{ color: SW_COLORS.ink }}>{previewSystem.typicalLineSize}</b> operations</span>
                   <span>WIP ~<b style={{ color: SW_COLORS.ink }}>{previewSystem.typicalWipPieces}</b> pcs</span>
                   <span>changeover <b style={{ color: SW_COLORS.ink }}>{previewSystem.changeoverMin}</b> min</span>
                 </div>
@@ -294,7 +294,7 @@ export function OrdersPage() {
               <Stat label="GARMENT SAM" value={template.totalSmv.toFixed(2)} unit="min"/>
               <Stat label="PITCH TIME" value={pitchSec.toFixed(1)} unit="sec" color={SW_COLORS.brand}/>
               <Stat label="EST. CYCLE" value={`${cycleDays}d`} color={SW_COLORS.thread}/>
-              <Stat label="CREW NEEDED" value={crewSize} unit="ops" color={SW_COLORS.ok}/>
+              <Stat label="CREW NEEDED" value={crewSize} unit="operators" color={SW_COLORS.ok}/>
             </div>
           </Card>
         </div>
@@ -595,7 +595,7 @@ function NewGarmentTemplateModal({ onCancel, onCreate }: NewGarmentTemplateModal
               flexWrap: 'wrap',
             }}
           >
-            <span>parsed <b style={{ color: SW_COLORS.ink }}>{parsedOps.length}</b> ops</span>
+            <span>parsed <b style={{ color: SW_COLORS.ink }}>{parsedOps.length}</b> operations</span>
             <span>total SAM <b style={{ color: SW_COLORS.ink }}>{totalSmv.toFixed(2)}</b> min</span>
             <span>≈ <b style={{ color: SW_COLORS.ink }}>{parsedOps.length > 0 ? Math.round(60 / (totalSmv / parsedOps.length)) : 0}</b> pcs/hr @ 100%</span>
             {!canSave && (

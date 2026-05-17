@@ -40,8 +40,6 @@ export interface Operation {
   /** Operation ids that must complete before this one starts. */
   precedes?: string[];
   follows?: string[];
-  /** Default per-piece defect rate (0..1). */
-  defectRate?: number;
   /** True if rejected pieces can be reworked at this op. */
   reworkable?: boolean;
   /** Free-form notes (e.g. "uses pattern guide", "watch needle gauge"). */

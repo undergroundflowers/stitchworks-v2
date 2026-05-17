@@ -121,7 +121,7 @@ export const APPAREL_PALETTE: PaletteElement[] = [
 
   // ── resource ────────────────────────────────────────────────────────────
   {
-    id: 'sewing_operator_pool', category: 'resource', label: 'Sewing Operators', shortName: 'Sew Ops',
+    id: 'sewing_operator_pool', category: 'resource', label: 'Sewing Operators', shortName: 'Sew Operators',
     icon: '⌃', color: SW_COLORS.brand, anyLogicEquivalent: 'ResourcePool (Moving)',
     description: 'Pool of skilled sewing operators. Picks one when a sewing station has WIP.',
     defaultProps: { count: 25, costHr: 8, walkSpeedMps: 1.0, primarySkill: 'stitching' },
@@ -153,7 +153,7 @@ export const APPAREL_PALETTE: PaletteElement[] = [
   {
     id: 'qc_pool', category: 'resource', label: 'QC Inspectors', shortName: 'QC',
     icon: '◎', color: SW_COLORS.alarm, anyLogicEquivalent: 'ResourcePool',
-    description: 'In-line + final inspectors. Flag defects, route to rework.',
+    description: 'In-line + final inspectors. Audit bundles, route to rework.',
     defaultProps: { count: 3, costHr: 9, aql: 2.5 },
   },
   {
@@ -238,7 +238,7 @@ export const APPAREL_PALETTE: PaletteElement[] = [
     id: 'inline_inspection', category: 'quality', label: 'In-line Inspection', shortName: 'Inline QC',
     icon: '◎', color: SW_COLORS.alarm, anyLogicEquivalent: 'Service + SelectOutput',
     description: 'Mid-line check; routes accept ↦ next op, reject ↦ rework loop.',
-    defaultProps: { smv: 0.5, defectRate: 0.02, reworkBranchEnabled: true },
+    defaultProps: { smv: 0.5, reworkBranchEnabled: true },
   },
   {
     id: 'final_inspection', category: 'quality', label: 'Final Inspection (AQL)', shortName: 'Final QC',
@@ -249,7 +249,7 @@ export const APPAREL_PALETTE: PaletteElement[] = [
   {
     id: 'rework_cell', category: 'quality', label: 'Rework Cell', shortName: 'Rework',
     icon: '↩', color: SW_COLORS.warn, anyLogicEquivalent: 'Service',
-    description: 'Specialised station for fixing flagged defects. Higher-skill operator.',
+    description: 'Specialised station for fixing flagged pieces. Higher-skill operator.',
     defaultProps: { smv: 1.8, capacity: 2 },
   },
 

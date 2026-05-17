@@ -86,23 +86,14 @@ export function outputPerOperatorHour(opts: {
 }
 
 /**
- * Cost per piece given materials, direct labor, overhead and defect cost.
+ * Cost per piece given materials, direct labor, and overhead.
  */
 export function costPerPiece(opts: {
   materialUsd: number;
   laborUsd: number;
   overheadUsd: number;
-  defectUsd: number;
 }): number {
-  return opts.materialUsd + opts.laborUsd + opts.overheadUsd + opts.defectUsd;
-}
-
-/**
- * Defect rate % = defects / produced × 100. Watch this beside output —
- * factories chasing throughput often see defect rate creep.
- */
-export function defectRate(opts: { defects: number; produced: number }): number {
-  return opts.produced > 0 ? (opts.defects / opts.produced) * 100 : 0;
+  return opts.materialUsd + opts.laborUsd + opts.overheadUsd;
 }
 
 /**

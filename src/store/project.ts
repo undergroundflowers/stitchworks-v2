@@ -278,6 +278,15 @@ export interface ProjectState {
    */
   garmentEdits: Record<string, GarmentTemplate>;
 
+  /**
+   * IDs of built-in garments the user has explicitly removed from the
+   * library. They stay resolvable in `byId` (so factory workstations that
+   * still reference them don't crash), but disappear from the picker list.
+   * Removing a built-in also drops its edit + yamazumi override — restoring
+   * later returns the clean catalog defaults.
+   */
+  hiddenGarmentIds: Record<string, true>;
+
   /** Per-machine-code edits that shadow the built-in `MACHINE_CATALOG`.
    *  Editing a built-in (e.g. cost change) clones the spec into here. */
   machineEdits: Record<string, MachineSpec>;
@@ -386,6 +395,11 @@ export interface ProjectState {
   ) => void;
   /** Drop the override for a garment id; built-in default returns. */
   resetGarment: (id: string) => void;
+  /** Hide a built-in garment from the picker and drop its edit + yamazumi
+   *  override. Custom garments should use `resetGarment` instead. */
+  hideGarment: (id: string) => void;
+  /** Unhide a previously hidden built-in. */
+  unhideGarment: (id: string) => void;
 
   // ── Asset library: workstations ──────────────────────────────────────────
   /** Patch a built-in machine spec (auto-clones into `machineEdits`). */
@@ -503,6 +517,8 @@ const defaults: Omit<
   | 'removeOperation'
   | 'moveOperation'
   | 'resetGarment'
+  | 'hideGarment'
+  | 'unhideGarment'
   | 'purgeTestGarments'
   | 'setUnit'
   | 'setTime'
@@ -533,6 +549,7 @@ const defaults: Omit<
     scenarios: [],
     factory: defaultFactory(),
     garmentEdits: {},
+    hiddenGarmentIds: {},
     machineEdits: {},
     customMachines: {},
     workerEdits: {},
@@ -810,6 +827,33 @@ export const useProject = create<ProjectState>()(
           return touch({ ...s, garmentEdits: next });
         }),
 
+      hideGarment: (id) =>
+        set((s) => {
+          // Drop the override and any yamazumi override so a future restore
+          // returns the clean catalog defaults rather than stale edits.
+          const nextEdits = { ...s.garmentEdits };
+          delete nextEdits[id];
+          const nextYama = { ...s.yamazumiOverrides };
+          delete nextYama[id];
+          const nextSelected =
+            s.selectedGarmentId === id ? defaults.selectedGarmentId : s.selectedGarmentId;
+          return touch({
+            ...s,
+            garmentEdits: nextEdits,
+            yamazumiOverrides: nextYama,
+            hiddenGarmentIds: { ...s.hiddenGarmentIds, [id]: true },
+            selectedGarmentId: nextSelected,
+          });
+        }),
+
+      unhideGarment: (id) =>
+        set((s) => {
+          if (!s.hiddenGarmentIds[id]) return s;
+          const next = { ...s.hiddenGarmentIds };
+          delete next[id];
+          return touch({ ...s, hiddenGarmentIds: next });
+        }),
+
       // ── Asset library: workstations ──────────────────────────────────────
       patchMachine: (code, builtIn, patch) =>
         set((s) => {
@@ -973,6 +1017,8 @@ export const useProject = create<ProjectState>()(
           removeOperation: get().removeOperation,
           moveOperation: get().moveOperation,
           resetGarment: get().resetGarment,
+          hideGarment: get().hideGarment,
+          unhideGarment: get().unhideGarment,
           purgeTestGarments: get().purgeTestGarments,
           patchMachine: get().patchMachine,
           resetMachine: get().resetMachine,
@@ -1014,6 +1060,7 @@ export const useProject = create<ProjectState>()(
           scenarios: s.scenarios ?? [],
           factory: s.factory ?? defaultFactory(),
           garmentEdits: s.garmentEdits ?? {},
+          hiddenGarmentIds: s.hiddenGarmentIds ?? {},
           machineEdits: s.machineEdits ?? {},
           customMachines: s.customMachines ?? {},
           workerEdits: s.workerEdits ?? {},
@@ -1043,6 +1090,7 @@ export const useProject = create<ProjectState>()(
           scenarios: s.scenarios,
           factory: s.factory,
           garmentEdits: s.garmentEdits,
+          hiddenGarmentIds: s.hiddenGarmentIds,
           machineEdits: s.machineEdits,
           customMachines: s.customMachines,
           workerEdits: s.workerEdits,
@@ -1069,6 +1117,7 @@ export const useProject = create<ProjectState>()(
         scenarios: state.scenarios,
         factory: state.factory,
         garmentEdits: state.garmentEdits,
+        hiddenGarmentIds: state.hiddenGarmentIds,
         machineEdits: state.machineEdits,
         customMachines: state.customMachines,
         workerEdits: state.workerEdits,
@@ -1100,6 +1149,7 @@ export const useProject = create<ProjectState>()(
           ...current,
           ...p,
           units: { ...defaultUnits, ...(p.units ?? {}) },
+          hiddenGarmentIds: p.hiddenGarmentIds ?? {},
           machineEdits: p.machineEdits ?? {},
           customMachines: p.customMachines ?? {},
           workerEdits: p.workerEdits ?? {},

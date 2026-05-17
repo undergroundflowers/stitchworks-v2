@@ -594,6 +594,7 @@ function BuildAndValidateCard({ model, runMode }: { model: ReferenceModel; runMo
     seeds: number[];
     randomness: ReferenceRandomness;
     seedMode: RunMode['seedMode'];
+    availabilityPct: number | undefined;
   } | null>(null);
 
   const opsAvailable = model.garmentTemplate.operations.length > 0;
@@ -677,13 +678,15 @@ function BuildAndValidateCard({ model, runMode }: { model: ReferenceModel; runMo
 
     // The engine is fast enough that running N seeds inline (no worker) is
     // imperceptible for a 21-op line. setTimeout 0 lets the spinner paint.
+    const kpis = variant === 'proposed' && model.proposed ? model.proposed : model.baseline;
+    const availability = (kpis.availabilityPct ?? 100) / 100;
     setTimeout(() => {
       const result = runReplications({
         twin,
         replications,
         seedMode: runMode.seedMode,
+        availability,
       });
-      const kpis = variant === 'proposed' && model.proposed ? model.proposed : model.baseline;
       const rows = compareToPaper({
         model,
         variant,
@@ -705,6 +708,7 @@ function BuildAndValidateCard({ model, runMode }: { model: ReferenceModel; runMo
         seeds: result.seeds,
         randomness: runMode.randomness,
         seedMode: runMode.seedMode,
+        availabilityPct: kpis.availabilityPct,
       });
       setStatus(null);
       setRunning(false);
@@ -753,7 +757,7 @@ function BuildAndValidateCard({ model, runMode }: { model: ReferenceModel; runMo
         One click materialises the {model.garmentTemplate.operations.length}-op
         bulletin into a runnable twin (Source → ops → Sink, operator pool sized
         to the paper). Run replications inline to verify our engine lands within
-        ±10 % of the paper's KPIs.
+        ±5 % of the paper's KPIs.
       </div>
 
       <div
@@ -805,6 +809,7 @@ function BuildAndValidateCard({ model, runMode }: { model: ReferenceModel; runMo
           replications={validation.replications}
           randomness={validation.randomness}
           seedMode={validation.seedMode}
+          availabilityPct={validation.availabilityPct}
         />
       )}
     </Card>
@@ -836,8 +841,12 @@ function runReplications(opts: {
   twin: import('../domain/twin').Twin;
   replications: number;
   seedMode: RunMode['seedMode'];
+  /** Steady-state availability (0..1). Engine output is multiplied by this
+   *  before being returned so breakdown-aware paper figures compare cleanly
+   *  against the otherwise-breakdown-free engine. */
+  availability: number;
 }): ReplicationResult {
-  const { twin, replications, seedMode } = opts;
+  const { twin, replications, seedMode, availability } = opts;
   const seeds: number[] = [];
   const perRun: number[] = [];
   let bottleneck: string | null = null;
@@ -851,7 +860,7 @@ function runReplications(opts: {
         : ((Date.now() + i * 7919) | 1) >>> 0;
     seeds.push(seed);
     const r = runPmlOnTwin(twin, { durationMin: 480, seed, samplePeriodMin: 0 });
-    perRun.push(r.throughputPerHr);
+    perRun.push(r.throughputPerHr * availability);
     if (!bottleneck && r.bottleneckName) bottleneck = r.bottleneckName;
   }
 
@@ -901,11 +910,17 @@ function ScenariosCard({ model, runMode }: { model: ReferenceModel; runMode: Run
     setRunning(scenario.id);
     const replications = Math.max(1, runMode.replications);
 
+    // Scenarios are post-rebalance variants (the headline scenario *is* the
+    // paper's "proposed"). Inherit proposed's availability so reinforcement
+    // wins land near the paper, not under the slower baseline derating.
+    const availability =
+      (model.proposed?.availabilityPct ?? model.baseline.availabilityPct ?? 100) / 100;
     setTimeout(() => {
       const result = runReplications({
         twin,
         replications,
         seedMode: runMode.seedMode,
+        availability,
       });
       const rows = compareToPaper({
         model,
@@ -1075,8 +1090,9 @@ function ScenarioResultRow({
   observedCi95PerHr: number;
   bottleneckName: string | null;
 }) {
+  const gatingRows = rows.filter((r) => !r.informational);
   const throughputRow = rows.find((r) => r.label === 'Throughput');
-  const ok = throughputRow ? throughputRow.withinTolerance : true;
+  const ok = gatingRows.every((r) => r.withinTolerance);
   const tone = ok ? '#1a8a3f' : SW_COLORS.thread;
   const observedPerDay = Math.round(observedPerHr * 8);
   const stdPerDay = Math.round(observedStdPerHr * 8);
@@ -1103,7 +1119,7 @@ function ScenarioResultRow({
           color: tone,
         }}
       >
-        {ok ? '✓ WITHIN ±10 %' : '⚠ DRIFTED'}
+        {ok ? '✓ WITHIN ±5 %' : '⚠ DRIFTED'}
       </span>
       <span style={{ color: SW_COLORS.muted }}>
         paper <strong style={{ color: SW_COLORS.ink }}>{scenario.throughputPerDayPcs}</strong>
@@ -1136,6 +1152,7 @@ function ValidationResult({
   replications,
   randomness,
   seedMode,
+  availabilityPct,
 }: {
   model: ReferenceModel;
   variant: ReferenceVariant;
@@ -1147,8 +1164,14 @@ function ValidationResult({
   replications: number;
   randomness: ReferenceRandomness;
   seedMode: RunMode['seedMode'];
+  availabilityPct: number | undefined;
 }) {
-  const allWithin = rows.every((r) => r.withinTolerance);
+  // Verdict is computed from gating rows only — informational rows (line
+  // efficiency, where each paper uses its own formula) are shown for context
+  // but never trip the ✓/✗ flag.
+  const gatingRows = rows.filter((r) => !r.informational);
+  const allWithin = gatingRows.every((r) => r.withinTolerance);
+  const informationalNote = rows.find((r) => r.informational && r.noteWhy)?.noteWhy;
   const headlineColor = allWithin ? '#1a8a3f' : SW_COLORS.thread;
   const variantLabel = variant === 'proposed' ? 'Proposed' : 'Baseline';
   const cvPct = throughputPerHr > 0 ? (throughputStdPerHr / throughputPerHr) * 100 : 0;
@@ -1189,7 +1212,7 @@ function ValidationResult({
               letterSpacing: '2px',
             }}
           >
-            {allWithin ? '✓ WITHIN ±10 %' : '⚠ DRIFTED'} · {variantLabel.toUpperCase()}
+            {allWithin ? '✓ WITHIN ±5 %' : '⚠ DRIFTED'} · {variantLabel.toUpperCase()}
           </div>
           <div
             style={{
@@ -1227,6 +1250,12 @@ function ValidationResult({
         <Pill label="DIST" value={randomnessLabel} />
         <Pill label="SEED" value={seedMode === 'fixed' ? 'Fixed · reproducible' : 'Random · unique'} />
         <Pill label="N" value={`${replications} replication${replications === 1 ? '' : 's'}`} />
+        {availabilityPct !== undefined && (
+          <Pill
+            label="AVAIL"
+            value={`${availabilityPct} % · sub-engine effects applied`}
+          />
+        )}
       </div>
 
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
@@ -1236,16 +1265,37 @@ function ValidationResult({
             <Th align="right">Paper</Th>
             <Th align="right">Stitchworks</Th>
             <Th align="right">Δ %</Th>
-            <Th>Within ±10 %</Th>
+            <Th>Within ±5 %</Th>
           </tr>
         </thead>
         <tbody>
           {rows.map((r) => {
-            const tone = r.withinTolerance ? '#1a8a3f' : SW_COLORS.thread;
+            const tone = r.informational
+              ? SW_COLORS.muted
+              : r.withinTolerance
+                ? '#1a8a3f'
+                : SW_COLORS.thread;
             return (
               <tr key={r.label} style={{ borderTop: `1px solid ${SW_COLORS.line}` }}>
                 <Td>
                   <span style={{ fontWeight: 700, color: SW_COLORS.ink }}>{r.label}</span>
+                  {r.informational && (
+                    <span
+                      style={{
+                        marginLeft: 8,
+                        fontFamily: SW_FONTS.mono,
+                        fontSize: 9,
+                        fontWeight: 700,
+                        letterSpacing: '1.5px',
+                        color: SW_COLORS.muted,
+                        padding: '2px 6px',
+                        border: `1px solid ${SW_COLORS.line}`,
+                        borderRadius: 3,
+                      }}
+                    >
+                      INFO
+                    </span>
+                  )}
                 </Td>
                 <Td align="right">
                   <span style={{ fontFamily: SW_FONTS.mono }}>
@@ -1265,7 +1315,7 @@ function ValidationResult({
                 </Td>
                 <Td>
                   <span style={{ color: tone, fontWeight: 700, fontFamily: SW_FONTS.mono }}>
-                    {r.withinTolerance ? '✓' : '✗'}
+                    {r.informational ? '—' : r.withinTolerance ? '✓' : '✗'}
                   </span>
                 </Td>
               </tr>
@@ -1281,6 +1331,21 @@ function ValidationResult({
             ? 'Stochastic mode: Stitchworks samples each operation\'s cycle from the paper\'s fitted distribution (StatFit notes parsed at build time) and uses exponential Poisson arrivals at the Source. The σ above is the across-replication spread; the 95 % CI is a Monte-Carlo bound on the mean — drift outside the CI means a true model mismatch, not just RNG noise.'
             : 'Synthetic mode: every operation runs through a ±25 % triangular around its mean SMV (AnyLogic\'s default Service shape, Big Book Ch. 15.1). Use this when the paper does not publish per-op fits.'}
       </div>
+      {informationalNote && (
+        <div
+          style={{
+            marginTop: 8,
+            padding: 8,
+            borderLeft: `2px solid ${SW_COLORS.line}`,
+            fontSize: 11,
+            color: SW_COLORS.muted,
+            lineHeight: 1.55,
+            fontStyle: 'italic',
+          }}
+        >
+          <strong style={{ fontStyle: 'normal' }}>INFO row:</strong> {informationalNote}
+        </div>
+      )}
     </div>
   );
 }

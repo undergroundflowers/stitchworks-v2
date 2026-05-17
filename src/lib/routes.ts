@@ -32,7 +32,6 @@ export const ROUTES: RouteDef[] = [
   { path: '/',          id: 'menu',      label: 'MENU',             icon: '⌂', kind: 'special' },
   { path: '/floor',     id: 'floor',     label: 'Live Floor',       shortLabel: 'Floor',      icon: '⬢', kind: 'main' },
   { path: '/iso',       id: 'iso',       label: 'Factory Builder',  shortLabel: 'Builder',    icon: '◆', kind: 'main' },
-  { path: '/orders',    id: 'orders',    label: 'Orders',                                     icon: '⎙', kind: 'main' },
   { path: '/sim',       id: 'sim',       label: 'Simulation',       shortLabel: 'Sim',        icon: '▷', kind: 'main' },
   { path: '/resources', id: 'resources', label: 'Resources',                                  icon: '⊟', kind: 'main' },
   // /kpi is the legacy Reports path. App.tsx redirects it to /balance, which
@@ -43,7 +42,11 @@ export const ROUTES: RouteDef[] = [
   { path: '/queues',    id: 'queues',    label: 'Queue Analysis',   shortLabel: 'Queues',     icon: 'Σ', kind: 'main' },
   { path: '/queues/analytics', id: 'queues-analytics', label: 'Queue Analytics', shortLabel: 'Analytics', icon: '∿', kind: 'special' },
   { path: '/reference', id: 'reference', label: 'Reference Models', shortLabel: 'References', icon: '📖', kind: 'main' },
-  { path: '/assets',    id: 'assets',    label: 'Assets',                                     icon: '◇', kind: 'main' },
+  // Assets is no longer a top-level nav item — it lives inside Resources as
+  // the "Assets" tab. The /assets path stays for deep-links; App.tsx redirects
+  // it to /resources?tab=assets.
+  { path: '/assets',    id: 'assets',    label: 'Assets',                                     icon: '◇', kind: 'special' },
+  { path: '/orders',    id: 'orders',    label: 'Orders',                                     icon: '⎙', kind: 'main' },
   { path: '/settings',  id: 'settings',  label: 'Settings',                                   icon: '⚙', kind: 'main' },
 ];
 

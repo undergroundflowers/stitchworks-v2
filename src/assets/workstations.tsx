@@ -56,7 +56,7 @@ export function WorkstationSprite({
       viewBox={`0 0 ${vw} ${vh}`}
       width={w}
       height={h}
-      style={{ display: 'block', overflow: 'visible', ...style }}
+      style={{ display: 'block', overflow: 'visible', maxWidth: '100%', height: 'auto', ...style }}
       aria-label={spec.label}
     >
       {withTable && <StationTable spec={spec} vw={vw} vh={vh} />}
@@ -80,16 +80,6 @@ function StationTable({ spec, vw, vh }: { spec: MachineSpec; vw: number; vh: num
   const pad = 6;
   return (
     <>
-      {/* Drop shadow */}
-      <rect
-        x={pad + 2}
-        y={pad + 3}
-        width={vw - pad * 2}
-        height={vh - pad * 2}
-        rx={6}
-        fill={SW_COLORS.ink}
-        opacity={0.08}
-      />
       {/* Table top */}
       <rect
         x={pad}

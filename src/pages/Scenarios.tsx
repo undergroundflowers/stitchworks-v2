@@ -148,7 +148,7 @@ export function ScenariosPage() {
                           </div>
                         )}
                         <div style={{ fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop: 4 }}>
-                          {formatDate(s.createdAt, project.units.dateFormat)} · {garmentName} · {s.config.operators} ops
+                          {formatDate(s.createdAt, project.units.dateFormat)} · {garmentName} · {s.config.operators} operators
                         </div>
                       </div>
                       <input

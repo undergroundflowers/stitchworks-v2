@@ -477,9 +477,9 @@ export function inferBlockKindFromCatalog(catalogId: string): PmlBlockKind {
  *   • adding a future field doesn't bump the on-disk schema
  *
  * The engine falls back to fixture catalog props (cycle_s,
- * capacity_per_hr, defect_pct) when a param is omitted, and finally to
- * a hard-coded default when neither is set. See `getBlockParams()` for
- * the exact resolution order.
+ * capacity_per_hr) when a param is omitted, and finally to a hard-coded
+ * default when neither is set. See `getBlockParams()` for the exact
+ * resolution order.
  */
 export interface PmlBlockParams {
   /** Source — agents per hour generated. */
@@ -719,12 +719,8 @@ export function getBlockParams(
   }
   if (cycleS === null || cycleS <= 0) cycleS = 30;
 
-  // Pass probability — explicit > derived from defect_pct > 0.95 default.
-  let passProb = p.passProb;
-  if (passProb === undefined) {
-    const def = numProp(fx, 'defect_pct');
-    passProb = def !== null ? 1 - def / 100 : 0.95;
-  }
+  // Pass probability — explicit > 0.95 default.
+  let passProb = p.passProb ?? 0.95;
   passProb = Math.max(0, Math.min(1, passProb));
 
   // Resource capacity — explicit > catalog capacity > 1.

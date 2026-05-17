@@ -20,7 +20,6 @@ import { SettingsPage } from './pages/Settings';
 import { Onboarding } from './pages/Onboarding';
 import { BuilderPage } from './pages/Builder';
 import { LiveFloorPage } from './pages/LiveFloor';
-import { AssetsGalleryPage } from './pages/AssetsGallery';
 import { ReferenceModelsPage } from './pages/ReferenceModels';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { QueueIndexPage } from './pages/QueueIndex';
@@ -145,7 +144,9 @@ export default function App() {
           {/* Dept interior screen is not yet ported.
               Bounce back to Builder so users don't land on a dead-end stub. */}
           <Route path="/dept/:deptId" element={<Navigate to="/builder" replace />} />
-          <Route path="/assets" element={<AssetsGalleryPage />} />
+          {/* Assets is now a tab inside Resources. The standalone /assets URL
+              redirects there so old links and deep-links still resolve. */}
+          <Route path="/assets" element={<Navigate to="/resources?tab=assets" replace />} />
           <Route path="/reference" element={<ReferenceModelsPage />} />
         </Routes>
       </div>

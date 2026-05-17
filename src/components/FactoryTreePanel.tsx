@@ -100,7 +100,6 @@ export function FactoryTreePanel({
             { id:'heat', label:'Bottleneck heat',       color: SW_COLORS.alarm,  on: true  },
             { id:'wip',  label:'WIP density',           color: SW_COLORS.thread, on: true  },
             { id:'op',   label:'Operator utilization',  color: SW_COLORS.bobbin, on: false },
-            { id:'qual', label:'Defect zones',          color: SW_COLORS.press,  on: false },
           ].map(ov => (
             <label key={ov.id} style={{ display:'flex', alignItems:'center', gap:8, padding:'6px 0', cursor:'pointer', fontSize:12, fontWeight:600, color: SW_COLORS.ink }}>
               <input type="checkbox" defaultChecked={ov.on} style={{ accentColor: ov.color }}/>

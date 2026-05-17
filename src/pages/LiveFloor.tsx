@@ -30,7 +30,7 @@ import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { useTwin, selectActiveTwin, type DepartmentColorKey } from '../store/twin';
 import { useProject } from '../store';
-import { TimeDisplay } from '../components';
+import { TimeDisplay, StageOverlay } from '../components';
 import {
   fmtModelTime,
   fmtCalendar,
@@ -141,17 +141,15 @@ export function LiveFloorPage() {
   }, [playing]);
 
   // Synthetic event log — picks a random hotspot every few seconds.
-  const [events, setEvents] = useState<{ id: number; ws: string; kind: 'breakdown' | 'defect' | 'milestone'; label: string; t: number }[]>([]);
+  const [events, setEvents] = useState<{ id: number; ws: string; kind: 'breakdown' | 'milestone'; label: string; t: number }[]>([]);
   useEffect(() => {
     if (!playing) return;
     const id = window.setInterval(() => {
       const ws = twin.workstations[Math.floor(Math.random() * twin.workstations.length)];
       if (!ws) return;
-      const kinds: Array<{ kind: 'breakdown' | 'defect' | 'milestone'; label: string }> = [
+      const kinds: Array<{ kind: 'breakdown' | 'milestone'; label: string }> = [
         { kind: 'breakdown', label: 'NEEDLE BREAK' },
-        { kind: 'defect', label: 'STITCH DEFECT' },
         { kind: 'milestone', label: 'BUNDLE OUT' },
-        { kind: 'defect', label: 'SKIP STITCH' },
         { kind: 'milestone', label: 'CLEAR QUEUE' },
       ];
       const choice = kinds[Math.floor(Math.random() * kinds.length)];
@@ -444,9 +442,7 @@ export function LiveFloorPage() {
                       background:
                         e.kind === 'breakdown'
                           ? `${SW_COLORS.alarm}dd`
-                          : e.kind === 'defect'
-                            ? `${SW_COLORS.warn}dd`
-                            : `${SW_COLORS.ok}dd`,
+                          : `${SW_COLORS.ok}dd`,
                       color: '#fff',
                       padding: '6px 12px',
                       borderRadius: 6,
@@ -467,7 +463,7 @@ export function LiveFloorPage() {
               </div>
 
               {/* Zoom controls */}
-              <div
+              <StageOverlay
                 style={{
                   position: 'absolute',
                   right: 16,
@@ -490,7 +486,7 @@ export function LiveFloorPage() {
                   {Math.round(zoom * 100)}%
                 </FloorBtn>
                 <FloorBtn onClick={() => setZoom((z) => Math.min(2.5, z * 1.18))}>+</FloorBtn>
-              </div>
+              </StageOverlay>
             </>
           )}
         </div>
@@ -534,7 +530,7 @@ export function LiveFloorPage() {
         </button>
         <div style={{ width: 1, height: 24, background: '#0F141925' }} />
         <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: '#0F141999', letterSpacing: '0.1em' }}>
-          ELAPSED · {elapsed}s
+          ELAPSED · {t}s
         </span>
         <div style={{ flex: 1 }} />
         <span
@@ -958,16 +954,7 @@ function IsoView({ twin, t, zoom, pan, hotIds, selectedWs, onSelect, groupRef }:
           );
         })}
 
-        {/* 3. Floor diamond — drop shadow + filled shape + crisp outline + inner bevel. */}
-        <polygon
-          points={ptsToStr([
-            { sx: cTL.sx + 6, sy: cTL.sy + 10 },
-            { sx: cTR.sx + 6, sy: cTR.sy + 10 },
-            { sx: cBR.sx + 6, sy: cBR.sy + 10 },
-            { sx: cBL.sx + 6, sy: cBL.sy + 10 },
-          ])}
-          fill="#0F141925"
-        />
+        {/* 3. Floor diamond — filled shape + crisp outline + inner bevel. */}
         <polygon
           points={ptsToStr([cTL, cTR, cBR, cBL])}
           fill="url(#lf-floor)"
@@ -1114,15 +1101,6 @@ function IsoWorkstation({
 
   const util = ws.kpiObserved?.utilizationPct ?? fakeUtil(ws, t);
 
-  // Contact shadow — a soft diamond patch under the footprint that grounds
-  // the fixture against the floor. Offset down-right to simulate raked light.
-  const shadowPts = ptsToStr([
-    { sx: 4, sy: 6 },
-    { sx: tr.sx - tl.sx + 4, sy: tr.sy - tl.sy + 6 },
-    { sx: br.sx - tl.sx + 4, sy: br.sy - tl.sy + 6 },
-    { sx: bl.sx - tl.sx + 4, sy: bl.sy - tl.sy + 6 },
-  ]);
-
   return (
     <g
       transform={`translate(${origin.sx}, ${origin.sy}) rotate(${ws.rotation})`}
@@ -1132,8 +1110,6 @@ function IsoWorkstation({
         onClick();
       }}
     >
-      {/* Contact shadow — drawn first so the fixture sits on top of it. */}
-      <polygon points={shadowPts} fill={SW_COLORS.ink} opacity={0.22} pointerEvents="none" />
       {/* Base plate — a slightly inset darker diamond that grounds the fixture. */}
       <polygon
         points={ptsToStr([
@@ -1877,7 +1853,7 @@ interface InspectorProps {
   twin: ReturnType<typeof selectActiveTwin>;
   selectedWs: string | null;
   onClear: () => void;
-  events: { id: number; ws: string; kind: 'breakdown' | 'defect' | 'milestone'; label: string }[];
+  events: { id: number; ws: string; kind: 'breakdown' | 'milestone'; label: string }[];
   t: number;
 }
 
@@ -2001,7 +1977,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
                 accent={SW_COLORS.fabric}
               />
               <KpiTile
-                label="Op"
+                label="Operation"
                 value={ws.operation.opId ?? ws.operation.freeText ?? '—'}
                 accent={SW_COLORS.thread}
               />
@@ -2043,9 +2019,7 @@ function Inspector({ twin, selectedWs, onClear, events, t }: InspectorProps) {
             const col =
               e.kind === 'milestone'
                 ? SW_COLORS.ok
-                : e.kind === 'defect'
-                  ? SW_COLORS.warn
-                  : SW_COLORS.alarm;
+                : SW_COLORS.alarm;
             return (
               <div key={e.id} style={{ display: 'flex', gap: 8, padding: '2px 0' }}>
                 <span style={{ color: col, width: 96, fontWeight: 700 }}>{e.label}</span>

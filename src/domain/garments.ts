@@ -197,7 +197,7 @@ export const GARMENT_TEMPLATES: Record<string, GarmentTemplate> = {
   },
   trouser: {
     id: 'trouser', name: '5-pocket Denim Trouser', class: 'bottom',
-    description: 'Classic 5-pocket denim trouser. Bulletin condensed from Erol 2025 (full paper has 51 ops, 14.47 min total — used as the validation case for line balancing in the literature).',
+    description: 'Classic 5-pocket denim trouser. Bulletin condensed from Erol 2025 (full paper has 51 operations, 14.47 min total — used as the validation case for line balancing in the literature).',
     operations: TROUSER_OPS,
     defaultBundleSize: 20,
     totalSmv: sumSmv(TROUSER_OPS),

@@ -232,11 +232,11 @@ function MachineCard({
       <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 110, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, marginBottom: 10 }}>
         <WorkstationSprite code={renderable as MachineCode} size={88} state="running" />
       </div>
-      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4 }}>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap', minWidth: 0 }}>
         <Tag color={spec.color}>{spec.code}</Tag>
-        <div style={{ fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: SW_COLORS.ink }}>{spec.shortName}</div>
+        <div style={{ fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: SW_COLORS.ink, minWidth: 0, overflowWrap: 'anywhere' }}>{spec.shortName}</div>
       </div>
-      <div style={{ fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4, minHeight: 30 }}>{spec.label}</div>
+      <div style={{ fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4, minHeight: 30, overflowWrap: 'anywhere' }}>{spec.label}</div>
       <div style={{ display: 'flex', gap: 8, marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, flexWrap: 'wrap' }}>
         <span>${spec.costUsd.toLocaleString()}</span>
         <span>·</span>

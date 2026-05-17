@@ -12,13 +12,15 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Button, ToggleGroup, HudSelect, TimeDisplay } from '../components';
 import {
   buildSimConfig,
+  buildSimConfigFromTwin,
   efficiencyFromSkillMatrix,
   useSim,
+  type BuildFromTwinMeta,
   type StationView,
 } from '../simulation';
 import {
@@ -91,10 +93,14 @@ interface SimHudStatProps {
 
 export function LiveSimPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const project = useProject();
   const garments = useGarments();
+  const activeTwin = useTwin(selectActiveTwin);
   const [garmentId, setGarmentId] = useState<string>(project.selectedGarmentId);
   const [operators, setOperators] = useState<number>(project.defaultOperators);
+  // User-edited bundle override; null means "follow the seed (twin or system)".
+  const [bundleOverride, setBundleOverride] = useState<number | null>(null);
   const [view, setView] = useState<SimView>('iso');
 
   // ── Reference-model picker state ────────────────────────────────────────
@@ -120,8 +126,40 @@ export function LiveSimPage() {
     };
   }, [refCtx.slug, refCtx.variantKey]);
 
-  const garment = refOverride?.garment ?? (garments.byId[garmentId] ?? garments.all[0]);
-  const effectiveOperators = refOverride?.operators ?? operators;
+  // Source select — twin path (default when no reference is loaded) draws the
+  // simulation from the user's Factory Builder twin; reference path keeps the
+  // legacy garment-template flow for paper comparisons.
+  const sourceParam = searchParams.get('source');
+  const useTwinSource = sourceParam === 'twin' || (!refOverride && sourceParam !== 'reference');
+
+  // Twin-driven config + meta. Wrapped in a try because the user can land
+  // on /sim with an empty twin — we fall back to the reference / garment
+  // path in that case instead of blowing up the page.
+  const twinBuild = useMemo(() => {
+    if (!useTwinSource) return null;
+    try {
+      return buildSimConfigFromTwin({
+        twin: activeTwin,
+        garmentsById: garments.byId,
+        defaultGarmentId: garmentId,
+        opEfficiency: efficiencyFromSkillMatrix(
+          project.skillMatrix,
+          (garments.byId[garmentId] ?? garments.all[0]).operations,
+        ),
+        modelTimeUnit: project.time.modelTimeUnit,
+      });
+    } catch {
+      return null;
+    }
+  }, [useTwinSource, activeTwin, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all]);
+
+  const garment = twinBuild?.meta.garment
+    ?? refOverride?.garment
+    ?? (garments.byId[garmentId] ?? garments.all[0]);
+  // Effective operator count for display + reference path. Twin path always
+  // shows the slider's current value (re-seeded by the effect below when the
+  // twin changes). Reference path uses the variant's authored count.
+  const effectiveOperators = twinBuild ? operators : (refOverride?.operators ?? operators);
 
   // Production-system bundle size — picked up from the Orders wizard. PBS
   // batches 30, modular/UPS/make-through run piece-by-piece (size 1), etc.
@@ -131,23 +169,50 @@ export function LiveSimPage() {
   const productionSystemDef = PRODUCTION_SYSTEMS[productionSystemId];
   const systemBundleSize = refOverride
     ? undefined
-    : productionSystemDef.typicalBatchSize;
+    : (bundleOverride ?? twinBuild?.meta.seedBundleSize ?? productionSystemDef.typicalBatchSize);
 
   const opEfficiency = useMemo(
     () => efficiencyFromSkillMatrix(project.skillMatrix, garment.operations),
     [project.skillMatrix, garment],
   );
 
-  const config = useMemo(
-    () => buildSimConfig({
+  const config = useMemo(() => {
+    if (twinBuild) {
+      // Honour the user's operator override by re-running the LPT
+      // distribution: scale the twin-seeded servers proportionally so the
+      // engine respects the slider without losing the twin's topology.
+      // Cheap approximation — keep stationServers as-is, just adjust
+      // arrivalRatePerHour by the worker ratio. The engine treats parallel
+      // servers as the binding constraint, so this is the honest knob.
+      const cfg = { ...twinBuild.config };
+      if (bundleOverride && bundleOverride > 0) {
+        cfg.bundleSize = bundleOverride;
+        const piecesPerHour = cfg.arrivalRatePerHour * twinBuild.config.bundleSize;
+        cfg.arrivalRatePerHour = piecesPerHour / bundleOverride;
+      }
+      return cfg;
+    }
+    return buildSimConfig({
       garment,
       operators: effectiveOperators,
       opEfficiency,
       bundleSize: systemBundleSize,
       modelTimeUnit: project.time.modelTimeUnit,
-    }),
-    [garment, effectiveOperators, opEfficiency, systemBundleSize, project.time.modelTimeUnit],
-  );
+    });
+  }, [twinBuild, bundleOverride, garment, effectiveOperators, opEfficiency, systemBundleSize, project.time.modelTimeUnit]);
+
+  // Re-seed the operator slider whenever the twin meta says the default has
+  // changed (e.g. user edits Builder, returns to /sim). Skip when the user
+  // has typed an explicit override (i.e. `operators` already differs from
+  // the seed) — preserves their intent.
+  const lastSeedRef = useRef<number | null>(null);
+  useEffect(() => {
+    if (!twinBuild) return;
+    if (lastSeedRef.current !== twinBuild.meta.seedOperators) {
+      setOperators(twinBuild.meta.seedOperators);
+      lastSeedRef.current = twinBuild.meta.seedOperators;
+    }
+  }, [twinBuild]);
 
   const { state, playing, speed, setPlaying, setSpeed, reset, step } = useSim(config);
 
@@ -158,6 +223,22 @@ export function LiveSimPage() {
     refCtx.variantKey ?? 'baseline',
   );
   const [refLoadFlash, setRefLoadFlash] = useState<string | null>(null);
+  // Reference-line row collapses by default so the sim chrome stays quiet.
+  // Persisted so power-users who prefer it open don't toggle every visit.
+  const [refRowOpen, setRefRowOpen] = useState<boolean>(() => {
+    try {
+      return localStorage.getItem('sw.livesim.refRowOpen') === '1';
+    } catch {
+      return false;
+    }
+  });
+  useEffect(() => {
+    try {
+      localStorage.setItem('sw.livesim.refRowOpen', refRowOpen ? '1' : '0');
+    } catch {
+      /* ignore */
+    }
+  }, [refRowOpen]);
 
   const refModel: ReferenceModel = useMemo(
     () =>
@@ -170,7 +251,7 @@ export function LiveSimPage() {
     const opts: { key: string; label: string; tag: string }[] = [
       {
         key: 'baseline',
-        label: `Baseline · ${refModel.baseline.operators} ops${
+        label: `Baseline · ${refModel.baseline.operators} operators${
           refModel.baseline.throughputPerDayPcs
             ? ` · ${refModel.baseline.throughputPerDayPcs}/day`
             : ''
@@ -181,7 +262,7 @@ export function LiveSimPage() {
     if (refModel.proposed) {
       opts.push({
         key: 'proposed',
-        label: `Proposed · ${refModel.proposed.operators} ops${
+        label: `Proposed · ${refModel.proposed.operators} operators${
           refModel.proposed.throughputPerDayPcs
             ? ` · ${refModel.proposed.throughputPerDayPcs}/day`
             : ''
@@ -193,7 +274,7 @@ export function LiveSimPage() {
       for (const s of refModel.scenarios) {
         opts.push({
           key: s.id,
-          label: `${s.id} · ${s.name} · ${s.operators} ops · ${s.throughputPerDayPcs}/day (+${s.upliftPct}%)`,
+          label: `${s.id} · ${s.name} · ${s.operators} operators · ${s.throughputPerDayPcs}/day (+${s.upliftPct}%)`,
           tag: s.id,
         });
       }
@@ -215,7 +296,7 @@ export function LiveSimPage() {
         : { scenarioId: refVariantKey };
     const twin = buildReferenceTwin(refModel, opts);
     if (!twin) {
-      setRefLoadFlash('This paper has no enumerated ops — twin not built.');
+      setRefLoadFlash('This paper has no enumerated operations — twin not built.');
       return;
     }
     const r = loadCanonical(twin);
@@ -279,6 +360,12 @@ export function LiveSimPage() {
   // can pick whichever helps them reason about the rolling event feed.
   const [eventTimeKind, setEventTimeKind] = useState<'model' | 'cal'>('model');
 
+  // Collapse state for the two floating overlays. Useful in LOGIC view where
+  // the operation grid spans the canvas — the user can fold these away to
+  // see the cards underneath without losing them entirely.
+  const [hudOpen, setHudOpen] = useState(true);
+  const [inspectorOpen, setInspectorOpen] = useState(true);
+
   const throughputPerHr =
     state.history.length > 0
       ? state.history[state.history.length - 1].throughputPerHr * config.bundleSize
@@ -323,6 +410,23 @@ export function LiveSimPage() {
             {playing ? 'RUNNING' : 'PAUSED'}
           </span>
         </div>
+        <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
+
+        {/* SOURCE chip — surfaces whether the engine is reading the
+            Builder-authored twin (the user's factory) or a published
+            reference paper, plus the count of workstations being simulated. */}
+        <SimSourceChip
+          twinBuild={twinBuild}
+          refOverride={refOverride}
+          refLoadedLabel={refLoadedLabel}
+          totalWorkstations={activeTwin.workstations.length}
+          factoryName={project.meta.name}
+          onClearReference={() => {
+            clearRefContext();
+            setSearchParams({ source: 'twin' });
+          }}
+        />
+
         <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
         {/* Three labelled clocks — model (sim t), calendar (projection), wall (device). */}
         <div style={{ display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -373,11 +477,44 @@ export function LiveSimPage() {
         <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
         <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: SW_FONTS.body, fontSize: 11 }}>
           <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>GARMENT</span>
-          <HudSelect
-            value={refOverride ? '__ref__' : garmentId}
-            minWidth={220}
-            mono
-            options={[
+          {(() => {
+            // When the active twin pins a dominant garment (workstations carry
+            // a garmentId), `buildSimConfigFromTwin` runs against that garment
+            // regardless of the dropdown — so showing the project's default
+            // garment label here is a lie. Surface the twin's actual garment
+            // and lock the control so the user can't pick something that
+            // would be silently ignored.
+            const twinGarment = twinBuild?.meta.garment ?? null;
+            // Only treat the dropdown as locked when the twin actually pinned
+            // a garment via a workstation. When no workstation pins (e.g. an
+            // empty twin or a freshly-painted one), the dropdown's value is
+            // still the engine's `defaultGarmentId`, so leave it editable.
+            const twinPins =
+              !!twinGarment && !refOverride && !!twinBuild?.meta.garmentPinned;
+            const displayedValue = refOverride
+              ? '__ref__'
+              : twinPins
+                ? twinGarment.id
+                : garmentId;
+            // Reference garments live in `garments.byId` for resolution but
+            // are kept OUT of `garments.all` so the picker doesn't bloat to
+            // 30+ rows. Splice the twin's garment in here only when it isn't
+            // already a visible option, so the trigger can show its label.
+            const visibleHasTwinGarment =
+              twinPins && garments.all.some((g) => g.id === twinGarment.id);
+            // Reference garment names use the parenthetical to disambiguate
+            // (e.g. "Polo (Morshed 2014, work-share)"), so keep the full name
+            // here rather than stripping it like the canonical labels do.
+            const twinExtraOption =
+              twinPins && !visibleHasTwinGarment
+                ? [{
+                    value: twinGarment.id,
+                    label: twinGarment.name,
+                    tag: 'TWIN',
+                    disabled: true,
+                  }]
+                : [];
+            const options = [
               ...(refOverride
                 ? [{
                     value: '__ref__',
@@ -386,23 +523,39 @@ export function LiveSimPage() {
                     disabled: true,
                   }]
                 : []),
+              ...twinExtraOption,
               ...garments.all.map((g) => ({
                 value: g.id,
                 label: g.name.replace(/\s*\(.*\)/, ''),
+                tag: twinPins && g.id === twinGarment.id ? 'TWIN' : undefined,
+                disabled: twinPins,
               })),
-            ]}
-            onChange={(id) => {
-              if (id === '__ref__') return;
-              // Manual garment pick overrides any active reference selection,
-              // so the dropdown stays authoritative.
-              if (refOverride) clearRefContext();
-              setGarmentId(id);
-            }}
-          />
+            ];
+            const title = twinPins
+              ? `Garment is pinned by the workstations in Factory Builder (${twinGarment.name}). Change the workstation operation in Builder to switch garments.`
+              : refOverride
+                ? 'Garment is pinned by the loaded reference scenario. Clear the reference (× on the source chip) to pick freely.'
+                : undefined;
+            return (
+              <HudSelect
+                value={displayedValue}
+                minWidth={220}
+                mono
+                disabled={twinPins || !!refOverride}
+                title={title}
+                options={options}
+                onChange={(id) => {
+                  if (id === '__ref__') return;
+                  if (refOverride) clearRefContext();
+                  setGarmentId(id);
+                }}
+              />
+            );
+          })()}
         </div>
 
         <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: SW_FONTS.body, fontSize: 11 }}>
-          <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>OPS</span>
+          <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>OPERATORS</span>
           <input
             type="number"
             min={4}
@@ -427,7 +580,42 @@ export function LiveSimPage() {
               color: '#fff',
             }}
           />
+          {twinBuild && (
+            <span style={{ color: '#ffffff60', fontFamily: SW_FONTS.mono, fontSize: 10 }}>
+              · seed {twinBuild.meta.seedOperators}
+            </span>
+          )}
         </div>
+
+        {twinBuild && (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: SW_FONTS.body, fontSize: 11 }}>
+            <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>BUNDLE</span>
+            <input
+              type="number"
+              min={1}
+              max={200}
+              value={bundleOverride ?? twinBuild.meta.seedBundleSize}
+              onChange={(e) => {
+                const next = Math.max(1, Math.min(200, parseInt(e.target.value) || 1));
+                setBundleOverride(next === twinBuild.meta.seedBundleSize ? null : next);
+              }}
+              style={{
+                width: 56,
+                padding: '4px 8px',
+                border: '1px solid #ffffff20',
+                background: '#ffffff10',
+                borderRadius: SW_RADIUS.sm,
+                fontFamily: SW_FONTS.mono,
+                fontWeight: 700,
+                fontSize: 13,
+                color: '#fff',
+              }}
+            />
+            <span style={{ color: '#ffffff60', fontFamily: SW_FONTS.mono, fontSize: 10 }}>
+              · seed {twinBuild.meta.seedBundleSize}
+            </span>
+          </div>
+        )}
 
         {/* Production-system chip — shows the layout the Orders wizard
             committed to, so the user can confirm the sim respects their
@@ -463,7 +651,11 @@ export function LiveSimPage() {
       {/* REFERENCE-LINE PICKER ─────────────────────────────────────────────
           Compact strip that lets the user materialise any published case
           study (paper × variant/scenario) into the active twin and jump
-          straight to the PML view for replication. */}
+          straight to the PML view for replication. Collapses to a single
+          header row so the sim chrome stays quiet when the user isn't
+          loading a reference; chevron toggles the body. The "ACTIVE · …"
+          chip stays visible in the collapsed header so the user can still
+          see (and clear) the loaded reference without expanding. */}
       <div
         style={{
           padding: '10px 24px',
@@ -475,18 +667,83 @@ export function LiveSimPage() {
           flexWrap: 'wrap',
         }}
       >
-        <span
+        <button
+          type="button"
+          onClick={() => setRefRowOpen((v) => !v)}
+          aria-expanded={refRowOpen}
+          aria-controls="ref-line-body"
+          title={refRowOpen ? 'Hide reference-line picker' : 'Show reference-line picker'}
           style={{
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 8,
+            background: 'transparent',
+            border: 'none',
+            padding: '2px 6px 2px 0',
+            cursor: 'pointer',
+            color: SW_COLORS.brand,
             fontFamily: SW_FONTS.mono,
             fontSize: 10,
             fontWeight: 800,
-            color: SW_COLORS.brand,
             letterSpacing: '2px',
           }}
         >
+          <span
+            aria-hidden="true"
+            style={{
+              display: 'inline-block',
+              transform: refRowOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
+              transition: 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)',
+              fontSize: 11,
+              lineHeight: 1,
+              opacity: 0.85,
+            }}
+          >
+            ▾
+          </span>
           📚 REFERENCE LINE
-        </span>
+        </button>
 
+        {/* Collapsed header keeps the ACTIVE chip visible so users still see
+            (and can clear) the loaded reference without expanding the row. */}
+        {!refRowOpen && refLoadedLabel && (
+          <div
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '4px 10px',
+              border: `1px solid ${SW_COLORS.brand}55`,
+              background: `${SW_COLORS.brand}18`,
+              borderRadius: SW_RADIUS.sm,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 700,
+              color: SW_COLORS.brand,
+              letterSpacing: '1px',
+            }}
+          >
+            ACTIVE · {refLoadedLabel}
+            <button
+              onClick={handleClearReference}
+              title="Clear reference context"
+              style={{
+                background: 'transparent',
+                border: 'none',
+                color: SW_COLORS.brand,
+                cursor: 'pointer',
+                fontSize: 14,
+                lineHeight: 1,
+                padding: 0,
+              }}
+            >
+              ×
+            </button>
+          </div>
+        )}
+
+        {refRowOpen && (
+          <div id="ref-line-body" style={{ display: 'contents' }}>
         <HudSelect
           value={refSlug}
           onChange={setRefSlug}
@@ -572,9 +829,11 @@ export function LiveSimPage() {
             lineHeight: 1.4,
           }}
         >
-          Load builds Source → {refModel.garmentTemplate.operations.length} ops → Sink
+          Load builds Source → {refModel.garmentTemplate.operations.length} operations → Sink
           with a {variantOptions.find((o) => o.key === refVariantKey)?.tag ?? '—'}-sized operator pool.
         </span>
+          </div>
+        )}
       </div>
 
       {/* SIMULATION FLOOR */}
@@ -586,82 +845,170 @@ export function LiveSimPage() {
         }}
       >
         {view === 'iso' && (
-          <SimIsoView
-            stations={state.stations}
-            bottleneckOpIndex={state.bottleneckOpIndex}
-            garmentName={garment.name}
-            simTime={state.time}
-            system={productionSystemId}
-          />
+          <PanZoomViewport viewKey="iso">
+            <SimIsoView
+              stations={state.stations}
+              bottleneckOpIndex={state.bottleneckOpIndex}
+              garmentName={garment.name}
+              simTime={state.time}
+              system={productionSystemId}
+              twinMeta={twinBuild?.meta}
+            />
+          </PanZoomViewport>
         )}
         {view === 'top' && (
-          <SimTopView
-            stations={state.stations}
-            bottleneckOpIndex={state.bottleneckOpIndex}
-            garmentName={garment.name}
-            simTime={state.time}
-            system={productionSystemId}
-          />
+          <PanZoomViewport viewKey="top">
+            <SimTopView
+              stations={state.stations}
+              bottleneckOpIndex={state.bottleneckOpIndex}
+              garmentName={garment.name}
+              simTime={state.time}
+              system={productionSystemId}
+              twinMeta={twinBuild?.meta}
+            />
+          </PanZoomViewport>
         )}
         {view === 'heat' && (
-          <SimHeatView
-            stations={state.stations}
-            bottleneckOpIndex={state.bottleneckOpIndex}
-            garmentName={garment.name}
-            simTime={state.time}
-            system={productionSystemId}
-          />
+          <PanZoomViewport viewKey="heat">
+            <SimHeatView
+              stations={state.stations}
+              bottleneckOpIndex={state.bottleneckOpIndex}
+              garmentName={garment.name}
+              simTime={state.time}
+              system={productionSystemId}
+              twinMeta={twinBuild?.meta}
+            />
+          </PanZoomViewport>
         )}
         {view === 'logic' && (
-          <SimLogicView
-            stations={state.stations}
-            bottleneckOpIndex={state.bottleneckOpIndex}
-            garmentName={garment.name}
-            simTime={state.time}
-            system={productionSystemId}
-          />
+          <PanZoomViewport viewKey="logic">
+            <SimLogicView
+              stations={state.stations}
+              bottleneckOpIndex={state.bottleneckOpIndex}
+              garmentName={garment.name}
+              simTime={state.time}
+              system={productionSystemId}
+              twinMeta={twinBuild?.meta}
+            />
+          </PanZoomViewport>
         )}
         {view === 'pml' && (
-          <SimPmlView
-            garment={garment}
-            operators={effectiveOperators}
-            hasReference={!!(refCtx.slug && refCtx.variantKey)}
-          />
+          <PanZoomViewport viewKey="pml">
+            <SimPmlView
+              garment={garment}
+              operators={effectiveOperators}
+              hasReference={!!(refCtx.slug && refCtx.variantKey)}
+            />
+          </PanZoomViewport>
         )}
 
         {/* Legend overlay — view-aware key for every glyph on the floor. */}
         <SimLegend view={view} />
 
-        {/* HUD stat tiles — PML view owns its own KPI strip, so hide these there. */}
+        {/* HUD stat tiles — PML view owns its own KPI strip, so hide these
+            there. Other views keep the strip but make it collapsible so the
+            user can reclaim the top-left corner (e.g. LOGIC's first card
+            sits beneath it). */}
         {view !== 'pml' && (
-          <div style={{ position: 'absolute', left: 24, top: 24, display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
-            <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
-            <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
-            <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
-            <SimHudStat label="UTIL" value={efficiencyPct} unit="%" color={SW_COLORS.fabric} />
+          <div
+            style={{
+              position: 'absolute',
+              left: 24,
+              top: 24,
+              display: 'flex',
+              flexDirection: 'column',
+              alignItems: 'flex-start',
+              gap: 6,
+              zIndex: 5,
+            }}
+          >
+            <button
+              onClick={() => setHudOpen((o) => !o)}
+              title={hudOpen ? 'Collapse stats' : 'Expand stats'}
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '4px 10px',
+                background: '#0a0d12cc',
+                border: '1px solid #ffffff20',
+                borderRadius: SW_RADIUS.sm,
+                color: '#fff',
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.2em',
+                cursor: 'pointer',
+                backdropFilter: 'blur(6px)',
+              }}
+            >
+              <span style={{ color: SW_COLORS.brand }}>▣</span>
+              <span>STATS</span>
+              <span style={{ color: '#ffffff80', fontSize: 11 }}>{hudOpen ? '▾' : '▸'}</span>
+            </button>
+            {hudOpen && (
+              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
+                <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
+                <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
+                <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
+                <SimHudStat label="UTIL" value={efficiencyPct} unit="%" color={SW_COLORS.fabric} />
+              </div>
+            )}
           </div>
         )}
 
-        {/* Right inspector */}
+        {/* Right inspector — Bottleneck + Event feed. Collapsible so it
+            doesn't permanently clobber the rightmost column of operation
+            cards in LOGIC view (or the floor edge in ISO/TOP/HEAT). */}
         {view !== 'pml' && (
         <div
           style={{
             position: 'absolute',
             right: 24,
             top: 24,
-            width: 280,
+            width: inspectorOpen ? 280 : 'auto',
             maxHeight: 'calc(100% - 48px)',
             display: 'flex',
             flexDirection: 'column',
-            gap: 10,
+            alignItems: 'flex-end',
+            gap: 6,
+            zIndex: 5,
           }}
         >
+          <button
+            onClick={() => setInspectorOpen((o) => !o)}
+            title={inspectorOpen ? 'Collapse inspector' : 'Expand inspector'}
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+              padding: '4px 10px',
+              background: '#0a0d12cc',
+              border: '1px solid #ffffff20',
+              borderRadius: SW_RADIUS.sm,
+              color: '#fff',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              fontWeight: 900,
+              letterSpacing: '0.2em',
+              cursor: 'pointer',
+              backdropFilter: 'blur(6px)',
+              alignSelf: 'flex-end',
+            }}
+          >
+            <span style={{ color: SW_COLORS.brand }}>▣</span>
+            <span>INSPECTOR</span>
+            <span style={{ color: '#ffffff80', fontSize: 11 }}>{inspectorOpen ? '▾' : '▸'}</span>
+          </button>
+          {inspectorOpen && (
+          <>
           <div
             style={{
               background: '#ffffff08',
               border: '1px solid #ffffff15',
               borderRadius: SW_RADIUS.sm,
               padding: 12,
+              width: '100%',
             }}
           >
             <div
@@ -698,6 +1045,7 @@ export function LiveSimPage() {
               display: 'flex',
               flexDirection: 'column',
               minHeight: 120,
+              width: '100%',
             }}
           >
             <div
@@ -751,6 +1099,8 @@ export function LiveSimPage() {
               })}
             </div>
           </div>
+          </>
+          )}
         </div>
         )}
       </div>
@@ -873,6 +1223,118 @@ export function LiveSimPage() {
   );
 }
 
+interface SimSourceChipProps {
+  twinBuild: { meta: BuildFromTwinMeta } | null;
+  refOverride: { garment: GarmentTemplate; operators: number } | null;
+  refLoadedLabel: string | null;
+  totalWorkstations: number;
+  factoryName: string;
+  onClearReference: () => void;
+}
+
+function SimSourceChip({
+  twinBuild,
+  refOverride,
+  refLoadedLabel,
+  totalWorkstations,
+  factoryName,
+  onClearReference,
+}: SimSourceChipProps) {
+  // The chip echoes the project's factory name verbatim so the SOURCE
+  // banner matches the TopBar (no hardcoded "MY FACTORY" placeholder).
+  const factoryLabel = (factoryName?.trim() || 'Untitled factory').toUpperCase();
+  const isTwinSource = !!twinBuild && !refOverride;
+  const isRefSource = !!refOverride;
+  const simCount = twinBuild?.meta.simulatedWsIds.length ?? 0;
+  const infraCount = twinBuild?.meta.infrastructure.length ?? 0;
+  const skipCount = twinBuild?.meta.skipped.length ?? 0;
+  // Stations + infrastructure = elements actually wired into the run. Genuine
+  // skipped count reflects only user errors (a Service block with no opId or
+  // an unresolved opId).
+  const wiredCount = simCount + infraCount;
+  const tone = isRefSource
+    ? SW_COLORS.fabric
+    : isTwinSource
+      ? SW_COLORS.brand
+      : SW_COLORS.warn;
+  const stationsLabel = `${simCount} station${simCount === 1 ? '' : 's'}`;
+  const infraLabel = infraCount > 0
+    ? ` + ${infraCount} infra (Source/Pool/Sink)`
+    : '';
+  const label = isRefSource
+    ? `REFERENCE · ${refLoadedLabel ?? '—'}`
+    : isTwinSource
+      ? `${factoryLabel} · ${wiredCount} of ${totalWorkstations} wired · ${stationsLabel}${infraLabel}`
+      : 'NO SOURCE · build a factory first';
+  const skipTooltip =
+    twinBuild && twinBuild.meta.skipped.length > 0
+      ? '\n\nSkipped:\n' +
+        twinBuild.meta.skipped
+          .map(
+            (s) =>
+              `  • ${s.name} — ${s.reason === 'no-op-id' ? 'no operation assigned' : 'unresolved operation'}`,
+          )
+          .join('\n')
+      : '';
+  const infraTooltip =
+    twinBuild && twinBuild.meta.infrastructure.length > 0
+      ? '\n\nInfrastructure (wired as engine parameters):\n' +
+        twinBuild.meta.infrastructure
+          .map((i) => `  • ${i.name} — ${i.role}`)
+          .join('\n')
+      : '';
+  const title = isTwinSource
+    ? `Reading workstations + connectors from Factory Builder.\nTopology: ${twinBuild?.meta.topologySource === 'connectors' ? 'flow connectors' : 'operation precedence'}.${infraTooltip}${skipTooltip}`
+    : isRefSource
+      ? `Reading a published case-study line. Clear the reference to return to ${factoryName?.trim() || 'your factory'}.`
+      : 'Open Factory Builder and assign an operation to a workstation.';
+
+  return (
+    <div
+      title={title}
+      style={{
+        display: 'flex',
+        alignItems: 'center',
+        gap: 8,
+        padding: '4px 10px',
+        border: `1px solid ${tone}55`,
+        background: `${tone}1a`,
+        borderRadius: SW_RADIUS.sm,
+        fontFamily: SW_FONTS.mono,
+        fontSize: 11,
+        fontWeight: 700,
+        color: '#fff',
+        cursor: 'help',
+      }}
+    >
+      <span style={{ color: tone, letterSpacing: '0.1em' }}>SOURCE</span>
+      <span>{label}</span>
+      {isTwinSource && skipCount > 0 && (
+        <span style={{ color: SW_COLORS.warn, fontSize: 10 }}>
+          · {skipCount} skipped
+        </span>
+      )}
+      {isRefSource && (
+        <button
+          onClick={onClearReference}
+          title={`Clear reference and return to ${factoryName?.trim() || 'your factory'}`}
+          style={{
+            background: 'transparent',
+            border: 'none',
+            color: tone,
+            cursor: 'pointer',
+            fontSize: 14,
+            lineHeight: 1,
+            padding: 0,
+          }}
+        >
+          ×
+        </button>
+      )}
+    </div>
+  );
+}
+
 function SimHudStat({ label, value, unit, color }: SimHudStatProps) {
   return (
     <div
@@ -947,7 +1409,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <BottleneckGlyph />,
           label: 'Bottleneck flag',
-          hint: 'Pulsing red disc with "!" — slowest op, queue is building.',
+          hint: 'Pulsing red disc with "!" — slowest operation, queue is building.',
         },
       ];
     case 'top':
@@ -955,7 +1417,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <CardGlyph color={SW_COLORS.brand} />,
           label: 'Operation card',
-          hint: 'One sewing operation in the routing — labelled by OP code + SMV.',
+          hint: 'One sewing operation in the routing — labelled by operation code + SMV.',
         },
         {
           glyph: <OperatorGlyph working />,
@@ -970,7 +1432,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <ConveyorDotGlyph />,
           label: 'Bundle on conveyor',
-          hint: 'Yellow dots travelling along dashed lines = WIP moving between ops.',
+          hint: 'Yellow dots travelling along dashed lines = WIP moving between operations.',
         },
         {
           glyph: <WipStackGlyph />,
@@ -985,7 +1447,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <BottleneckGlyph />,
           label: 'Bottleneck flag',
-          hint: 'Pulsing red disc with "!" — flags the slowest op in the line.',
+          hint: 'Pulsing red disc with "!" — flags the slowest operation in the line.',
         },
       ];
     case 'heat':
@@ -1003,7 +1465,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <DotGlyph color={SW_COLORS.alarm} />,
           label: 'Bottleneck marker',
-          hint: 'Red dot replaces white when the station is the slowest op.',
+          hint: 'Red dot replaces white when the station is the slowest operation.',
         },
       ];
     case 'logic':
@@ -1011,7 +1473,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <CardGlyph color={SW_COLORS.brand} />,
           label: 'Operation block',
-          hint: 'Flow card with OP code, SMV, queue, busy/total, throughput.',
+          hint: 'Flow card with operation code, SMV, queue, busy/total, throughput.',
         },
         {
           glyph: <ArrowGlyph color={SW_COLORS.ok} />,
@@ -1031,7 +1493,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <DiamondGlyph />,
           label: 'Bottleneck marker (◆)',
-          hint: 'Diamond on a card header = this op is the slowest in the line.',
+          hint: 'Diamond on a card header = this operation is the slowest in the line.',
         },
       ];
     case 'pml':
@@ -1058,6 +1520,182 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         },
       ];
   }
+}
+
+/**
+ * Wraps a simulation view in a pan/zoom viewport. Wheel zooms toward the
+ * cursor, left-drag on empty space pans, and a small control puck in the
+ * bottom-right offers +/- buttons plus a reset. The transform resets when
+ * the active `viewKey` changes so switching ISO ↔ TOP doesn't strand the
+ * user in a far-off corner of the previous view.
+ */
+function PanZoomViewport({ viewKey, children }: { viewKey: string; children: React.ReactNode }) {
+  const [tf, setTf] = useState({ x: 0, y: 0, s: 1 });
+  const containerRef = useRef<HTMLDivElement | null>(null);
+  const panRef = useRef<{ sx: number; sy: number; tx: number; ty: number } | null>(null);
+  const [panning, setPanning] = useState(false);
+
+  // Reset the transform whenever the user picks a different view, so each
+  // view starts neutral instead of inheriting the previous zoom level.
+  useEffect(() => {
+    setTf({ x: 0, y: 0, s: 1 });
+  }, [viewKey]);
+
+  // Wheel-to-zoom needs a non-passive listener so we can preventDefault and
+  // stop the parent page from scrolling underneath the simulation floor.
+  useEffect(() => {
+    const el = containerRef.current;
+    if (!el) return;
+    const onWheel = (e: WheelEvent) => {
+      e.preventDefault();
+      const rect = el.getBoundingClientRect();
+      const cx = e.clientX - rect.left;
+      const cy = e.clientY - rect.top;
+      setTf((t) => {
+        const factor = Math.exp(-e.deltaY * 0.0015);
+        const next = Math.max(0.3, Math.min(6, t.s * factor));
+        const ratio = next / t.s;
+        return { s: next, x: cx - (cx - t.x) * ratio, y: cy - (cy - t.y) * ratio };
+      });
+    };
+    el.addEventListener('wheel', onWheel, { passive: false });
+    return () => el.removeEventListener('wheel', onWheel);
+  }, []);
+
+  useEffect(() => {
+    if (!panning) return;
+    const onMove = (e: MouseEvent) => {
+      const s = panRef.current;
+      if (!s) return;
+      setTf((t) => ({ ...t, x: s.tx + (e.clientX - s.sx), y: s.ty + (e.clientY - s.sy) }));
+    };
+    const onUp = () => {
+      panRef.current = null;
+      setPanning(false);
+    };
+    window.addEventListener('mousemove', onMove);
+    window.addEventListener('mouseup', onUp);
+    return () => {
+      window.removeEventListener('mousemove', onMove);
+      window.removeEventListener('mouseup', onUp);
+    };
+  }, [panning]);
+
+  const startPan = (e: React.MouseEvent) => {
+    if (e.button !== 0) return;
+    // Let buttons / inputs handle their own clicks — only grab empty space.
+    const target = e.target as HTMLElement | null;
+    if (target && target.closest('button, input, select, textarea, a, [role="button"]')) return;
+    panRef.current = { sx: e.clientX, sy: e.clientY, tx: tf.x, ty: tf.y };
+    setPanning(true);
+  };
+
+  // Compute the next scale inside the functional updater so back-to-back
+  // button clicks chain correctly instead of all reading the same stale
+  // `tf.s` from closure and overwriting each other.
+  const zoomBy = (factor: number) => {
+    const el = containerRef.current;
+    if (!el) return;
+    const rect = el.getBoundingClientRect();
+    const cx = rect.width / 2;
+    const cy = rect.height / 2;
+    setTf((t) => {
+      const next = Math.max(0.3, Math.min(6, t.s * factor));
+      const ratio = next / t.s;
+      return { s: next, x: cx - (cx - t.x) * ratio, y: cy - (cy - t.y) * ratio };
+    });
+  };
+
+  return (
+    <div
+      ref={containerRef}
+      onMouseDown={startPan}
+      style={{
+        position: 'absolute',
+        inset: 0,
+        overflow: 'hidden',
+        cursor: panning ? 'grabbing' : 'grab',
+      }}
+    >
+      <div
+        style={{
+          position: 'absolute',
+          inset: 0,
+          transformOrigin: '0 0',
+          transform: `translate(${tf.x}px, ${tf.y}px) scale(${tf.s})`,
+        }}
+      >
+        {children}
+      </div>
+
+      {/* Control puck — sits above the transformed content, beneath the
+          main HUD overlays (which use zIndex 5). Stops propagation so its
+          buttons don't double as a pan handle. */}
+      <div
+        onMouseDown={(e) => e.stopPropagation()}
+        style={{
+          position: 'absolute',
+          right: 24,
+          bottom: 24,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 4,
+          padding: 4,
+          background: '#0a0d12cc',
+          border: '1px solid #ffffff20',
+          borderRadius: SW_RADIUS.sm,
+          backdropFilter: 'blur(6px)',
+          zIndex: 4,
+        }}
+      >
+        <PzButton onClick={() => zoomBy(1.25)} title="Zoom in">+</PzButton>
+        <div
+          style={{
+            minWidth: 44,
+            textAlign: 'center',
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 800,
+            color: '#ffffffcc',
+            letterSpacing: '0.1em',
+          }}
+        >
+          {Math.round(tf.s * 100)}%
+        </div>
+        <PzButton onClick={() => zoomBy(1 / 1.25)} title="Zoom out">−</PzButton>
+        <div style={{ width: 1, height: 18, background: '#ffffff20', margin: '0 2px' }} />
+        <PzButton onClick={() => setTf({ x: 0, y: 0, s: 1 })} title="Reset view">⟲</PzButton>
+      </div>
+    </div>
+  );
+}
+
+function PzButton({ children, onClick, title }: { children: React.ReactNode; onClick: () => void; title?: string }) {
+  return (
+    <button
+      onClick={onClick}
+      title={title}
+      style={{
+        width: 24,
+        height: 24,
+        display: 'inline-flex',
+        alignItems: 'center',
+        justifyContent: 'center',
+        background: 'transparent',
+        border: '1px solid #ffffff15',
+        borderRadius: 4,
+        color: '#fff',
+        fontFamily: SW_FONTS.mono,
+        fontSize: 13,
+        fontWeight: 900,
+        cursor: 'pointer',
+        padding: 0,
+        lineHeight: 1,
+      }}
+    >
+      {children}
+    </button>
+  );
 }
 
 function SimLegend({ view }: { view: SimView }) {
@@ -1344,9 +1982,52 @@ interface StationLayout {
   d: number;
 }
 
+/**
+ * Map Builder workstation coordinates into a viewBox of the given size. Used
+ * by TOP / HEAT / LOGIC to honour the user-painted layout when the twin
+ * source is active. Returns `null` when no twin meta is available, signalling
+ * the caller to fall back to its canonical row-wrapped layout.
+ */
+function twinPositionsForView(
+  stations: StationView[],
+  twinMeta: BuildFromTwinMeta | null | undefined,
+  viewW: number,
+  viewH: number,
+  paddingX: number,
+  paddingY: number,
+): { x: number; y: number }[] | null {
+  if (!twinMeta || stations.length === 0) return null;
+  const byOpId = new Map<string, { gx: number; gy: number }>();
+  for (const ts of twinMeta.stations) {
+    byOpId.set(ts.opId, { gx: ts.gx, gy: ts.gy });
+  }
+  let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+  for (const s of stations) {
+    const p = byOpId.get(s.opId);
+    if (!p) continue;
+    if (p.gx < minX) minX = p.gx;
+    if (p.gy < minY) minY = p.gy;
+    if (p.gx > maxX) maxX = p.gx;
+    if (p.gy > maxY) maxY = p.gy;
+  }
+  if (!isFinite(minX)) return null;
+  const usableW = viewW - paddingX * 2;
+  const usableH = viewH - paddingY * 2;
+  const spanX = Math.max(1, maxX - minX);
+  const spanY = Math.max(1, maxY - minY);
+  return stations.map((s) => {
+    const p = byOpId.get(s.opId) ?? { gx: minX, gy: minY };
+    return {
+      x: paddingX + ((p.gx - minX) / spanX) * usableW,
+      y: paddingY + ((p.gy - minY) / spanY) * usableH,
+    };
+  });
+}
+
 function layoutStations(
   stations: StationView[],
   system: ProductionSystem,
+  twinMeta?: BuildFromTwinMeta | null,
 ): {
   cells: StationLayout[];
   gridW: number;
@@ -1355,6 +2036,46 @@ function layoutStations(
 } {
   const n = stations.length;
   if (n === 0) return { cells: [], gridW: 1, gridH: 1, perRow: 1 };
+
+  // Twin path — honour the workstation coordinates the user authored in
+  // Factory Builder. Each engine station maps back to one-or-more workstations
+  // via meta.stations (keyed by opId); we use their mean grid position so the
+  // ISO/TOP/HEAT views read like a top-down of the actual factory layout.
+  if (twinMeta) {
+    const byOpId = new Map<string, { gx: number; gy: number }>();
+    for (const ts of twinMeta.stations) {
+      byOpId.set(ts.opId, { gx: ts.gx, gy: ts.gy });
+    }
+    // Builder coords are in *world cells* (same as isoProj's input units),
+    // but may be sparse / large. Normalise to a tight bbox with a 2-cell
+    // margin so the renderer's `gridW`/`gridH` stay reasonable.
+    let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+    for (const s of stations) {
+      const p = byOpId.get(s.opId);
+      if (!p) continue;
+      if (p.gx < minX) minX = p.gx;
+      if (p.gy < minY) minY = p.gy;
+      if (p.gx > maxX) maxX = p.gx;
+      if (p.gy > maxY) maxY = p.gy;
+    }
+    if (!isFinite(minX)) {
+      // Fall through to synthetic layout below.
+    } else {
+      const cells: StationLayout[] = stations.map((s) => {
+        const p = byOpId.get(s.opId) ?? { gx: minX, gy: minY };
+        return {
+          s,
+          gx: 2 + (p.gx - minX),
+          gy: 2 + (p.gy - minY),
+          w: 1.4,
+          d: 2,
+        };
+      });
+      const gridW = Math.max(8, 2 + (maxX - minX) + 4);
+      const gridH = Math.max(6, 2 + (maxY - minY) + 4);
+      return { cells, gridW, gridH, perRow: stations.length };
+    }
+  }
 
   // Modular (TSS) — U-shape. Operators face each other across the U so they
   // can rotate between adjacent stations. Pieces flow top-row L→R, turn at
@@ -1462,12 +2183,15 @@ interface SimViewProps {
   garmentName: string;
   simTime: number;
   system: ProductionSystem;
+  /** When present, the view uses Builder-authored workstation positions
+   *  instead of the canonical system-based line layout. */
+  twinMeta?: BuildFromTwinMeta | null;
 }
 
-function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system }: SimViewProps) {
+function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system, twinMeta }: SimViewProps) {
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
 
-  const { cells, gridW, gridH } = layoutStations(stations, system);
+  const { cells, gridW, gridH } = layoutStations(stations, system, twinMeta);
 
   const cTL = isoProj(0, 0);
   const cTR = isoProj(gridW, 0);
@@ -1818,7 +2542,7 @@ function IsoSewingStation({
 // TOP 2D VIEW
 // ============================================================================
 
-function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime }: SimViewProps) {
+function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime, twinMeta }: SimViewProps) {
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
   const VIEWBOX_W = 1200;
   const VIEWBOX_H = 600;
@@ -1830,7 +2554,8 @@ function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime }: SimVi
   const yStart = rows === 1 ? VIEWBOX_H / 2 : 200;
   const yStep = rows > 1 ? 200 : 0;
 
-  const positions = stations.map((_, i) => {
+  const twinPositions = twinPositionsForView(stations, twinMeta, VIEWBOX_W, VIEWBOX_H, 120, 120);
+  const positions = twinPositions ?? stations.map((_, i) => {
     const row = Math.floor(i / perRow);
     const col = i % perRow;
     return { x: xStart + col * xStep, y: yStart + row * yStep };
@@ -1994,7 +2719,7 @@ function SimTopView({ stations, bottleneckOpIndex, garmentName, simTime }: SimVi
 // HEAT VIEW
 // ============================================================================
 
-function SimHeatView({ stations, bottleneckOpIndex, garmentName }: SimViewProps) {
+function SimHeatView({ stations, bottleneckOpIndex, garmentName, twinMeta }: SimViewProps) {
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
   const VIEWBOX_W = 1200;
   const VIEWBOX_H = 600;
@@ -2004,7 +2729,8 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName }: SimViewProps)
   const xStart = perRow === 1 ? VIEWBOX_W / 2 : 100;
   const yStart = rows === 1 ? VIEWBOX_H / 2 : 200;
   const yStep = rows > 1 ? 200 : 0;
-  const positions = stations.map((_, i) => {
+  const twinPositions = twinPositionsForView(stations, twinMeta, VIEWBOX_W, VIEWBOX_H, 140, 120);
+  const positions = twinPositions ?? stations.map((_, i) => {
     const row = Math.floor(i / perRow);
     const col = i % perRow;
     return { x: xStart + col * xStep, y: yStart + row * yStep };
@@ -2112,33 +2838,75 @@ function SimHeatView({ stations, bottleneckOpIndex, garmentName }: SimViewProps)
 // order with marching arrows, so the user can see WHERE in the logical flow
 // the bottleneck sits — independent of physical layout.
 
-function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime }: SimViewProps) {
-  if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
+function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime, twinMeta }: SimViewProps) {
+  // Measure the parent container so the operation grid can pick a
+  // cols × rows shape whose aspect ratio matches the available area —
+  // otherwise the fixed 1200×1790 viewBox letterboxes hard on a wide
+  // landscape canvas and the cards render postage-stamp small.
+  const wrapRef = useRef(null as HTMLDivElement | null);
+  const [contSize, setContSize] = useState({ w: 1200, h: 700 });
 
-  // Wrap into rows of up to 4 cards so each card stays large enough to read.
+  useEffect(() => {
+    const el = wrapRef.current;
+    if (!el) return;
+    const ro = new ResizeObserver((entries) => {
+      const r = entries[0]?.contentRect;
+      if (r && r.width > 0 && r.height > 0) {
+        setContSize({ w: r.width, h: r.height });
+      }
+    });
+    ro.observe(el);
+    return () => ro.disconnect();
+  }, []);
+
+  if (stations.length === 0) {
+    return (
+      <div ref={wrapRef} style={{ width: '100%', height: '100%' }}>
+        <svg style={{ width: '100%', height: '100%' }} />
+      </div>
+    );
+  }
+
   // Cards carry an explicit label for every number; flow connectors are
   // bright and thick so the routing reads at a glance.
-  const W = 1200;
   const CARD_W = 260;
   const CARD_H = 210;
-  const cols = Math.min(stations.length, 4);
-  const rows = Math.ceil(stations.length / cols);
   const PAD_X = 40;
   const PAD_TOP = 70;
   const PAD_BOTTOM = 110;
   const ROW_GAP = 70;
-  // Distribute cards evenly across the available width.
-  const usableW = W - PAD_X * 2;
-  const colStep = cols > 1 ? (usableW - CARD_W) / (cols - 1) : 0;
+  const COL_GAP = 56;
+
+  // Pick the cols count that yields an SVG aspect ratio closest to the
+  // container's — that way `preserveAspectRatio="xMidYMid meet"` fills
+  // the canvas with no letterboxing and cards render as large as possible.
+  const targetRatio = contSize.w / Math.max(1, contSize.h);
+  let cols = Math.min(stations.length, 4);
+  let bestDiff = Infinity;
+  for (let c = 1; c <= stations.length; c++) {
+    const r = Math.ceil(stations.length / c);
+    const wCand = PAD_X * 2 + c * CARD_W + (c - 1) * COL_GAP;
+    const hCand = PAD_TOP + r * CARD_H + (r - 1) * ROW_GAP + PAD_BOTTOM;
+    const diff = Math.abs(wCand / hCand - targetRatio);
+    if (diff < bestDiff) {
+      bestDiff = diff;
+      cols = c;
+    }
+  }
+  const rows = Math.ceil(stations.length / cols);
+  const W = PAD_X * 2 + cols * CARD_W + (cols - 1) * COL_GAP;
   const H = PAD_TOP + rows * CARD_H + (rows - 1) * ROW_GAP + PAD_BOTTOM;
 
+  const twinPositions = twinPositionsForView(stations, twinMeta, W - CARD_W, H - CARD_H, PAD_X, PAD_TOP);
   const positions = stations.map((_, i) => {
     const row = Math.floor(i / cols);
-    // Snake-wrap so adjacent ops in the bulletin stay visually adjacent.
     const rawCol = i % cols;
     const col = row % 2 === 0 ? rawCol : cols - 1 - rawCol;
+    if (twinPositions) {
+      return { x: twinPositions[i].x, y: twinPositions[i].y, col, row };
+    }
     return {
-      x: PAD_X + col * colStep,
+      x: PAD_X + col * (CARD_W + COL_GAP),
       y: PAD_TOP + row * (CARD_H + ROW_GAP),
       col,
       row,
@@ -2165,6 +2933,7 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime }: Sim
   }
 
   return (
+    <div ref={wrapRef} style={{ width: '100%', height: '100%' }}>
     <svg
       viewBox={`0 0 ${W} ${H}`}
       preserveAspectRatio="xMidYMid meet"
@@ -2535,6 +3304,7 @@ function SimLogicView({ stations, bottleneckOpIndex, garmentName, simTime }: Sim
         </text>
       </g>
     </svg>
+    </div>
   );
 }
 
