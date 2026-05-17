@@ -359,7 +359,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
 export const PML_CATEGORIES: { id: PmlCategory; label: string; blurb: string }[] = [
   { id: 'lifecycle', label: 'Lifecycle', blurb: 'Where flow begins and ends.' },
   { id: 'buffer',    label: 'Buffer',    blurb: 'Queue, hold, delay — non-resource pacing.' },
-  { id: 'service',   label: 'Service',   blurb: 'Seize → Delay → Release. Operator + machine ops.' },
+  { id: 'service',   label: 'Service',   blurb: 'Seize → Delay → Release. Operator + machine operations.' },
   { id: 'routing',   label: 'Routing',   blurb: 'Branch the flow on a condition.' },
   { id: 'batch',     label: 'Batch',     blurb: 'Bundle / unbundle / combine / split / assemble.' },
   { id: 'movement',  label: 'Movement',  blurb: 'Transport — conveyors, AGVs, forklifts.' },
@@ -505,6 +505,30 @@ export interface PmlBlockParams {
    *  parallelism even when the dept's ResourcePool has spare units.
    *  Default 1. */
   servers?: number;
+  /**
+   * Service / Delay / Hold / Conveyor / MoveTo — per-agent cycle time
+   * distribution in **MINUTES**. When set, the engine draws a fresh sample
+   * for each agent instead of using the deterministic `cycleS`.
+   *
+   * Adopted from AnyLogic Process Modeling Library Service block, which
+   * defaults to `triangular(0.5, 1, 1.5)`. Set in the reference-twin
+   * builder from the paper's fitted distribution (StatFit notes on each
+   * operation — see `parseStatfitDist`).
+   *
+   * The schema lives at the `params` level so it round-trips through the
+   * project JSON without a separate migration.
+   */
+  cycleDist?: import('../simulation/distributions').ServiceDist;
+  /**
+   * Source — inter-arrival time distribution in **MINUTES**. When set the
+   * engine draws each gap from this distribution; otherwise it falls back
+   * to a constant interval of `60 / sourceRatePerHr` minutes.
+   *
+   * AnyLogic's Source defaults to exponential (Poisson arrivals); the
+   * reference-twin builder picks `exp(60 / rate)` automatically when the
+   * paper does not specify otherwise.
+   */
+  arrivalDist?: import('../simulation/distributions').ServiceDist;
 }
 
 /**
@@ -655,6 +679,12 @@ export interface ResolvedBlockParams {
   piecesPerAgent: number;
   /** Service — parallel-server cap at the station. Default 1. */
   servers: number;
+  /** Service / Delay / Hold / Conveyor / MoveTo — per-agent cycle distribution
+   *  in MINUTES. Undefined ⇒ engine uses the deterministic `cycleS`. */
+  cycleDist: import('../simulation/distributions').ServiceDist | undefined;
+  /** Source — inter-arrival distribution in MINUTES. Undefined ⇒ engine
+   *  uses a constant interval of `60 / sourceRatePerHr` minutes. */
+  arrivalDist: import('../simulation/distributions').ServiceDist | undefined;
 }
 
 function numProp(props: Record<string, unknown> | undefined, key: string): number | null {
@@ -712,7 +742,24 @@ export function getBlockParams(
   // default (one machine per workstation); reinforced stations bump this.
   const servers = Math.max(1, Math.round(p.servers ?? numProp(fx, 'servers') ?? 1));
 
-  return { sourceRatePerHr, cycleS, passProb, capacity, queueCapacity, batchSize, piecesPerAgent, servers };
+  // Pass-through optional distribution overrides. The engine reads these
+  // when sampling per-agent cycle / inter-arrival times. Falls back to
+  // the deterministic value when absent.
+  const cycleDist = p.cycleDist;
+  const arrivalDist = p.arrivalDist;
+
+  return {
+    sourceRatePerHr,
+    cycleS,
+    passProb,
+    capacity,
+    queueCapacity,
+    batchSize,
+    piecesPerAgent,
+    servers,
+    cycleDist,
+    arrivalDist,
+  };
 }
 
 /**

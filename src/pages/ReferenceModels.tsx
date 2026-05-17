@@ -10,6 +10,7 @@ import {
 import {
   buildReferenceTwin,
   compareToPaper,
+  type ReferenceRandomness,
   type ReferenceVariant,
   type ValidationRow,
 } from '../domain/reference-twin';
@@ -27,12 +28,31 @@ import { runPmlOnTwin } from '../simulation/pml-runner';
  *
  * The corresponding markdown lives in `Literature/Reference Models/`.
  */
+/** Replication / seed / randomness controls shared by every Validate action
+ *  on this page. Lifted to page-level so flipping the run mode also re-runs
+ *  the same toggles on the per-scenario validate buttons consistently. */
+interface RunMode {
+  /** Where the per-operation variability comes from. */
+  randomness: ReferenceRandomness;
+  /** How many independent replications to run per Validate click. */
+  replications: number;
+  /** Fixed seed → reproducible runs (AnyLogic §15.3). Random seed → unique runs. */
+  seedMode: 'fixed' | 'random';
+}
+
+const DEFAULT_RUN_MODE: RunMode = {
+  randomness: 'paper-fits',
+  replications: 5,
+  seedMode: 'fixed',
+};
+
 export function ReferenceModelsPage() {
   const [selectedSlug, setSelectedSlug] = useState<string>(REFERENCE_MODELS[0].slug);
   const selected = useMemo(
     () => REFERENCE_MODELS.find((m) => m.slug === selectedSlug) ?? REFERENCE_MODELS[0],
     [selectedSlug],
   );
+  const [runMode, setRunMode] = useState<RunMode>(DEFAULT_RUN_MODE);
 
   return (
     <div
@@ -118,7 +138,7 @@ export function ReferenceModelsPage() {
           </div>
 
           {/* ── RIGHT: selected model detail ─────────────────────────── */}
-          <ModelDetail model={selected} />
+          <ModelDetail model={selected} runMode={runMode} onRunModeChange={setRunMode} />
         </div>
       </div>
     </div>
@@ -165,7 +185,7 @@ function PaperListCard({
         >
           {model.authorYear.toUpperCase()}
         </span>
-        <Tag soft color={SW_COLORS.brand}>{model.operationCount} OPS</Tag>
+        <Tag soft color={SW_COLORS.brand}>{model.operationCount} OPERATIONS</Tag>
       </div>
       <div
         style={{
@@ -187,7 +207,15 @@ function PaperListCard({
 }
 
 // ── Detail panel ────────────────────────────────────────────────────────────
-function ModelDetail({ model }: { model: ReferenceModel }) {
+function ModelDetail({
+  model,
+  runMode,
+  onRunModeChange,
+}: {
+  model: ReferenceModel;
+  runMode: RunMode;
+  onRunModeChange: (next: RunMode) => void;
+}) {
   const total = model.garmentTemplate.totalSmv;
   const sumOps = model.garmentTemplate.operations.length;
 
@@ -238,8 +266,8 @@ function ModelDetail({ model }: { model: ReferenceModel }) {
             label="Bulletin"
             value={
               sumOps === 0
-                ? `${model.operationCount} ops · synthetic placeholder (see file)`
-                : `${sumOps} ops · total SMV ${total.toFixed(2)} min`
+                ? `${model.operationCount} operations · synthetic placeholder (see file)`
+                : `${sumOps} operations · total SMV ${total.toFixed(2)} min`
             }
           />
         </div>
@@ -320,12 +348,15 @@ function ModelDetail({ model }: { model: ReferenceModel }) {
         )}
       </Card>
 
+      {/* Run mode (randomness / replications / seed) */}
+      <RunModeCard runMode={runMode} onChange={onRunModeChange} />
+
       {/* Build + validate */}
-      <BuildAndValidateCard model={model} />
+      <BuildAndValidateCard model={model} runMode={runMode} />
 
       {/* Per-scenario validation (only for multi-scenario papers like Kursun) */}
       {model.scenarios && model.scenarios.length > 0 && (
-        <ScenariosCard model={model} />
+        <ScenariosCard model={model} runMode={runMode} />
       )}
 
       {/* Action footer */}
@@ -366,8 +397,185 @@ function ModelDetail({ model }: { model: ReferenceModel }) {
   );
 }
 
+// ── Run mode card ───────────────────────────────────────────────────────────
+// Surfaces the AnyLogic randomness controls Stitchworks now mirrors:
+//   • Per-operation cycle distribution (paper fits / deterministic / synthetic)
+//   • Source inter-arrival (constant vs. exponential Poisson)
+//   • Replications + seed mode (fixed for reproducible runs vs. random)
+//
+// Reference: Big Book of Simulation Modelling Ch. 15 — Randomness in AnyLogic
+// models. Section 15.2 (sources of randomness in Process models) and
+// Section 15.3 (RNG, fixed seed vs. random seed) are the parts this UI mirrors.
+function RunModeCard({
+  runMode,
+  onChange,
+}: {
+  runMode: RunMode;
+  onChange: (next: RunMode) => void;
+}) {
+  return (
+    <Card padding={16} accent={SW_COLORS.steel}>
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 10,
+          fontWeight: 700,
+          color: SW_COLORS.steel,
+          letterSpacing: '2px',
+          marginBottom: 4,
+        }}
+      >
+        RUN MODE · STOCHASTIC ENGINE
+      </div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.display,
+          fontSize: 18,
+          fontWeight: 800,
+          color: SW_COLORS.ink,
+          letterSpacing: '-0.01em',
+        }}
+      >
+        Randomness controls
+      </div>
+      <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 4, lineHeight: 1.5 }}>
+        Mirrors AnyLogic's randomness section (Big Book Ch. 15). Stochastic mode
+        parses the paper's fitted distributions out of each operation's notes
+        and samples a fresh value per agent — Source becomes Poisson, Service
+        becomes TRIA / NORM / WEIB / BETA / LOGN / ERLA per op.
+      </div>
+
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1.4fr 1fr 1fr',
+          gap: 14,
+          marginTop: 14,
+        }}
+      >
+        <RunModeField label="Per-operation cycle">
+          <SegmentedControl
+            value={runMode.randomness}
+            options={[
+              { value: 'paper-fits',    label: 'Paper fits' },
+              { value: 'synthetic',     label: '±25 % TRIA' },
+              { value: 'deterministic', label: 'Mean SMV' },
+            ]}
+            onChange={(v) => onChange({ ...runMode, randomness: v as ReferenceRandomness })}
+          />
+        </RunModeField>
+        <RunModeField label="Replications">
+          <SegmentedControl
+            value={String(runMode.replications)}
+            options={[
+              { value: '1',  label: '1' },
+              { value: '5',  label: '5' },
+              { value: '10', label: '10' },
+              { value: '25', label: '25' },
+            ]}
+            onChange={(v) => onChange({ ...runMode, replications: Number(v) })}
+          />
+        </RunModeField>
+        <RunModeField label="Seed mode">
+          <SegmentedControl
+            value={runMode.seedMode}
+            options={[
+              { value: 'fixed',  label: 'Fixed (reproducible)' },
+              { value: 'random', label: 'Random (unique)' },
+            ]}
+            onChange={(v) => onChange({ ...runMode, seedMode: v as 'fixed' | 'random' })}
+          />
+        </RunModeField>
+      </div>
+      <div
+        style={{
+          marginTop: 10,
+          fontSize: 11,
+          color: SW_COLORS.muted,
+          fontFamily: SW_FONTS.mono,
+          lineHeight: 1.5,
+        }}
+      >
+        {runMode.randomness === 'deterministic'
+          ? 'Deterministic — every operation runs at its mean SMV. Source on a constant interval. No queue variance; matches the pre-randomness baseline.'
+          : runMode.randomness === 'paper-fits'
+            ? 'Paper fits — Stitchworks reads each operation\'s StatFit-style notes and samples accordingly. Falls back to a ±25 % triangular if no fit is present.'
+            : 'Synthetic — every operation gets a ±25 % triangular around its mean SMV, regardless of what the paper published.'}
+      </div>
+    </Card>
+  );
+}
+
+function RunModeField({ label, children }: { label: string; children: React.ReactNode }) {
+  return (
+    <div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 10,
+          fontWeight: 700,
+          color: SW_COLORS.muted,
+          letterSpacing: '1.5px',
+          marginBottom: 6,
+        }}
+      >
+        {label.toUpperCase()}
+      </div>
+      {children}
+    </div>
+  );
+}
+
+function SegmentedControl({
+  value,
+  options,
+  onChange,
+}: {
+  value: string;
+  options: { value: string; label: string }[];
+  onChange: (next: string) => void;
+}) {
+  return (
+    <div
+      style={{
+        display: 'inline-flex',
+        flexWrap: 'wrap',
+        border: `1px solid ${SW_COLORS.line}`,
+        borderRadius: SW_RADIUS.sm,
+        overflow: 'hidden',
+        background: SW_COLORS.paper,
+      }}
+    >
+      {options.map((o, i) => {
+        const active = o.value === value;
+        return (
+          <button
+            key={o.value}
+            type="button"
+            onClick={() => onChange(o.value)}
+            style={{
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 700,
+              letterSpacing: '1px',
+              padding: '7px 12px',
+              border: 'none',
+              borderLeft: i > 0 ? `1px solid ${SW_COLORS.line}` : 'none',
+              background: active ? SW_COLORS.ink : SW_COLORS.paper,
+              color: active ? SW_COLORS.paper : SW_COLORS.muted,
+              cursor: 'pointer',
+            }}
+          >
+            {o.label.toUpperCase()}
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
 // ── Build + inline-validate panel ────────────────────────────────────────────
-function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
+function BuildAndValidateCard({ model, runMode }: { model: ReferenceModel; runMode: RunMode }) {
   const navigate = useNavigate();
   const loadCanonical = useTwin((s) => s.loadCanonical);
   const createScenarioFromCanonical = useTwin((s) => s.createScenarioFromCanonical);
@@ -379,9 +587,13 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
     variant: ReferenceVariant;
     rows: ValidationRow[];
     throughputPerHr: number;
+    throughputStdPerHr: number;
+    throughputCi95PerHr: number;
     bottleneckName: string | null;
     replications: number;
     seeds: number[];
+    randomness: ReferenceRandomness;
+    seedMode: RunMode['seedMode'];
   } | null>(null);
 
   const opsAvailable = model.garmentTemplate.operations.length > 0;
@@ -390,9 +602,12 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
    *  fork a scenario for each what-if (proposed and any per-scenario forks).
    *  Navigates to the Builder when done. */
   function handleBuildAndOpen() {
-    const baseline = buildReferenceTwin(model, { variant: 'baseline' });
+    const baseline = buildReferenceTwin(model, {
+      variant: 'baseline',
+      randomness: runMode.randomness,
+    });
     if (!baseline) {
-      setStatus('This paper has no enumerated ops — cannot build a twin yet.');
+      setStatus('This paper has no enumerated operations — cannot build a twin yet.');
       return;
     }
     const r = loadCanonical(baseline);
@@ -424,7 +639,7 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
     if (model.scenarios && model.scenarios.length > 0) {
       model.scenarios.forEach((s) => {
         forkAsScenario(
-          buildReferenceTwin(model, { scenarioId: s.id }),
+          buildReferenceTwin(model, { scenarioId: s.id, randomness: runMode.randomness }),
           `${s.id} — ${s.name} (${s.operators} ops)`,
           `Paper scenario ${s.id}: ${s.description} Paper-reported ${s.throughputPerDayPcs} pcs/day (+${s.upliftPct} %).`,
         );
@@ -432,7 +647,7 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
     } else if (model.proposed) {
       // Single-scenario fallback: just fork "Proposed".
       forkAsScenario(
-        buildReferenceTwin(model, { variant: 'proposed' }),
+        buildReferenceTwin(model, { variant: 'proposed', randomness: runMode.randomness }),
         `Proposed (${model.proposed.operators} ops)`,
         `Auto-built proposed variant from ${model.authorYear}.`,
       );
@@ -442,42 +657,38 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
     navigate('/builder');
   }
 
-  /** Run N replications of the chosen variant in-process and compute a
-   *  side-by-side comparison with the paper. Keeps the user on this page
-   *  so they don't have to context-switch to validate. */
-  function handleRunValidation(variant: ReferenceVariant, replications = 5) {
-    const twin = buildReferenceTwin(model, { variant });
+  /** Run N independent replications of the chosen variant and compute mean
+   *  throughput plus the standard deviation across replications and a 95 %
+   *  confidence interval on the mean (half-width = 1.96·σ/√N). Honours the
+   *  page-level Run Mode — randomness, replication count, seed mode.
+   *
+   *  AnyLogic Ch. 15.2 "Sources of randomness" recommends exactly this
+   *  Monte-Carlo treatment for any stochastic model: run multiple seeds,
+   *  treat the across-replication spread as your noise estimate. */
+  function handleRunValidation(variant: ReferenceVariant) {
+    const twin = buildReferenceTwin(model, { variant, randomness: runMode.randomness });
     if (!twin) {
-      setStatus('This paper has no enumerated ops — cannot validate yet.');
+      setStatus('This paper has no enumerated operations — cannot validate yet.');
       return;
     }
+    const replications = Math.max(1, runMode.replications);
     setRunning(true);
-    setStatus(`Running ${replications} replications…`);
+    setStatus(`Running ${replications} replication${replications === 1 ? '' : 's'}…`);
 
-    // The engine is fast enough that running 5 seeds inline (no worker) is
+    // The engine is fast enough that running N seeds inline (no worker) is
     // imperceptible for a 21-op line. setTimeout 0 lets the spinner paint.
     setTimeout(() => {
-      const seeds: number[] = [];
-      let throughputSum = 0;
-      let bottleneck: string | null = null;
-      for (let i = 0; i < replications; i++) {
-        const seed = (Date.now() + i * 7919) | 1;
-        seeds.push(seed);
-        const r = runPmlOnTwin(twin, {
-          durationMin: 480,
-          seed,
-          samplePeriodMin: 0,
-        });
-        throughputSum += r.throughputPerHr;
-        if (!bottleneck && r.bottleneckName) bottleneck = r.bottleneckName;
-      }
-      const meanThroughputPerHr = throughputSum / replications;
+      const result = runReplications({
+        twin,
+        replications,
+        seedMode: runMode.seedMode,
+      });
       const kpis = variant === 'proposed' && model.proposed ? model.proposed : model.baseline;
       const rows = compareToPaper({
         model,
         variant,
         observed: {
-          throughputPerHr: meanThroughputPerHr,
+          throughputPerHr: result.mean,
           operatorsConfigured: kpis.operators,
           totalSmvMin: model.garmentTemplate.totalSmv,
           shiftMin: 480,
@@ -486,10 +697,14 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
       setValidation({
         variant,
         rows,
-        throughputPerHr: meanThroughputPerHr,
-        bottleneckName: bottleneck,
+        throughputPerHr: result.mean,
+        throughputStdPerHr: result.std,
+        throughputCi95PerHr: result.ci95,
+        bottleneckName: result.bottleneck,
         replications,
-        seeds,
+        seeds: result.seeds,
+        randomness: runMode.randomness,
+        seedMode: runMode.seedMode,
       });
       setStatus(null);
       setRunning(false);
@@ -556,7 +771,7 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
         <Button
           variant="ghost"
           disabled={running}
-          onClick={() => handleRunValidation('baseline', 5)}
+          onClick={() => handleRunValidation('baseline')}
         >
           {running && validation?.variant !== 'proposed' ? '⏳' : '▶'}
           {' '}VALIDATE BASELINE
@@ -565,7 +780,7 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
           <Button
             variant="ghost"
             disabled={running}
-            onClick={() => handleRunValidation('proposed', 5)}
+            onClick={() => handleRunValidation('proposed')}
           >
             {running && validation?.variant === 'proposed' ? '⏳' : '▶'}
             {' '}VALIDATE PROPOSED
@@ -584,19 +799,81 @@ function BuildAndValidateCard({ model }: { model: ReferenceModel }) {
           variant={validation.variant}
           rows={validation.rows}
           throughputPerHr={validation.throughputPerHr}
+          throughputStdPerHr={validation.throughputStdPerHr}
+          throughputCi95PerHr={validation.throughputCi95PerHr}
           bottleneckName={validation.bottleneckName}
           replications={validation.replications}
+          randomness={validation.randomness}
+          seedMode={validation.seedMode}
         />
       )}
     </Card>
   );
 }
 
+// ── Replication harness ─────────────────────────────────────────────────────
+// Runs N independent sims against the same twin and reports the across-rep
+// mean, sample standard deviation, and a 95 % CI on the mean. This is the
+// AnyLogic "Monte Carlo simulation" pattern from Big Book Ch. 15 §15.2 —
+// the only honest way to report a stochastic-model KPI is mean + spread.
+
+interface ReplicationResult {
+  /** Per-replication observed throughput (pieces / hr). */
+  perRun: number[];
+  /** Across-replication arithmetic mean. */
+  mean: number;
+  /** Sample standard deviation (n-1 denominator). 0 when replications < 2. */
+  std: number;
+  /** 95 % CI half-width on the mean (1.96·σ/√N). */
+  ci95: number;
+  /** First bottleneck observed in any run, or null if all runs had none. */
+  bottleneck: string | null;
+  /** The seed each replication used — handy for debugging surprising runs. */
+  seeds: number[];
+}
+
+function runReplications(opts: {
+  twin: import('../domain/twin').Twin;
+  replications: number;
+  seedMode: RunMode['seedMode'];
+}): ReplicationResult {
+  const { twin, replications, seedMode } = opts;
+  const seeds: number[] = [];
+  const perRun: number[] = [];
+  let bottleneck: string | null = null;
+
+  for (let i = 0; i < replications; i++) {
+    // Fixed seed → deterministic stream identical across page reloads.
+    // Random seed → unique stream sourced from wall clock + index.
+    const seed =
+      seedMode === 'fixed'
+        ? (1 + i * 2654435761) >>> 0
+        : ((Date.now() + i * 7919) | 1) >>> 0;
+    seeds.push(seed);
+    const r = runPmlOnTwin(twin, { durationMin: 480, seed, samplePeriodMin: 0 });
+    perRun.push(r.throughputPerHr);
+    if (!bottleneck && r.bottleneckName) bottleneck = r.bottleneckName;
+  }
+
+  const n = perRun.length;
+  const mean = n > 0 ? perRun.reduce((s, v) => s + v, 0) / n : 0;
+  const variance =
+    n > 1
+      ? perRun.reduce((s, v) => s + (v - mean) * (v - mean), 0) / (n - 1)
+      : 0;
+  const std = Math.sqrt(variance);
+  // 95 % CI half-width assuming the across-rep mean is approximately normal
+  // (valid for N ≥ 5 by CLT; we report it for smaller N too with a caveat).
+  const ci95 = n > 1 ? (1.96 * std) / Math.sqrt(n) : 0;
+
+  return { perRun, mean, std, ci95, bottleneck, seeds };
+}
+
 // ── Multi-scenario card ─────────────────────────────────────────────────────
 // Shown only for papers that report multiple what-if scenarios (e.g. Kursun
 // 2009 with S1/S2/S3). Each row is a one-click validate against that
 // scenario's published throughput.
-function ScenariosCard({ model }: { model: ReferenceModel }) {
+function ScenariosCard({ model, runMode }: { model: ReferenceModel; runMode: RunMode }) {
   const [running, setRunning] = useState<string | null>(null);
   const [results, setResults] = useState<
     Record<
@@ -604,6 +881,8 @@ function ScenariosCard({ model }: { model: ReferenceModel }) {
       {
         rows: ValidationRow[];
         throughputPerHr: number;
+        throughputStdPerHr: number;
+        throughputCi95PerHr: number;
         bottleneckName: string | null;
       } | undefined
     >
@@ -612,28 +891,28 @@ function ScenariosCard({ model }: { model: ReferenceModel }) {
   if (!model.scenarios || model.scenarios.length === 0) return null;
   const opsAvailable = model.garmentTemplate.operations.length > 0;
 
-  function handleValidateScenario(scenario: ReferenceScenario, replications = 5) {
+  function handleValidateScenario(scenario: ReferenceScenario) {
     if (!opsAvailable) return;
-    const twin = buildReferenceTwin(model, { scenarioId: scenario.id });
+    const twin = buildReferenceTwin(model, {
+      scenarioId: scenario.id,
+      randomness: runMode.randomness,
+    });
     if (!twin) return;
     setRunning(scenario.id);
+    const replications = Math.max(1, runMode.replications);
 
     setTimeout(() => {
-      let throughputSum = 0;
-      let bottleneck: string | null = null;
-      for (let i = 0; i < replications; i++) {
-        const seed = (Date.now() + i * 7919) | 1;
-        const r = runPmlOnTwin(twin, { durationMin: 480, seed, samplePeriodMin: 0 });
-        throughputSum += r.throughputPerHr;
-        if (!bottleneck && r.bottleneckName) bottleneck = r.bottleneckName;
-      }
-      const meanThroughputPerHr = throughputSum / replications;
+      const result = runReplications({
+        twin,
+        replications,
+        seedMode: runMode.seedMode,
+      });
       const rows = compareToPaper({
         model,
         variant: 'proposed',
         scenarioId: scenario.id,
         observed: {
-          throughputPerHr: meanThroughputPerHr,
+          throughputPerHr: result.mean,
           operatorsConfigured: scenario.operators,
           totalSmvMin: model.garmentTemplate.totalSmv,
           shiftMin: 480,
@@ -641,7 +920,13 @@ function ScenariosCard({ model }: { model: ReferenceModel }) {
       });
       setResults((prev) => ({
         ...prev,
-        [scenario.id]: { rows, throughputPerHr: meanThroughputPerHr, bottleneckName: bottleneck },
+        [scenario.id]: {
+          rows,
+          throughputPerHr: result.mean,
+          throughputStdPerHr: result.std,
+          throughputCi95PerHr: result.ci95,
+          bottleneckName: result.bottleneck,
+        },
       }));
       setRunning(null);
     }, 0);
@@ -744,14 +1029,14 @@ function ScenariosCard({ model }: { model: ReferenceModel }) {
                     </span>
                     <span style={{ color: '#1a8a3f' }}>+{s.upliftPct} % vs. baseline</span>
                     {s.reinforcedOpIndices && (
-                      <span>reinforced ops: {s.reinforcedOpIndices.join(', ')}</span>
+                      <span>reinforced operations: {s.reinforcedOpIndices.join(', ')}</span>
                     )}
                   </div>
                 </div>
                 <Button
                   variant={s.isBest ? 'primary' : 'ghost'}
                   disabled={running !== null || !opsAvailable}
-                  onClick={() => handleValidateScenario(s, 5)}
+                  onClick={() => handleValidateScenario(s)}
                 >
                   {running === s.id ? '⏳' : '▶'} VALIDATE {s.id}
                 </Button>
@@ -762,6 +1047,8 @@ function ScenariosCard({ model }: { model: ReferenceModel }) {
                   scenario={s}
                   rows={r.rows}
                   observedPerHr={r.throughputPerHr}
+                  observedStdPerHr={r.throughputStdPerHr}
+                  observedCi95PerHr={r.throughputCi95PerHr}
                   bottleneckName={r.bottleneckName}
                 />
               )}
@@ -777,17 +1064,23 @@ function ScenarioResultRow({
   scenario,
   rows,
   observedPerHr,
+  observedStdPerHr,
+  observedCi95PerHr,
   bottleneckName,
 }: {
   scenario: ReferenceScenario;
   rows: ValidationRow[];
   observedPerHr: number;
+  observedStdPerHr: number;
+  observedCi95PerHr: number;
   bottleneckName: string | null;
 }) {
   const throughputRow = rows.find((r) => r.label === 'Throughput');
   const ok = throughputRow ? throughputRow.withinTolerance : true;
   const tone = ok ? '#1a8a3f' : SW_COLORS.thread;
   const observedPerDay = Math.round(observedPerHr * 8);
+  const stdPerDay = Math.round(observedStdPerHr * 8);
+  const ci95PerDay = Math.round(observedCi95PerHr * 8);
   const deltaPct = throughputRow?.deltaPct ?? 0;
   return (
     <div
@@ -816,7 +1109,10 @@ function ScenarioResultRow({
         paper <strong style={{ color: SW_COLORS.ink }}>{scenario.throughputPerDayPcs}</strong>
       </span>
       <span style={{ color: SW_COLORS.muted }}>
-        stitchworks <strong style={{ color: SW_COLORS.ink }}>{observedPerDay}</strong> pcs/day
+        stitchworks <strong style={{ color: SW_COLORS.ink }}>{observedPerDay}</strong> ± {stdPerDay} pcs/day
+        {ci95PerDay > 0 && (
+          <span style={{ color: SW_COLORS.muted }}> · CI±{ci95PerDay}</span>
+        )}
       </span>
       <span style={{ color: tone, fontWeight: 700 }}>
         {deltaPct >= 0 ? '+' : ''}{deltaPct.toFixed(1)} %
@@ -834,19 +1130,34 @@ function ValidationResult({
   variant,
   rows,
   throughputPerHr,
+  throughputStdPerHr,
+  throughputCi95PerHr,
   bottleneckName,
   replications,
+  randomness,
+  seedMode,
 }: {
   model: ReferenceModel;
   variant: ReferenceVariant;
   rows: ValidationRow[];
   throughputPerHr: number;
+  throughputStdPerHr: number;
+  throughputCi95PerHr: number;
   bottleneckName: string | null;
   replications: number;
+  randomness: ReferenceRandomness;
+  seedMode: RunMode['seedMode'];
 }) {
   const allWithin = rows.every((r) => r.withinTolerance);
   const headlineColor = allWithin ? '#1a8a3f' : SW_COLORS.thread;
   const variantLabel = variant === 'proposed' ? 'Proposed' : 'Baseline';
+  const cvPct = throughputPerHr > 0 ? (throughputStdPerHr / throughputPerHr) * 100 : 0;
+  const randomnessLabel =
+    randomness === 'deterministic'
+      ? 'Deterministic mean SMV'
+      : randomness === 'paper-fits'
+        ? 'Paper-fitted distributions'
+        : 'Synthetic ±25 % triangular';
 
   return (
     <div
@@ -893,9 +1204,29 @@ function ValidationResult({
           </div>
         </div>
         <div style={{ fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
-          mean {throughputPerHr.toFixed(1)} pcs/hr
+          mean {throughputPerHr.toFixed(1)} ± {throughputStdPerHr.toFixed(1)} pcs/hr
+          {throughputCi95PerHr > 0 && (
+            <> · 95 % CI ±{throughputCi95PerHr.toFixed(1)}</>
+          )}
+          {cvPct > 0 && <> · CV {cvPct.toFixed(1)} %</>}
           {bottleneckName && <> · ⚠ bottleneck: {bottleneckName}</>}
         </div>
+      </div>
+
+      <div
+        style={{
+          display: 'flex',
+          flexWrap: 'wrap',
+          gap: 10,
+          marginBottom: 10,
+          fontFamily: SW_FONTS.mono,
+          fontSize: 10,
+          letterSpacing: '1px',
+        }}
+      >
+        <Pill label="DIST" value={randomnessLabel} />
+        <Pill label="SEED" value={seedMode === 'fixed' ? 'Fixed · reproducible' : 'Random · unique'} />
+        <Pill label="N" value={`${replications} replication${replications === 1 ? '' : 's'}`} />
       </div>
 
       <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
@@ -944,12 +1275,32 @@ function ValidationResult({
       </table>
 
       <div style={{ marginTop: 10, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.55 }}>
-        Stitchworks uses the mean SMV per op (deterministic) — the paper fitted
-        per-op stochastic distributions (TRIA / NORM / BETA / WEIB / LOGN /
-        ERLA). Small drift is expected; large drift means the graph layout or
-        operator pool is mis-sized.
+        {randomness === 'deterministic'
+          ? 'Deterministic mode: every operation runs at its mean SMV with a constant arrival interval. Use this baseline to isolate layout / operator-pool problems before turning on stochastic service.'
+          : randomness === 'paper-fits'
+            ? 'Stochastic mode: Stitchworks samples each operation\'s cycle from the paper\'s fitted distribution (StatFit notes parsed at build time) and uses exponential Poisson arrivals at the Source. The σ above is the across-replication spread; the 95 % CI is a Monte-Carlo bound on the mean — drift outside the CI means a true model mismatch, not just RNG noise.'
+            : 'Synthetic mode: every operation runs through a ±25 % triangular around its mean SMV (AnyLogic\'s default Service shape, Big Book Ch. 15.1). Use this when the paper does not publish per-op fits.'}
       </div>
     </div>
+  );
+}
+
+function Pill({ label, value }: { label: string; value: string }) {
+  return (
+    <span
+      style={{
+        display: 'inline-flex',
+        alignItems: 'center',
+        gap: 6,
+        padding: '4px 8px',
+        background: SW_COLORS.paper,
+        border: `1px solid ${SW_COLORS.line}`,
+        borderRadius: 4,
+      }}
+    >
+      <span style={{ color: SW_COLORS.muted, fontWeight: 700 }}>{label}</span>
+      <span style={{ color: SW_COLORS.ink, fontWeight: 700, letterSpacing: 0 }}>{value}</span>
+    </span>
   );
 }
 

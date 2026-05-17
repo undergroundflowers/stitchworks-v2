@@ -38,6 +38,7 @@ import {
   type PmlBlockKind,
 } from '../domain/pml';
 import { MinHeap, mulberry32 } from './priority-queue';
+import { sample as sampleDist, type ServiceDist } from './distributions';
 
 // ============================================================================
 // PUBLIC API
@@ -295,6 +296,11 @@ interface Agent {
   id: number;
   bornAt: number; // sim minutes
   pieces: number;
+  /** Cycle time drawn when the agent entered service at the current block.
+   *  Set by `drawCycle` and read by `serviceEnd` so the busy accounting
+   *  matches the actual scheduled duration. Stays undefined for agents
+   *  that never entered a time-based block. */
+  cycleMin?: number;
 }
 
 /** All the precomputed routing for a block — output port → list of next
@@ -352,10 +358,19 @@ interface BlockState {
   /** Count of in-service agents at any moment (Service / Delay / MoveTo /
    *  Conveyor — anything that holds an agent for a cycle). */
   inService: number;
-  /** Service-only: cycle in MINUTES per agent. Cached at build. */
+  /** Service-only: deterministic cycle in MINUTES per agent. Used as a
+   *  fallback when `cycleDist` is undefined. Cached at build. */
   cycleMin: number;
-  /** Source-only: arrival interval in MINUTES. */
+  /** Service / Delay / Hold / Conveyor / MoveTo — optional cycle-time
+   *  distribution. When set, the engine samples per agent instead of
+   *  using `cycleMin`. AnyLogic-style stochastic service time. */
+  cycleDist: ServiceDist | undefined;
+  /** Source-only: deterministic interval in MINUTES used as a fallback. */
   arrivalIntervalMin: number;
+  /** Source-only: optional inter-arrival distribution. When set, the engine
+   *  draws each gap from this distribution. Matches AnyLogic's
+   *  exponential-by-default Source semantics. */
+  arrivalDist: ServiceDist | undefined;
   /** SelectOutput-only: pass probability 0..1. */
   passProb: number;
   /** Batch-only: target batch size (agent count). */
@@ -376,17 +391,29 @@ interface BlockState {
 // translate the resolved record into the engine's preferred units
 // (minutes for time, capacity counts).
 
-/** Service cycle time in MINUTES per agent. */
+/** Service cycle time in MINUTES per agent (deterministic fallback). */
 function cycleMinFor(ws: Workstation): number {
   const r = getBlockParams(ws);
   return Math.max(0, r.cycleS) / 60;
 }
 
-/** Source arrival interval in MINUTES per agent. */
+/** Service / Delay cycle distribution if set; undefined ⇒ engine falls
+ *  back to the deterministic `cycleMin`. */
+function cycleDistFor(ws: Workstation): ServiceDist | undefined {
+  return getBlockParams(ws).cycleDist;
+}
+
+/** Source arrival interval in MINUTES per agent (deterministic fallback). */
 function arrivalIntervalFor(ws: Workstation): number {
   const r = getBlockParams(ws);
   if (!r.sourceRatePerHr || r.sourceRatePerHr <= 0) return 1;
   return 60 / r.sourceRatePerHr;
+}
+
+/** Source inter-arrival distribution if set; undefined ⇒ engine uses the
+ *  deterministic interval. */
+function arrivalDistFor(ws: Workstation): ServiceDist | undefined {
+  return getBlockParams(ws).arrivalDist;
 }
 
 /** SelectOutput pass probability 0..1. */
@@ -443,7 +470,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       busyMin: 0,
       inService: 0,
       cycleMin: cycleMinFor(ws),
+      cycleDist: cycleDistFor(ws),
       arrivalIntervalMin: arrivalIntervalFor(ws),
+      arrivalDist: arrivalDistFor(ws),
       passProb: passProbFor(ws),
       batchSize: batchSizeFor(ws),
       servers: Math.max(1, Math.round(getBlockParams(ws).servers)),
@@ -504,9 +533,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // ── Event queue ────────────────────────────────────────────────────────────
   const pq = new MinHeap<Event>((a, b) => a.time - b.time);
 
-  // Schedule first arrival at every Source.
+  // Schedule first arrival at every Source. When the Source has an
+  // `arrivalDist` set (e.g. exponential), draw the first gap from it so
+  // the run isn't biased by a deterministic warm-up. This matches AnyLogic's
+  // default behaviour for a stochastic Source.
   for (const src of sources) {
-    pq.push({ time: src.arrivalIntervalMin, kind: 'sourceTick', wsId: src.ws.id });
+    pq.push({ time: drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
   }
   // Schedule periodic snapshot events so we can hand LiveSim a timeseries
   // it can play back. Sampling at t=0 is recorded synchronously below.
@@ -539,6 +571,27 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // Initial sample at t=0 so the timeline doesn't start empty.
   if (samplePeriodMin > 0) takeSample(0);
 
+  /**
+   * Draw a per-agent cycle time for a Service / Delay / Hold / Conveyor /
+   * MoveTo block. Uses the authored `cycleDist` when set, otherwise the
+   * deterministic `cycleMin`. AnyLogic-equivalent Service block sampling.
+   */
+  function drawCycle(b: BlockState): number {
+    if (b.cycleDist) return Math.max(1e-6, sampleDist(b.cycleDist, rng));
+    return Math.max(0, b.cycleMin);
+  }
+
+  /**
+   * Draw a per-arrival inter-arrival time for a Source block. Uses the
+   * authored `arrivalDist` when set, otherwise the deterministic
+   * `arrivalIntervalMin`. Matches AnyLogic Source's "Arrivals defined by"
+   * Rate / Interarrival time switch.
+   */
+  function drawArrivalGap(b: BlockState): number {
+    if (b.arrivalDist) return Math.max(1e-6, sampleDist(b.arrivalDist, rng));
+    return Math.max(0, b.arrivalIntervalMin);
+  }
+
   /** Update a dept-pool's busy-unit-minute accumulator before mutating busy. */
   function bumpPoolAccum(pool: DeptPool, now: number): void {
     pool.cumBusyUnitMin += pool.busy * (now - pool.lastChangeAt);
@@ -566,7 +619,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     }
     const a = b.queue.shift()!;
     b.inService += 1;
-    pq.push({ time: now + b.cycleMin, kind: 'serviceEnd', wsId: b.ws.id, agentId: a.id });
+    // Sample a per-agent cycle so the busy-time accounting at `serviceEnd`
+    // sees the same draw that scheduled this completion. Stash on the agent
+    // record so it survives the heap round-trip.
+    const cycle = drawCycle(b);
+    a.cycleMin = cycle;
+    pq.push({ time: now + cycle, kind: 'serviceEnd', wsId: b.ws.id, agentId: a.id });
     // Track in-flight agent so serviceEnd can release it. We stuff the
     // agent into a side-table keyed by id; for v1 we just keep its bornAt
     // on the agent record itself which we still have here.
@@ -630,8 +688,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // Time-based pass-through — hold the agent for one cycle, then
         // forward. No resource binding (use Service if you need one).
         b.inService += 1;
+        const cycle = drawCycle(b);
+        agent.cycleMin = cycle;
         inFlightAgents.set(agent.id, agent);
-        pq.push({ time: now + b.cycleMin, kind: 'serviceEnd', wsId: b.ws.id, agentId: agent.id });
+        pq.push({ time: now + cycle, kind: 'serviceEnd', wsId: b.ws.id, agentId: agent.id });
         return;
       }
       case 'Hold':
@@ -831,8 +891,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       // Source has no inputs but is the entry point — emit on its sole
       // output. emitOnPort handles outflow/pieces accounting.
       emitOnPort(src, 'out', agent, now);
-      // Schedule next tick.
-      pq.push({ time: now + src.arrivalIntervalMin, kind: 'sourceTick', wsId: src.ws.id });
+      // Schedule next tick. Stochastic when `arrivalDist` is set, otherwise
+      // a constant interval (the legacy v1 behaviour).
+      pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
       continue;
     }
 
@@ -841,8 +902,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       if (!b) continue;
       const a = inFlightAgents.get(e.agentId);
       inFlightAgents.delete(e.agentId);
+      // Credit the SAMPLED cycle (stashed on the agent) when stochastic, the
+      // deterministic `b.cycleMin` otherwise. Keeps utilisation honest under
+      // stochastic service.
+      const elapsed = a?.cycleMin ?? b.cycleMin;
       if (b.kind === 'Service') {
-        b.busyMin += b.cycleMin;
+        b.busyMin += elapsed;
         b.inService = Math.max(0, b.inService - 1);
         const pool = deptPools.get(b.ws.deptId);
         if (pool) {
@@ -854,7 +919,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       } else if (b.kind === 'Delay' || b.kind === 'MoveTo' || b.kind === 'Conveyor') {
         // Resource-free time-based blocks. Agent simply leaves on its first
         // output port when the cycle elapses.
-        b.busyMin += b.cycleMin;
+        b.busyMin += elapsed;
         b.inService = Math.max(0, b.inService - 1);
         if (a) emitOnFirstOutput(b, a, now);
       }

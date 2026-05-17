@@ -33,6 +33,11 @@ import {
   makeWorkstation,
 } from './twin';
 import { defaultPropsFor } from './iso';
+import {
+  distFromOpNotes,
+  syntheticTriangular,
+  type ServiceDist,
+} from '../simulation/distributions';
 
 // ============================================================================
 // MACHINE CODE → ISO CATALOG ID
@@ -74,6 +79,20 @@ function catalogForMachine(code: string): string {
 
 export type ReferenceVariant = 'baseline' | 'proposed';
 
+/**
+ * How the builder attaches per-operation variability.
+ *
+ *   - 'deterministic' — every Service runs at the mean SMV. Source uses a
+ *     constant inter-arrival interval. Matches the pre-randomness engine.
+ *   - 'paper-fits'    — when the paper's StatFit-style notes are present
+ *     (e.g. `TRIA(0.28, 0.313, 0.46)`, `0.5 + WEIB(...)`), parse them and
+ *     use them as the Service-cycle distribution. Falls back to a ±25 %
+ *     triangular when notes are absent. Source is exponential (Poisson).
+ *   - 'synthetic'     — every op gets a ±25 % triangular around its mean
+ *     SMV regardless of notes, useful for papers that don't publish fits.
+ */
+export type ReferenceRandomness = 'deterministic' | 'paper-fits' | 'synthetic';
+
 export interface BuildReferenceTwinOpts {
   /** Which top-level variant from the paper to build. Defaults to 'baseline'. */
   variant?: ReferenceVariant;
@@ -83,6 +102,26 @@ export interface BuildReferenceTwinOpts {
   scenarioId?: string;
   /** Override the twin name. Defaults to "<paper title> · <variant>". */
   name?: string;
+  /**
+   * Stochastic mode. Defaults to `'paper-fits'` so reproducing a paper
+   * automatically uses its published distributions when available. Pass
+   * `'deterministic'` to recover the legacy mean-SMV behaviour for an
+   * A/B comparison.
+   */
+  randomness?: ReferenceRandomness;
+}
+
+/**
+ * Resolve the per-operation cycle distribution for a Service block,
+ * honouring the requested randomness mode and the paper's published fits.
+ * Returns undefined when the engine should fall back to deterministic
+ * service (constant `cycleS`).
+ */
+function resolveOpDist(op: Operation, mode: ReferenceRandomness): ServiceDist | undefined {
+  if (mode === 'deterministic') return undefined;
+  const parsed = mode === 'paper-fits' ? distFromOpNotes(op.notes) : null;
+  if (parsed) return parsed;
+  return syntheticTriangular(op.smv);
 }
 
 /** Resolve which set of paper KPIs the caller is asking for, given the
@@ -128,6 +167,10 @@ export function buildReferenceTwin(
   const operatorCount = resolved.operators;
   const scenario = resolved.scenario;
   const totalSmv = model.garmentTemplate.totalSmv;
+  // Default to the paper's published distributions when present. Pass
+  // `randomness: 'deterministic'` from the Reference Models page to compare
+  // against the legacy mean-SMV engine.
+  const randomness: ReferenceRandomness = opts.randomness ?? 'paper-fits';
 
   const now = new Date().toISOString();
 
@@ -196,11 +239,24 @@ export function buildReferenceTwin(
   });
   wsSource.block = {
     kind: 'Source',
-    params: { sourceRatePerHr, piecesPerAgent: 1 },
+    params: {
+      sourceRatePerHr,
+      piecesPerAgent: 1,
+      // AnyLogic-default Poisson arrivals when stochastic, constant interval
+      // otherwise. The exponential's mean matches the deterministic gap so
+      // the offered load stays consistent across modes.
+      arrivalDist:
+        randomness === 'deterministic'
+          ? undefined
+          : { kind: 'exp', mean: 60 / Math.max(0.001, sourceRatePerHr) },
+    },
   };
   wsSource.operation = {
     ...wsSource.operation,
-    freeText: `${sourceRatePerHr} pcs/hr · seeds the line`,
+    freeText:
+      randomness === 'deterministic'
+        ? `${sourceRatePerHr} pcs/hr · deterministic interval`
+        : `${sourceRatePerHr} pcs/hr · exponential (Poisson) arrivals`,
   };
   workstations.push(wsSource);
 
@@ -261,11 +317,13 @@ export function buildReferenceTwin(
         ? `${i + 1}. ${op.name} (×${stationServers})`
         : `${i + 1}. ${op.name}`,
     });
+    const cycleDist = resolveOpDist(op, randomness);
     ws.block = {
       kind: 'Service',
       params: {
         cycleS: Math.max(1, Math.round(op.smv * 60)),
         servers: stationServers,
+        cycleDist,
       },
     };
     ws.operation = {
@@ -649,7 +707,7 @@ export function buildReferenceFactoryTwin(
     notes:
       'Multi-line showcase factory · auto-built from every reference paper ' +
       'with an enumerated operation bulletin. Each line carries its own ' +
-      'Source → ops → Sink pipeline and operator pool sized to the paper.',
+      'Source → operations → Sink pipeline and operator pool sized to the paper.',
   };
 }
 
