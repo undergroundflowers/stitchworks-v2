@@ -24,6 +24,7 @@ import { ReferenceModelsPage } from './pages/ReferenceModels';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { QueueIndexPage } from './pages/QueueIndex';
 import { QueueAnalyticsPage } from './pages/QueueAnalytics';
+import { PilotStudyPage } from './pages/PilotStudy';
 
 /**
  * App shell: top bar + route outlet, vibe-driven theming, the floating
@@ -148,6 +149,8 @@ export default function App() {
               redirects there so old links and deep-links still resolve. */}
           <Route path="/assets" element={<Navigate to="/resources?tab=assets" replace />} />
           <Route path="/reference" element={<ReferenceModelsPage />} />
+          {/* Pilot Factory 1.0 · line replacement study */}
+          <Route path="/pilot" element={<PilotStudyPage />} />
         </Routes>
       </div>
 

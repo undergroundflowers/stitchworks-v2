@@ -40,6 +40,12 @@ export interface AggregateKpis {
   replications: ReplicationResult[];
   /** History from the first replication so the page can still chart output-over-time. */
   firstHistory: HistoryPoint[];
+  /** Replication-averaged history — same length as firstHistory, with each
+   *  field (produced, wip, throughputPerHr) averaged across all N runs at
+   *  the matching sample index. With N=1 this is identical to firstHistory.
+   *  Lets charts surface an expected-shape curve instead of a single
+   *  potentially-noisy trace. */
+  averagedHistory: HistoryPoint[];
   /** Stations from the first replication. */
   firstStations: StationView[];
 }
@@ -58,6 +64,7 @@ export function runReplications(opts: {
   const samples: ReplicationResult[] = [];
   let firstHistory: HistoryPoint[] = [];
   let firstStations: StationView[] = [];
+  const allHistories: HistoryPoint[][] = [];
 
   for (let i = 0; i < n; i++) {
     const sim = new Sim({ ...config, randomSeed: config.randomSeed + i });
@@ -67,6 +74,7 @@ export function runReplications(opts: {
       firstHistory = snap.history;
       firstStations = snap.stations;
     }
+    allHistories.push(snap.history);
     // Efficiency = SAM consumed / available operator minutes.
     // ASSUMES: (a) SMV is per-piece (engine now enforces this in
     // beginService, where bundle.pieces × per-piece SMV gives bundle
@@ -117,8 +125,37 @@ export function runReplications(opts: {
     bottleneckQueue:  median.bottleneckQueue,
     replications: samples,
     firstHistory,
+    averagedHistory: averageHistories(allHistories),
     firstStations,
   };
+}
+
+/**
+ * Pointwise average across N replication history series. All replications
+ * sample at the same cadence (engine fixed at every 5 sim-minutes), so we
+ * align by index up to the shortest series' length. With N=1 this returns
+ * the single series unchanged.
+ */
+function averageHistories(histories: HistoryPoint[][]): HistoryPoint[] {
+  if (histories.length === 0) return [];
+  if (histories.length === 1) return histories[0];
+  const minLen = histories.reduce((m, h) => Math.min(m, h.length), histories[0].length);
+  const out: HistoryPoint[] = [];
+  for (let i = 0; i < minLen; i++) {
+    let prod = 0, wip = 0, tput = 0;
+    for (const h of histories) {
+      prod += h[i].produced;
+      wip += h[i].wip;
+      tput += h[i].throughputPerHr;
+    }
+    out.push({
+      time: histories[0][i].time,
+      produced: prod / histories.length,
+      wip: wip / histories.length,
+      throughputPerHr: tput / histories.length,
+    });
+  }
+  return out;
 }
 
 function meanStd(values: number[]): { mean: number; std: number } {

@@ -398,6 +398,7 @@ export function buildReferenceTwin(
     gridW,
     gridH,
     departments,
+    lines: [],
     workstations,
     connectors,
     notes:
@@ -583,6 +584,7 @@ export function buildGarmentTwin(
     gridW,
     gridH,
     departments,
+    lines: [],
     workstations,
     connectors,
     notes: `Auto-built from garment template "${garment.name}" — ${ops.length} ops, total SMV ${totalSmv.toFixed(2)} min, ${operators} operators.`,
@@ -706,6 +708,7 @@ export function buildReferenceFactoryTwin(
     gridW,
     gridH,
     departments: allDepartments,
+    lines: [],
     workstations: allWorkstations,
     connectors: allConnectors,
     notes:
