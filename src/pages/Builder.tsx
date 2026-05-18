@@ -1486,78 +1486,13 @@ export function BuilderPage() {
           </div>
         )}
 
-        {/* Canvas-mode toggle — iso authoring vs dept-flow logic vs PML block diagram */}
-        <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }} title="Switch the canvas: ISO authoring · LOGIC dept-flow · PROCESS PML block diagram with input/output ports">
-          {(['iso', 'logic', 'process'] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setCanvasMode(m)}
-              style={{
-                background: canvasMode === m ? SW_COLORS.brand : 'transparent',
-                color: canvasMode === m ? '#fff' : SW_COLORS.steel,
-                border: 'none',
-                padding: '6px 12px',
-                fontFamily: SW_FONTS.display,
-                fontSize: 10,
-                fontWeight: 900,
-                letterSpacing: '0.08em',
-                cursor: 'pointer',
-                borderRadius: 4,
-              }}
-            >
-              {m === 'iso' ? '◈ ISO' : m === 'logic' ? '⌬ LOGIC' : '⚙ PROCESS'}
-            </button>
-          ))}
-        </div>
+        {/* Canvas-mode toggle moved into the canvas overlay (top-center,
+            in line with the CONTROLS dropdown). See the absolute-positioned
+            block inside the canvas div below. */}
 
-        {/* Connect-flow tool — modal: pick source ws, then target ws */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 4,
-            background: SW_COLORS.paperDeep,
-            padding: 3,
-            borderRadius: 6,
-            border: `1px solid ${SW_COLORS.line}`,
-          }}
-          title="Draw a directed flow / operator / material link between two workstations"
-        >
-          <button
-            onClick={() => {
-              setDrop({ kind: 'none' });
-              setConnect((c) => ({ ...c, on: !c.on, fromWsId: null, fromPort: null }));
-            }}
-            style={{
-              background: connect.on ? SW_COLORS.brand : 'transparent',
-              color: connect.on ? '#fff' : SW_COLORS.steel,
-              border: 'none',
-              padding: '6px 12px',
-              fontFamily: SW_FONTS.display,
-              fontSize: 10,
-              fontWeight: 900,
-              letterSpacing: '0.08em',
-              cursor: 'pointer',
-              borderRadius: 4,
-            }}
-          >
-            ➜ CONNECT
-          </button>
-          {connect.on && (
-            <HudSelect
-              value={connect.kind}
-              onChange={(v) => setConnect((c) => ({ ...c, kind: v as ConnectorKind }))}
-              variant="light"
-              size="sm"
-              mono
-              minWidth={120}
-              options={[
-                { value: 'flow', label: 'FLOW' },
-                { value: 'operator', label: 'OPERATOR' },
-                { value: 'material', label: 'MATERIAL' },
-              ]}
-            />
-          )}
-        </div>
+        {/* Connect-flow tool moved into the canvas overlay (top-left,
+            in line with the canvas-mode toggle and CONTROLS dropdown).
+            See the absolute-positioned block inside the canvas div below. */}
 
         <button onClick={onExportJson} style={btnSec} title="Download the active twin as JSON">
           ⤓ EXPORT JSON
@@ -2213,6 +2148,105 @@ export function BuilderPage() {
         >
           <CountChip label="DEPTS" value={twin.departments.length} />
           <CountChip label="STATIONS" value={twin.workstations.length} />
+        </div>
+
+        {/* Top-left connect-flow tool — sits at the same vertical baseline
+            as the canvas-mode toggle and CONTROLS dropdown so the three
+            read as one row of overlays. */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 12,
+            left: 12,
+            zIndex: 6,
+            display: 'flex',
+            gap: 4,
+            background: SW_COLORS.paper + 'cc',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            padding: 3,
+            borderRadius: 6,
+            border: `1px solid ${SW_COLORS.line}`,
+          }}
+          title="Draw a directed flow / operator / material link between two workstations"
+        >
+          <button
+            onClick={() => {
+              setDrop({ kind: 'none' });
+              setConnect((c) => ({ ...c, on: !c.on, fromWsId: null, fromPort: null }));
+            }}
+            style={{
+              background: connect.on ? SW_COLORS.brand : 'transparent',
+              color: connect.on ? '#fff' : SW_COLORS.steel,
+              border: 'none',
+              padding: '6px 12px',
+              fontFamily: SW_FONTS.display,
+              fontSize: 10,
+              fontWeight: 900,
+              letterSpacing: '0.08em',
+              cursor: 'pointer',
+              borderRadius: 4,
+            }}
+          >
+            ➜ CONNECT
+          </button>
+          {connect.on && (
+            <HudSelect
+              value={connect.kind}
+              onChange={(v) => setConnect((c) => ({ ...c, kind: v as ConnectorKind }))}
+              variant="light"
+              size="sm"
+              mono
+              minWidth={120}
+              options={[
+                { value: 'flow', label: 'FLOW' },
+                { value: 'operator', label: 'OPERATOR' },
+                { value: 'material', label: 'MATERIAL' },
+              ]}
+            />
+          )}
+        </div>
+
+        {/* Top-center canvas-mode toggle — sits at the same vertical baseline
+            as the CONTROLS dropdown so the two read as one row of overlays. */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 12,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            zIndex: 6,
+            display: 'flex',
+            gap: 4,
+            background: SW_COLORS.paper + 'cc',
+            backdropFilter: 'blur(8px)',
+            WebkitBackdropFilter: 'blur(8px)',
+            padding: 3,
+            borderRadius: 6,
+            border: `1px solid ${SW_COLORS.line}`,
+          }}
+          title="Switch the canvas: ISO authoring · LOGIC dept-flow · PROCESS PML block diagram with input/output ports"
+        >
+          {(['iso', 'logic', 'process'] as const).map((m) => (
+            <button
+              key={m}
+              onClick={() => setCanvasMode(m)}
+              style={{
+                background: canvasMode === m ? SW_COLORS.brand : 'transparent',
+                color: canvasMode === m ? '#fff' : SW_COLORS.steel,
+                border: 'none',
+                padding: '6px 12px',
+                fontFamily: SW_FONTS.display,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.08em',
+                cursor: 'pointer',
+                borderRadius: 4,
+              }}
+            >
+              {m === 'iso' ? '◈ ISO' : m === 'logic' ? '⌬ LOGIC' : '⚙ PROCESS'}
+            </button>
+          ))}
         </div>
 
         {/* Top-right controls dropdown — keyboard / pointer shortcut reference */}
