@@ -11,7 +11,7 @@
  */
 
 import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
-import { Card, SectionHeader, Tag, ToggleGroup, Button, HudSelect } from '../components';
+import { SectionHeader, Tag, ToggleGroup, Button, HudSelect } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
 import {
   WorkstationSprite,

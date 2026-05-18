@@ -1042,10 +1042,11 @@ export const useProject = create<ProjectState>()(
         if (!snapshot || typeof snapshot !== 'object') return { ok: false, reason: 'Not an object' };
         const s = snapshot as Partial<ProjectState>;
         // Accept v1 and v2; v1 imports get default TimeSettings filled in.
-        if (s.schemaVersion !== 1 && s.schemaVersion !== 2) {
+        const sv = s.schemaVersion as number | undefined;
+        if (sv !== 1 && sv !== 2) {
           return {
             ok: false,
-            reason: `Schema version mismatch: file is v${s.schemaVersion}, app supports v1 or v2`,
+            reason: `Schema version mismatch: file is v${sv}, app supports v1 or v2`,
           };
         }
         set((cur) => ({

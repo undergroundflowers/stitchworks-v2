@@ -49,7 +49,7 @@ import {
   normalizeTwin,
   validateTwin,
 } from '../domain/twin';
-import type { PmlBlockOverride } from '../domain/pml';
+import type { PmlBlockOverride, PmlBlockParams } from '../domain/pml';
 
 export const TWIN_STORE_SCHEMA_VERSION = 4 as const;
 
@@ -89,6 +89,16 @@ export interface TwinState {
     position: Vec2;
     rotation?: Rotation;
     name?: string;
+    /** When set and `name` is not provided, the new workstation is auto-named
+     *  `${presetLabel} N` where N is the next free integer suffix in the
+     *  active twin. Drives the apparel-presets palette path so dropping three
+     *  Bundle sources yields "Bundle source 1 / 2 / 3" out of the box. */
+    presetLabel?: string;
+    /** Authored PML block params stamped onto the new workstation. Used by
+     *  the apparel presets to apply defaults at drop time (e.g. ratePerHr:30
+     *  for Bundle source). Ignored when the catalogId doesn't resolve to a
+     *  PML primitive. */
+    blockParams?: Partial<PmlBlockParams>;
   }) => string;
   updateWorkstation: (id: string, patch: Partial<Omit<Workstation, 'id'>>) => void;
   removeWorkstation: (id: string) => void;
@@ -286,7 +296,29 @@ export const useTwin = create<TwinState>()(
 
       // ── Workstations ───────────────────────────────────────────────────────
       addWorkstation: (input) => {
-        const ws = makeWorkstation(input);
+        // Auto-name based on preset label when the caller didn't supply one.
+        // Counts every workstation whose name starts with the same preset
+        // label so dropping multiple "Bundle source" blocks yields a clean
+        // 1, 2, 3, … sequence within the active twin.
+        let resolvedName = input.name;
+        if (!resolvedName && input.presetLabel) {
+          const active = selectActiveTwin(get());
+          const re = new RegExp(`^${input.presetLabel.replace(/[.*+?^${}()|[\\]\\\\]/g, '\\\\$&')}\\s+(\\d+)$`, 'i');
+          let max = 0;
+          for (const w of active.workstations) {
+            const m = re.exec(w.name);
+            if (m) max = Math.max(max, parseInt(m[1], 10));
+          }
+          resolvedName = `${input.presetLabel} ${max + 1}`;
+        }
+        const ws = makeWorkstation({
+          deptId: input.deptId,
+          catalogId: input.catalogId,
+          position: input.position,
+          rotation: input.rotation,
+          name: resolvedName,
+          blockParams: input.blockParams,
+        });
         set((s) =>
           updateActive(s, (twin) => ({
             ...twin,

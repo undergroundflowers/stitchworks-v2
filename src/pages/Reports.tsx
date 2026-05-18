@@ -184,7 +184,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     );
     const operatorsConfigured =
       pool && pool.block && pool.block.kind === 'ResourcePool'
-        ? (pool.block.params.capacity ?? 0)
+        ? (pool.block.params?.capacity ?? 0)
         : 0;
     const totalSmvMin = refModel.garmentTemplate.totalSmv;
     const isScenario = !!refModel.scenarios?.some(

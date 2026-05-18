@@ -3612,9 +3612,9 @@ function SimPmlCard({ block: b }: { block: PmlCardData }) {
         color: '#fff',
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 6 }}>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 14, fontWeight: 900, color: SW_COLORS.brand }}>
-          {b.spec.spec.glyph}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        <span style={{ display: 'inline-flex', color: SW_COLORS.brand }}>
+          <b.spec.spec.Icon size={16} color={SW_COLORS.brand} />
         </span>
         <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.06em', color: '#ffffffcc' }}>
           {b.spec.kind.toUpperCase()}

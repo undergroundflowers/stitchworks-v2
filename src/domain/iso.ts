@@ -14,6 +14,7 @@ import {
   type PmlBlockSpec,
   type PmlCategory,
 } from './pml';
+import type { PmlIconComponent } from '../assets/pml-icons';
 
 // ============================================================================
 // ISO PROJECTION
@@ -609,14 +610,15 @@ const PML_CAT_ACCENT: Record<PmlCategory, string> = {
 };
 
 /** Generic PML-block draw factory: a paper-coloured cuboid with a coloured
- *  top stripe and the kind's glyph painted on the top face. Used by every
- *  `pml_*` fixture so the iso canvas always shows the block's identity at
- *  a glance. */
-function pmlBlock(glyph: string, accent: string): IsoDrawFn {
+ *  top stripe and the kind's solid-filled SVG icon painted on the top
+ *  face. Used by every `pml_*` fixture so the iso canvas always shows
+ *  the block's identity at a glance. */
+function pmlBlock(Icon: PmlIconComponent, accent: string): IsoDrawFn {
   return ({ w, d, h }) => {
-    // Compute the top-face centroid for glyph placement.
+    // Compute the top-face centroid for icon placement.
     const c = isoCuboid(w, d, h);
     const topCenter = isoProj(w / 2, d / 2, h);
+    const iconSize = 26;
     return createElement(
       'g',
       null,
@@ -630,7 +632,7 @@ function pmlBlock(glyph: string, accent: string): IsoDrawFn {
         right: SW_PAL.paperShade,
       }),
       // Coloured stripe on the top edge (front-right ridge) so the
-      // category accent is visible without the glyph.
+      // category accent is visible without the icon.
       createElement('polygon', {
         points: ptsToStr([
           isoProj(0, 0, h),
@@ -654,20 +656,15 @@ function pmlBlock(glyph: string, accent: string): IsoDrawFn {
         stroke: accent,
         strokeWidth: 0.6,
       }),
-      // Glyph
-      createElement(
-        'text',
-        {
-          x: topCenter.sx,
-          y: topCenter.sy + 6,
-          textAnchor: 'middle',
-          fontFamily: 'ui-monospace, Menlo, monospace',
-          fontSize: 22,
-          fontWeight: 900,
-          fill: shade(accent, -0.45),
-        },
-        glyph,
-      ),
+      // Solid-filled SVG icon, nested as a child <svg>. Centered on the
+      // top-face centroid; vertical offset matches the previous text-baseline
+      // anchor so existing layouts stay put.
+      createElement(Icon, {
+        size: iconSize,
+        color: shade(accent, -0.45),
+        x: topCenter.sx - iconSize / 2,
+        y: topCenter.sy - iconSize / 2 + 2,
+      }),
       // Suppress unused-var warning — `c` exists for future face-decals.
       ((): null => { void c; return null; })(),
     );
@@ -1110,11 +1107,11 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
   ...(Object.values(PML_BLOCK_LIBRARY) as PmlBlockSpec[]).map<IsoFixture>((spec) => ({
     id: pmlFixtureId(spec.kind),
     cat: 'pml',
-    label: `${spec.glyph} ${spec.label}`,
+    label: spec.label,
     w: 2,
     d: 2,
     h: 1.2,
-    draw: pmlBlock(spec.glyph, PML_CAT_ACCENT[spec.category]),
+    draw: pmlBlock(spec.Icon, PML_CAT_ACCENT[spec.category]),
   })),
 ];
 

@@ -28,7 +28,6 @@ import {
   TWIN_SCHEMA_VERSION,
   newTwinId,
   newDeptId,
-  newWorkstationId,
   newConnectorId,
   makeWorkstation,
 } from './twin';

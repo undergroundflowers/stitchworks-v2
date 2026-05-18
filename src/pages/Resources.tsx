@@ -585,20 +585,6 @@ function cellInput(width: number): React.CSSProperties {
   };
 }
 
-function cellSelect(): React.CSSProperties {
-  return {
-    padding: '5px 6px',
-    border: `1px solid ${SW_COLORS.line}`,
-    borderRadius: 4,
-    fontFamily: SW_FONTS.mono,
-    fontSize: 11,
-    fontWeight: 600,
-    background: SW_COLORS.paper,
-    color: SW_COLORS.ink,
-    cursor: 'pointer',
-  };
-}
-
 // ── Skill matrix ────────────────────────────────────────────────────────────
 
 interface SkillMatrixPanelProps {

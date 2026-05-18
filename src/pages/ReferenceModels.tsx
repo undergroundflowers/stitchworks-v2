@@ -301,7 +301,7 @@ function ModelDetail({
 
       {/* Operations table */}
       <Card padding={0} style={{ overflow: 'hidden' }}>
-        <SectionHeader title="Operation bulletin" subtitle={`${sumOps} operations · total ${total.toFixed(2)} min`} />
+        <SectionHeader title="Operation bulletin" sub={`${sumOps} operations · total ${total.toFixed(2)} min`} />
         {sumOps === 0 ? (
           <div style={{ padding: 18, fontSize: 12, color: SW_COLORS.muted, fontStyle: 'italic' }}>
             This paper does not enumerate the {model.operationCount} operations in its

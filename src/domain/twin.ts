@@ -30,7 +30,11 @@ import {
   defaultPropsFor,
   type IsoFixtureProps,
 } from './iso';
-import { pmlKindFromFixtureId, type PmlBlockOverride } from './pml';
+import {
+  pmlKindFromFixtureId,
+  type PmlBlockOverride,
+  type PmlBlockParams,
+} from './pml';
 
 // ============================================================================
 // SCHEMA
@@ -507,13 +511,19 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
 }
 
 /** Build a workstation with sane lens defaults. The catalogue id must
- *  resolve — call sites are expected to pass a known fixture id. */
+ *  resolve — call sites are expected to pass a known fixture id.
+ *
+ *  `blockParams` lets the caller seed the PML block's authored parameters
+ *  at create time — used by the BLOCKS palette to apply apparel-preset
+ *  defaults (e.g. Bundle source → `ratePerHr: 30`). Ignored when the
+ *  catalogId doesn't resolve to a PML primitive. */
 export function makeWorkstation(input: {
   deptId: string;
   catalogId: string;
   position: Vec2;
   rotation?: Rotation;
   name?: string;
+  blockParams?: Partial<PmlBlockParams>;
 }): Workstation {
   const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === input.catalogId);
   const fallbackName = fixture?.label ?? input.catalogId;
@@ -554,7 +564,12 @@ export function makeWorkstation(input: {
       powerKw,
     },
     kpiTargets: {},
-    block: pmlKind ? { kind: pmlKind } : undefined,
+    block: pmlKind
+      ? {
+          kind: pmlKind,
+          ...(input.blockParams ? { params: { ...input.blockParams } } : {}),
+        }
+      : undefined,
   };
 }
 

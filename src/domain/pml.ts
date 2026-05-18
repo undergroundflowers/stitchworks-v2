@@ -1,3 +1,6 @@
+import { PML_ICONS, type PmlIconComponent } from '../assets/pml-icons';
+import { apparelLabelForKind } from './apparelPresets';
+
 /**
  * Process Modeling Library (PML) — block taxonomy adapted from AnyLogic's
  * Process Modeling Library, with apparel-domain flavouring.
@@ -100,8 +103,16 @@ export interface PmlBlockSpec {
   label: string;
   /** One-line plain-English description of the block's behaviour. */
   blurb: string;
-  /** Single Unicode glyph used as the block's icon on the canvas + palette. */
+  /** Single Unicode glyph used as a fallback in text-only contexts
+   *  (project-file snapshots, console logging). UI surfaces should
+   *  prefer the `Icon` React component below — it renders a proper
+   *  solid-filled SVG glyph that tints by the caller's colour. */
   glyph: string;
+  /** Solid-filled SVG icon component for the block kind. Same component
+   *  is consumed by the palette, inspector, process-diagram node header,
+   *  live-sim card, and iso-canvas top-face decal — the colour comes
+   *  from the host surface via the `color` prop. */
+  Icon: PmlIconComponent;
   category: PmlCategory;
   /** Fixed input ports for this kind. Some kinds (Combine, Assembler) have
    *  variable arity — the spec lists the *minimum* ports; the workstation
@@ -123,6 +134,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Source',
     blurb: 'Generates agents (orders, fabric rolls, garments) on a schedule.',
     glyph: '▶',
+    Icon: PML_ICONS.Source,
     category: 'lifecycle',
     inputs: [],
     outputs: [OUT],
@@ -133,6 +145,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Sink',
     blurb: 'Destroys agents that complete the flow (shipped, scrapped).',
     glyph: '■',
+    Icon: PML_ICONS.Sink,
     category: 'lifecycle',
     inputs: [IN],
     outputs: [],
@@ -145,6 +158,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Queue',
     blurb: 'Holds agents in arrival order (FIFO bundle buffer, WIP rack).',
     glyph: '⫶',
+    Icon: PML_ICONS.Queue,
     category: 'buffer',
     inputs: [IN],
     outputs: [OUT],
@@ -155,6 +169,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Delay',
     blurb: 'Pure processing time without consuming a resource (cure, set).',
     glyph: '◷',
+    Icon: PML_ICONS.Delay,
     category: 'buffer',
     inputs: [IN],
     outputs: [OUT],
@@ -165,6 +180,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Hold',
     blurb: 'Blocks/unblocks flow on a condition (line stop, shift change).',
     glyph: '✋',
+    Icon: PML_ICONS.Hold,
     category: 'buffer',
     inputs: [IN],
     outputs: [OUT],
@@ -175,6 +191,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Wait',
     blurb: 'Holds an agent indefinitely until released by code.',
     glyph: '⏸',
+    Icon: PML_ICONS.Wait,
     category: 'buffer',
     inputs: [IN],
     outputs: [OUT],
@@ -187,6 +204,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Service',
     blurb: 'Seize → Delay → Release. The bread-and-butter sewing/iron op.',
     glyph: '⚙',
+    Icon: PML_ICONS.Service,
     category: 'service',
     inputs: [IN],
     outputs: [OUT],
@@ -197,6 +215,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Seize',
     blurb: 'Claims units of a resource pool (operator, mechanic, machine).',
     glyph: '⤓',
+    Icon: PML_ICONS.Seize,
     category: 'service',
     inputs: [IN],
     outputs: [OUT],
@@ -207,6 +226,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Release',
     blurb: 'Returns previously-seized resource units to the pool.',
     glyph: '⤒',
+    Icon: PML_ICONS.Release,
     category: 'service',
     inputs: [IN],
     outputs: [OUT],
@@ -217,6 +237,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'ResourcePool',
     blurb: 'A pool of operators / mechanics / machines that Services draw on.',
     glyph: '☻',
+    Icon: PML_ICONS.ResourcePool,
     category: 'service',
     inputs: [],
     outputs: [],
@@ -229,6 +250,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'SelectOutput',
     blurb: '2-way router on a condition. The QC pass/fail block.',
     glyph: '⊻',
+    Icon: PML_ICONS.SelectOutput,
     category: 'routing',
     inputs: [IN],
     outputs: [
@@ -242,6 +264,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'SelectOutput5',
     blurb: '5-way router (size grading: S / M / L / XL / XXL).',
     glyph: '⋔',
+    Icon: PML_ICONS.SelectOutput5,
     category: 'routing',
     inputs: [IN],
     outputs: [
@@ -260,6 +283,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Batch',
     blurb: 'Collects N agents into a bundle agent (cut → bundle).',
     glyph: '⊞',
+    Icon: PML_ICONS.Batch,
     category: 'batch',
     inputs: [IN],
     outputs: [OUT],
@@ -270,6 +294,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Unbatch',
     blurb: 'Releases batched agents one-by-one (bundle → pieces).',
     glyph: '⊟',
+    Icon: PML_ICONS.Unbatch,
     category: 'batch',
     inputs: [IN],
     outputs: [OUT],
@@ -280,6 +305,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Combine',
     blurb: 'Merges two streams into one agent (front + back panels).',
     glyph: '⤧',
+    Icon: PML_ICONS.Combine,
     category: 'batch',
     inputs: [
       { id: 'in1', label: 'a', kind: 'agent' },
@@ -293,6 +319,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Match',
     blurb: 'Pairs agents from two streams by a key (size match, colour match).',
     glyph: '⤭',
+    Icon: PML_ICONS.Match,
     category: 'batch',
     inputs: [
       { id: 'in1', label: 'a', kind: 'agent' },
@@ -309,6 +336,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Assembler',
     blurb: 'Fixed-recipe assembly of N parts into one agent (full garment).',
     glyph: '⊕',
+    Icon: PML_ICONS.Assembler,
     category: 'batch',
     inputs: [
       { id: 'parts1', label: 'body',    kind: 'agent' },
@@ -323,6 +351,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Split',
     blurb: 'Duplicates an agent into N copies (panel-cut: 1 ply → N pieces).',
     glyph: '⤬',
+    Icon: PML_ICONS.Split,
     category: 'batch',
     inputs: [IN],
     outputs: [
@@ -338,6 +367,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'MoveTo',
     blurb: 'Transports the agent to a target node (forklift, AGV, runner).',
     glyph: '➜',
+    Icon: PML_ICONS.MoveTo,
     category: 'movement',
     inputs: [IN],
     outputs: [OUT],
@@ -348,6 +378,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
     label: 'Conveyor',
     blurb: 'Continuous belt — fixed speed, fixed length, FIFO order.',
     glyph: '═',
+    Icon: PML_ICONS.Conveyor,
     category: 'movement',
     inputs: [IN],
     outputs: [OUT],
@@ -544,6 +575,11 @@ export interface PmlBlockOverride {
   inputs?: PmlPort[];
   outputs?: PmlPort[];
   params?: PmlBlockParams;
+  /** Free-form position on the PROCESS canvas, in SVG pixels. Independent
+   *  of `workstation.position` (which is iso-world cells). Absent → the
+   *  process canvas auto-lays out by department swim-lane. Authored by
+   *  free-form drag in the process view. Phase 2. */
+  processPos?: { x: number; y: number };
 }
 
 /** Minimal structural shape `getBlockSpec` reads. Workstation satisfies it
@@ -597,8 +633,10 @@ export function getBlockKind(subject: BlockSubject): PmlBlockKind {
 /**
  * Apparel-flavoured display label for a block on a workstation. Catalog-id
  * driven so the apparel context (e.g. "Iron op" vs "Sewing op") survives
- * even after the user overrides the block kind. Falls back to the PML
- * library label when the catalog id has no apparel-specific name.
+ * even after the user overrides the block kind. Falls back to the apparel
+ * preset label for the block's PML kind so a BLOCKS-palette drop reads
+ * "Bundle source" / "Operation station" / etc. — matching the palette
+ * vocabulary — even when no catalog-specific override matches.
  */
 export function apparelRoleFor(subject: BlockSubject): string {
   switch (subject.catalogId) {
@@ -621,7 +659,7 @@ export function apparelRoleFor(subject: BlockSubject): string {
     case 'op_helper':       return 'Helper pool';
     case 'op_super':        return 'Supervisor';
   }
-  return getBlockKind(subject);
+  return apparelLabelForKind(getBlockKind(subject));
 }
 
 // ============================================================================

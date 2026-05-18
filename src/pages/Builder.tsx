@@ -28,6 +28,7 @@ import {
 import { useNavigate } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { HudSelect, StageOverlay } from '../components';
+import { ProcessCodeView } from '../components/ProcessCodeView';
 import {
   ISO_FIXTURE_CATALOG,
   APPAREL_CATEGORIES,
@@ -57,7 +58,6 @@ import {
   inferBlockKindFromCatalog,
   pmlFixtureId,
   PML_BLOCK_LIBRARY,
-  PML_CATEGORIES,
   PARAM_FIELDS_BY_KIND,
   SELECTABLE_BLOCK_KINDS,
   type ParamFieldSpec,
@@ -65,9 +65,15 @@ import {
   type PmlBlockKind,
   type PmlBlockOverride,
   type PmlBlockParams,
-  type PmlCategory,
   type PmlPort,
 } from '../domain/pml';
+import {
+  APPAREL_BLOCK_GROUPS,
+  apparelPresetsInGroup,
+  findApparelPreset,
+  type ApparelBlockPreset,
+  type ApparelPresetId,
+} from '../domain/apparelPresets';
 import { buildReferenceFactoryTwin } from '../domain/reference-twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
@@ -86,7 +92,15 @@ type CanvasMode = 'iso' | 'logic' | 'process';
 type DropTool =
   | { kind: 'none' }
   | { kind: 'dept'; preset: DeptPreset }
-  | { kind: 'ws'; catalogId: string };
+  | {
+      kind: 'ws';
+      catalogId: string;
+      /** Apparel preset id the user dragged from the BLOCKS palette, when
+       *  applicable. Drives default-param stamping + auto-naming at drop
+       *  time. Absent for drops originating from the STATIONS palette
+       *  (physical-fixture drops). */
+      presetId?: import('../domain/apparelPresets').ApparelPresetId;
+    };
 
 interface DeptPreset {
   kind: string;
@@ -504,10 +518,15 @@ export function BuilderPage() {
         // Outside any department — clear the tool but don't drop.
         return;
       }
+      // When the drop originated from the BLOCKS palette (apparel preset),
+      // stamp the preset's default params + auto-name with its label.
+      const preset = drop.presetId ? findApparelPreset(drop.presetId) : null;
       const id = addWorkstation({
         deptId: dept.id,
         catalogId: drop.catalogId,
         position: { x: hoverCell.x, y: hoverCell.y },
+        presetLabel: preset?.label,
+        blockParams: preset?.defaultParams,
       });
       setSelected({ kind: 'ws', id });
       setDrop({ kind: 'none' });
@@ -1298,7 +1317,7 @@ export function BuilderPage() {
         onPaletteSearch={setPaletteSearch}
         drop={drop}
         onPickDept={(preset) => setDrop({ kind: 'dept', preset })}
-        onPickWs={(catalogId) => setDrop({ kind: 'ws', catalogId })}
+        onPickWs={(catalogId, presetId) => setDrop({ kind: 'ws', catalogId, presetId })}
       />
 
       {/* LEFT SPLITTER (palette ↔ canvas) */}
@@ -1660,7 +1679,10 @@ interface PaletteProps {
   onPaletteSearch: (q: string) => void;
   drop: DropTool;
   onPickDept: (preset: DeptPreset) => void;
-  onPickWs: (catalogId: string) => void;
+  /** `presetId` carries the apparel preset identity for BLOCKS-palette
+   *  drops, enabling default-param stamping + auto-naming. Other palette
+   *  tabs (DEPTS, STATIONS) call this without a presetId. */
+  onPickWs: (catalogId: string, presetId?: ApparelPresetId) => void;
 }
 
 function Palette(props: PaletteProps) {
@@ -1696,7 +1718,7 @@ function Palette(props: PaletteProps) {
               letterSpacing: '0.08em',
             }}
           >
-            {t === 'dept' ? 'DEPTS' : t === 'ws' ? 'STATIONS' : '⚙ PROCESS'}
+            {t === 'dept' ? 'DEPTS' : t === 'ws' ? 'STATIONS' : 'BLOCKS'}
           </button>
         ))}
       </div>
@@ -1830,26 +1852,21 @@ function Palette(props: PaletteProps) {
   );
 }
 
-/** PROCESS palette pane — pure PML primitives, grouped by category. Each
- *  card drops a workstation that auto-stamps `block.kind` to match the
- *  fixture id (see `makeWorkstation` in domain/twin.ts). */
+/** BLOCKS palette pane — apparel-named block presets, grouped by apparel
+ *  concept (Flow / Stations / Buffers / Routing / Resources / Bundling /
+ *  Movement). Each card drops a workstation whose `block.kind` is the
+ *  preset's underlying PML primitive. The user never sees raw PML
+ *  vocabulary unless they open the Inspector or the Code view.
+ *
+ *  Tint is driven by the *underlying PML category* (consistent with the
+ *  PROCESS canvas) but the labels + groupings are apparel-domain. */
 function PmlPalettePane({
   drop,
   onPickWs,
 }: {
   drop: DropTool;
-  onPickWs: (catalogId: string) => void;
+  onPickWs: (catalogId: string, presetId?: ApparelPresetId) => void;
 }) {
-  // Group block specs by PML category, preserving the canonical category order.
-  const byCategory = useMemo(() => {
-    const map = new Map<PmlCategory, typeof PML_BLOCK_LIBRARY[PmlBlockKind][]>();
-    for (const cat of PML_CATEGORIES) map.set(cat.id, []);
-    for (const spec of Object.values(PML_BLOCK_LIBRARY)) {
-      map.get(spec.category)?.push(spec);
-    }
-    return map;
-  }, []);
-
   return (
     <div style={{ flex: 1, overflow: 'auto', padding: 8, display: 'flex', flexDirection: 'column', gap: 10 }}>
       <div
@@ -1863,16 +1880,16 @@ function PmlPalettePane({
           lineHeight: 1.4,
         }}
       >
-        Drop a pure PML primitive. Each block lands with its kind + ports
-        pre-stamped — wire them in the <strong>PROCESS</strong> canvas
-        view by clicking port dots.
+        Drop a block to model one piece of the floor — a bundle source,
+        an op station, a buffer, an inspection gate. Wire them in the
+        <strong> PROCESS</strong> view by clicking port dots.
       </div>
 
-      {PML_CATEGORIES.map((cat) => {
-        const specs = byCategory.get(cat.id) ?? [];
-        if (specs.length === 0) return null;
+      {APPAREL_BLOCK_GROUPS.map((group) => {
+        const presets = apparelPresetsInGroup(group.id);
+        if (presets.length === 0) return null;
         return (
-          <div key={cat.id}>
+          <div key={group.id}>
             <div
               style={{
                 ...sectionLabel,
@@ -1881,22 +1898,24 @@ function PmlPalettePane({
                 justifyContent: 'space-between',
                 alignItems: 'baseline',
               }}
+              title={group.blurb}
             >
-              <span>{cat.label}</span>
+              <span>{group.label}</span>
               <span style={{ fontSize: 9, color: SW_COLORS.muted, fontWeight: 700 }}>
-                {specs.length}
+                {presets.length}
               </span>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
-              {specs.map((spec) => {
-                const fixtureId = pmlFixtureId(spec.kind);
+              {presets.map((preset: ApparelBlockPreset) => {
+                const baseSpec = PML_BLOCK_LIBRARY[preset.baseKind];
+                const fixtureId = pmlFixtureId(preset.baseKind);
                 const armed = drop.kind === 'ws' && drop.catalogId === fixtureId;
-                const tint = PML_CATEGORY_TINT[spec.category];
+                const tint = PML_CATEGORY_TINT[baseSpec.category];
                 return (
                   <button
-                    key={spec.kind}
-                    onClick={() => onPickWs(fixtureId)}
-                    title={`${spec.label} — ${spec.blurb}\n${spec.inputs.length} in / ${spec.outputs.length} out`}
+                    key={preset.id}
+                    onClick={() => onPickWs(fixtureId, preset.id)}
+                    title={`${preset.label} — ${preset.blurb}${preset.example ? '\n\n' + preset.example : ''}`}
                     style={{
                       background: armed ? SW_COLORS.brandLite : tint.fill,
                       border: `1px solid ${armed ? SW_COLORS.brand : tint.stroke}`,
@@ -1914,16 +1933,15 @@ function PmlPalettePane({
                     <div style={{ display: 'flex', alignItems: 'center', gap: 6, width: '100%' }}>
                       <span
                         style={{
-                          fontFamily: SW_FONTS.mono,
-                          fontSize: 16,
-                          fontWeight: 900,
-                          color: tint.stroke,
                           width: 20,
-                          textAlign: 'center',
-                          lineHeight: 1,
+                          display: 'inline-flex',
+                          alignItems: 'center',
+                          justifyContent: 'center',
+                          color: tint.stroke,
+                          flexShrink: 0,
                         }}
                       >
-                        {spec.glyph}
+                        <baseSpec.Icon size={18} color={tint.stroke} title={preset.label} />
                       </span>
                       <span
                         style={{
@@ -1938,7 +1956,7 @@ function PmlPalettePane({
                           whiteSpace: 'nowrap',
                         }}
                       >
-                        {spec.label}
+                        {preset.label}
                       </span>
                     </div>
                     <div
@@ -1950,8 +1968,8 @@ function PmlPalettePane({
                         letterSpacing: '0.06em',
                       }}
                     >
-                      {spec.inputs.length} IN · {spec.outputs.length} OUT
-                      {spec.usesResources && ' · ⚡'}
+                      {baseSpec.inputs.length} IN · {baseSpec.outputs.length} OUT
+                      {baseSpec.usesResources && ' · ⚡'}
                     </div>
                   </button>
                 );
@@ -3309,6 +3327,7 @@ function BuilderProcessView({
     }[];
 
   return (
+    <>
     <div
       style={{
         position: 'absolute',
@@ -3521,8 +3540,9 @@ function BuilderProcessView({
               {/* Header strip */}
               <rect x={0} y={0} width={n.w} height={22} rx={6} fill={tint.stroke} />
               <rect x={0} y={16} width={n.w} height={6} fill={tint.stroke} />
+              <n.block.spec.Icon size={14} color="#fff" x={6} y={4} />
               <text
-                x={10}
+                x={24}
                 y={15}
                 fontFamily={SW_FONTS.mono}
                 fontSize={10}
@@ -3530,7 +3550,7 @@ function BuilderProcessView({
                 fill="#fff"
                 letterSpacing="0.08em"
               >
-                {n.block.spec.glyph} {n.block.spec.label.toUpperCase()}
+                {n.block.spec.label.toUpperCase()}
               </text>
               <text
                 x={n.w - 8}
@@ -3758,6 +3778,8 @@ function BuilderProcessView({
         </g>
       </svg>
     </div>
+    <ProcessCodeView twin={twin} />
+    </>
   );
 }
 
@@ -4163,13 +4185,10 @@ function BlockSection({
             placeItems: 'center',
             background: catTint.stroke,
             color: '#fff',
-            fontFamily: SW_FONTS.mono,
-            fontWeight: 900,
-            fontSize: 14,
             borderRadius: 4,
           }}
         >
-          {block.spec.glyph}
+          <block.spec.Icon size={16} color="#fff" title={block.spec.label} />
         </div>
         <div style={{ display: 'flex', flexDirection: 'column', flex: 1, minWidth: 0 }}>
           <div
@@ -4214,12 +4233,21 @@ function BlockSection({
         mono
         width="100%"
         options={[
-          { value: 'auto', label: `◇ Auto · ${PML_BLOCK_LIBRARY[defaultKind].label} (catalog default)` },
+          {
+            value: 'auto',
+            label: `Auto · ${PML_BLOCK_LIBRARY[defaultKind].label} (catalog default)`,
+            leading: (() => {
+              const AutoIcon = PML_BLOCK_LIBRARY[defaultKind].Icon;
+              return <AutoIcon size={14} color={SW_COLORS.muted} />;
+            })(),
+          },
           ...SELECTABLE_BLOCK_KINDS.map((k) => {
             const spec = PML_BLOCK_LIBRARY[k];
+            const tint = PML_CATEGORY_TINT[spec.category] ?? { stroke: SW_COLORS.ink, fill: '#fff' };
             return {
               value: k,
-              label: `${spec.glyph} ${spec.label}`,
+              label: spec.label,
+              leading: <spec.Icon size={14} color={tint.stroke} />,
               tag: k === defaultKind ? 'DEFAULT' : undefined,
             };
           }),

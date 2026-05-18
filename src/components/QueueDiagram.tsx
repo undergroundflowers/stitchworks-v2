@@ -10,7 +10,7 @@
 
 import type { CSSProperties } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import type { StationView } from '../simulation';
+import { meanOf, type StationView } from '../simulation';
 
 export interface QueueDiagramProps {
   station: StationView;
@@ -380,16 +380,6 @@ function RhoBar({ pct, color, rho }: { pct: number; color: string; rho: number }
 // ─────────────────────────────────────────────────────────────────────────
 //  Helpers
 // ─────────────────────────────────────────────────────────────────────────
-
-function meanOf(d: StationView['serviceDist']): number {
-  switch (d.kind) {
-    case 'exp':     return d.mean;
-    case 'det':     return d.value;
-    case 'uniform': return d.mean;
-    case 'erlang':  return d.mean;
-    case 'normal':  return d.mean;
-  }
-}
 
 function rhoToColor(rho: number): string {
   if (!Number.isFinite(rho)) return SW_COLORS.alarm;

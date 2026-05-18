@@ -11,13 +11,13 @@
  * editable; omit it for read-only contexts (reports, scenario snapshots).
  */
 
-import { useMemo, useState } from 'react';
+import { useState } from 'react';
 import { Card } from './Card';
 import { ToggleGroup } from './ToggleGroup';
 import { HudSelect } from './HudSelect';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import type { StationView } from '../simulation';
-import { describeDist, type ServiceDist, type QueueDiscipline } from '../simulation';
+import { describeDist, meanOf, type ServiceDist, type QueueDiscipline } from '../simulation';
 
 type DistKind = ServiceDist['kind'];
 
@@ -54,7 +54,6 @@ export function QueueAnalysisPanel({ station, onChange }: QueueAnalysisPanelProp
 
   // ── Derived values ─────────────────────────────────────────────────────
   const distKind: DistKind = serviceDist.kind;
-  const distMean = useMemo(() => meanOfDist(serviceDist), [serviceDist]);
   const capacity = station.capacity;
   const capacityFinite = Number.isFinite(capacity);
 
@@ -690,15 +689,7 @@ type DistParams = {
   std: number;
 };
 
-function meanOfDist(d: ServiceDist): number {
-  switch (d.kind) {
-    case 'exp': return d.mean;
-    case 'det': return d.value;
-    case 'uniform': return d.mean;
-    case 'erlang': return d.mean;
-    case 'normal': return d.mean;
-  }
-}
+const meanOfDist = meanOf;
 
 function morphDist(current: ServiceDist, kind: DistKind, smv: number): ServiceDist {
   const m = meanOfDist(current) || smv || 1;
@@ -708,6 +699,7 @@ function morphDist(current: ServiceDist, kind: DistKind, smv: number): ServiceDi
     case 'uniform': return { kind: 'uniform', mean: m, variance: 0.15 };
     case 'erlang':  return { kind: 'erlang', k: 2, mean: m };
     case 'normal':  return { kind: 'normal', mean: m, std: m * 0.2 };
+    default: throw new Error(`morphDist: unsupported kind ${kind}`);
   }
 }
 
@@ -718,6 +710,7 @@ function patchDist(d: ServiceDist, p: Partial<DistParams>): ServiceDist {
     case 'uniform': return { kind: 'uniform', mean: p.mean ?? d.mean, variance: p.variance ?? d.variance };
     case 'erlang':  return { kind: 'erlang', k: p.k ?? d.k, mean: p.mean ?? d.mean };
     case 'normal':  return { kind: 'normal', mean: p.mean ?? d.mean, std: p.std ?? d.std };
+    default: throw new Error(`patchDist: unsupported kind ${d.kind}`);
   }
 }
 

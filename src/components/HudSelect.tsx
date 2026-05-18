@@ -8,13 +8,16 @@
  * keyboard- and click-navigable.
  */
 
-import { useEffect, useId, useLayoutEffect, useRef, useState } from 'react';
+import { useEffect, useId, useLayoutEffect, useRef, useState, type ReactNode } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 
 export interface HudSelectOption<T extends string> {
   value: T;
   /** Primary label shown in the row + header. */
   label: string;
+  /** Optional leading visual (e.g. SVG icon) rendered before the label
+   *  in both the trigger header and option rows. Sized by the caller. */
+  leading?: ReactNode;
   /** Optional muted right-aligned metadata, e.g. "28 ops · 741/day". */
   meta?: string;
   /** Optional left-aligned tag chip, e.g. "BASE". */
@@ -254,14 +257,22 @@ export function HudSelect<T extends string>({
             textOverflow: 'ellipsis',
             whiteSpace: 'nowrap',
             color: current ? palette.trigText : palette.trigPlaceholder,
+            display: 'inline-flex',
+            alignItems: 'center',
+            gap: 6,
+            maxWidth: '100%',
           }}
         >
+          {current?.leading && (
+            <span style={{ display: 'inline-flex', flex: '0 0 auto' }}>
+              {current.leading}
+            </span>
+          )}
           {current?.tag && (
             <span
               style={{
                 display: 'inline-block',
                 padding: '1px 6px',
-                marginRight: 6,
                 background: palette.tagBg,
                 color: palette.tagText,
                 border: `1px solid ${palette.tagBorder}`,
@@ -270,13 +281,14 @@ export function HudSelect<T extends string>({
                 fontSize: dims.tagFs,
                 fontWeight: 800,
                 letterSpacing: '0.08em',
-                verticalAlign: 1,
               }}
             >
               {current.tag}
             </span>
           )}
-          {headerLabel}
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            {headerLabel}
+          </span>
         </span>
         <span
           aria-hidden
@@ -368,6 +380,11 @@ export function HudSelect<T extends string>({
                     flex: 1,
                   }}
                 >
+                  {opt.leading && (
+                    <span style={{ flex: '0 0 auto', display: 'inline-flex' }}>
+                      {opt.leading}
+                    </span>
+                  )}
                   {opt.tag && (
                     <span
                       style={{
