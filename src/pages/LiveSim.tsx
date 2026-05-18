@@ -2473,6 +2473,9 @@ interface StationLayout {
   /** Footprint width / depth in cells. */
   w: number;
   d: number;
+  /** Stable per-cell React key. Falls back to opId when one cell per op; in
+   *  workstation mode multiple cells share an opId so we key by wsId. */
+  cellKey?: string;
 }
 
 /**
@@ -2530,18 +2533,50 @@ function layoutStations(
   const n = stations.length;
   if (n === 0) return { cells: [], gridW: 1, gridH: 1, perRow: 1 };
 
-  // Twin path — honour the workstation coordinates the user authored in
-  // Factory Builder. Each engine station maps back to one-or-more workstations
-  // via meta.stations (keyed by opId); we use their mean grid position so the
-  // ISO/TOP/HEAT views read like a top-down of the actual factory layout.
+  // Twin workstation path — honour every physical machine the user placed in
+  // Factory Builder. One cell per workstation; cells that share an opId all
+  // read the same engine StationView (parallel servers in the queueing model),
+  // so the floor reads like the actual factory while the live state remains
+  // op-level. Preferred over the op-averaged path below whenever the meta
+  // carries a workstations array.
+  if (twinMeta && twinMeta.workstations && twinMeta.workstations.length > 0) {
+    const stationByOpId = new Map<string, StationView>();
+    for (const s of stations) stationByOpId.set(s.opId, s);
+    const placed = twinMeta.workstations.filter((wc) => stationByOpId.has(wc.opId));
+    if (placed.length > 0) {
+      let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
+      for (const wc of placed) {
+        if (wc.gx < minX) minX = wc.gx;
+        if (wc.gy < minY) minY = wc.gy;
+        if (wc.gx > maxX) maxX = wc.gx;
+        if (wc.gy > maxY) maxY = wc.gy;
+      }
+      const cells: StationLayout[] = placed.map((wc) => ({
+        s: stationByOpId.get(wc.opId)!,
+        gx: 2 + (wc.gx - minX),
+        gy: 2 + (wc.gy - minY),
+        // Tighter footprint than the op-level path — workstations in Builder
+        // sit at ~1-cell spacing, so the box must fit inside one cell with a
+        // small gutter or adjacent machines visually collide.
+        w: 0.9,
+        d: 1.4,
+        cellKey: wc.wsId,
+      }));
+      const gridW = Math.max(8, 2 + (maxX - minX) + 4);
+      const gridH = Math.max(6, 2 + (maxY - minY) + 4);
+      return { cells, gridW, gridH, perRow: cells.length };
+    }
+  }
+
+  // Twin op-averaged fallback — used when the meta only carries `stations`
+  // (e.g. older builds or empty placeholders). Each engine station maps back
+  // to its workstations' mean grid position, so views still read like a
+  // top-down of the floor, just with one box per op instead of per machine.
   if (twinMeta) {
     const byOpId = new Map<string, { gx: number; gy: number }>();
     for (const ts of twinMeta.stations) {
       byOpId.set(ts.opId, { gx: ts.gx, gy: ts.gy });
     }
-    // Builder coords are in *world cells* (same as isoProj's input units),
-    // but may be sparse / large. Normalise to a tight bbox with a 2-cell
-    // margin so the renderer's `gridW`/`gridH` stay reasonable.
     let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
     for (const s of stations) {
       const p = byOpId.get(s.opId);
@@ -2685,6 +2720,15 @@ function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system,
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
 
   const { cells, gridW, gridH } = layoutStations(stations, system, twinMeta);
+  // Workstation mode = more cells than engine stations. The synthetic conveyor
+  // and travelling-WIP markers chain consecutive cells, which is meaningful
+  // when cells are placed in op order along a row but degenerates into noise
+  // when cells reflect arbitrary Builder positions across 60+ machines.
+  const oneCellPerOp = cells.length === stations.length;
+  // Bottleneck highlight needs to follow the opId, not a cell index — in
+  // workstation mode multiple cells share an op and the index would point at
+  // the wrong row.
+  const bottleneckOpId = stations[bottleneckOpIndex]?.opId ?? null;
 
   const cTL = isoProj(0, 0);
   const cTR = isoProj(gridW, 0);
@@ -2733,8 +2777,11 @@ function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system,
         );
       })}
 
-      {/* Conveyor between rows of stations */}
-      {cells.length > 1 &&
+      {/* Conveyor between rows of stations — only meaningful when cells are
+          laid out in op order along a row. In workstation mode the cells
+          reflect arbitrary Builder positions, so chaining them with a dashed
+          line just produces visual noise. */}
+      {oneCellPerOp && cells.length > 1 &&
         cells.slice(0, -1).map((c, i) => {
           const next = cells[i + 1];
           const a = isoProj(c.gx + c.w / 2, c.gy + c.d + 0.2);
@@ -2758,11 +2805,18 @@ function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system,
       {[...cells]
         .sort((a, b) => a.gx + a.gy - (b.gx + b.gy))
         .map((c, i) => (
-          <IsoSewingStation key={c.s.opId} layout={c} index={i} isHot={cells.findIndex((x) => x.s.opId === c.s.opId) === bottleneckOpIndex && c.s.queueLen > 0} simTime={simTime} />
+          <IsoSewingStation
+            key={c.cellKey ?? c.s.opId}
+            layout={c}
+            index={i}
+            isHot={c.s.opId === bottleneckOpId && c.s.queueLen > 0}
+            simTime={simTime}
+          />
         ))}
 
-      {/* Travelling WIP bundles between adjacent stations */}
-      {cells.length > 1 &&
+      {/* Travelling WIP bundles between adjacent stations — same caveat as
+          the conveyor; only honest in op-ordered single-row mode. */}
+      {oneCellPerOp && cells.length > 1 &&
         cells.slice(0, -1).map((c, i) => {
           const next = cells[i + 1];
           const phase = ((simTime * 0.04 + i * 0.27) % 1 + 1) % 1;

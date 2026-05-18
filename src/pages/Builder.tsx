@@ -29,6 +29,7 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { HudSelect, StageOverlay } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
+import { InspectorQueuePanel } from '../components/InspectorQueuePanel';
 import {
   ISO_FIXTURE_CATALOG,
   APPAREL_CATEGORIES,
@@ -1262,74 +1263,64 @@ export function BuilderPage() {
         <button onClick={() => navigate('/')} style={btnSec}>
           ← MENU
         </button>
-        <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing: '-0.01em' }}>
-          FACTORY BUILDER
+        {/* Title + active-factory picker, stacked. The picker sits directly
+            under the FACTORY BUILDER title so the page label and the thing
+            being labelled share a vertical axis; action buttons (SAVE,
+            DELETE, SIMULATE, SAVE AS…) follow in the row beside this
+            column. */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
+          <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing: '-0.01em' }}>
+            FACTORY BUILDER
+          </div>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+            <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
+            <HudSelect
+              value={activeScenarioId ?? '__canonical__'}
+              onChange={(v) => {
+                if (v.startsWith('lib:')) {
+                  loadSavedFactory(v.slice(4));
+                  setSelected(null);
+                  return;
+                }
+                if (v === '__divider_saved__') return;
+                setActiveScenario(v === '__canonical__' ? null : v);
+                setSelected(null);
+              }}
+              variant="light"
+              size="sm"
+              minWidth={280}
+              options={[
+                {
+                  value: '__canonical__',
+                  label: `◆ Canonical · ${projectName || canonical.name}`,
+                },
+                ...scenarios.map((scn) => ({
+                  value: scn.id,
+                  label: `${bestScenario?.id === scn.id ? '★' : '✦'} ${scn.name}`,
+                  tag: bestScenario?.id === scn.id ? 'BEST' : undefined,
+                })),
+                ...(savedFactories.length > 0
+                  ? [
+                      {
+                        value: '__divider_saved__',
+                        label: `── SAVED FACTORIES · ${savedFactories.length} ──`,
+                        disabled: true,
+                      },
+                      ...savedFactories.map((f) => ({
+                        value: `lib:${f.id}`,
+                        label: `📚 ${f.name}`,
+                        tag: `${f.stationCount} STN`,
+                      })),
+                    ]
+                  : []),
+              ]}
+            />
+          </div>
         </div>
 
-        {/* Active factory picker — one control for switching between the
-            canonical twin and any scenario forks. (Previously this slot held
-            a rename input and the dropdown sat to its right; consolidated so
-            the active-factory label IS the picker. Rename moved to a small
-            pencil button.) */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginLeft: 8 }}>
-          <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
-          <HudSelect
-            value={activeScenarioId ?? '__canonical__'}
-            onChange={(v) => {
-              if (v.startsWith('lib:')) {
-                loadSavedFactory(v.slice(4));
-                setSelected(null);
-                return;
-              }
-              if (v === '__divider_saved__') return;
-              setActiveScenario(v === '__canonical__' ? null : v);
-              setSelected(null);
-            }}
-            variant="light"
-            size="sm"
-            minWidth={280}
-            options={[
-              {
-                value: '__canonical__',
-                label: `◆ Canonical · ${projectName || canonical.name}`,
-              },
-              ...scenarios.map((scn) => ({
-                value: scn.id,
-                label: `${bestScenario?.id === scn.id ? '★' : '✦'} ${scn.name}`,
-                tag: bestScenario?.id === scn.id ? 'BEST' : undefined,
-              })),
-              ...(savedFactories.length > 0
-                ? [
-                    {
-                      value: '__divider_saved__',
-                      label: `── SAVED FACTORIES · ${savedFactories.length} ──`,
-                      disabled: true,
-                    },
-                    ...savedFactories.map((f) => ({
-                      value: `lib:${f.id}`,
-                      label: `📚 ${f.name}`,
-                      tag: `${f.stationCount} STN`,
-                    })),
-                  ]
-                : []),
-            ]}
-          />
-          <button
-            onClick={() => {
-              const seed = activeScenarioId === null ? (projectName || twin.name) : twin.name;
-              const next = window.prompt('Rename this factory', seed);
-              const trimmed = next?.trim();
-              if (!trimmed) return;
-              renameActive(trimmed);
-              // When the canonical is the active entity, also rename the
-              // project meta so the TopBar label stays in sync.
-              if (activeScenarioId === null) renameProject(trimmed);
-            }}
-            style={btnSec}
-            title="Rename the active factory"
-          >
-            ✎
-          </button>
+        {/* Action buttons — promoted out of the picker row so the FACTORY
+            BUILDER / factory-picker pair can stack cleanly. */}
+        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <button
             onClick={onSave}
             style={{
@@ -1344,6 +1335,17 @@ export function BuilderPage() {
             }
           >
             {savedAt ? `✓ SAVED · ${savedAt}` : '💾 SAVE'}
+          </button>
+          <button
+            onClick={onSaveAsOpen}
+            style={btnSec}
+            title={
+              activeScenarioId === null
+                ? 'Fork the canonical twin into a new scenario'
+                : 'Fork this scenario into a new branched scenario'
+            }
+          >
+            ✦ SAVE AS…
           </button>
           <button
             onClick={() => {
@@ -1400,17 +1402,6 @@ export function BuilderPage() {
               </button>
             );
           })()}
-          <button
-            onClick={onSaveAsOpen}
-            style={btnSec}
-            title={
-              activeScenarioId === null
-                ? 'Fork the canonical twin into a new scenario'
-                : 'Fork this scenario into a new branched scenario'
-            }
-          >
-            ✦ SAVE AS…
-          </button>
           {bestScenario && (
             <button
               onClick={() => {
@@ -1447,99 +1438,12 @@ export function BuilderPage() {
 
         <div style={{ flex: 1 }} />
 
-        {/* Undo / redo — operates on the active twin's edit history. The
-            twin store keeps an in-memory stack of pre-mutation snapshots,
-            so reloading the page wipes history (intentional — undoing
-            across sessions invites surprise). */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 4,
-            background: SW_COLORS.paperDeep,
-            padding: 3,
-            borderRadius: 6,
-            border: `1px solid ${SW_COLORS.line}`,
-          }}
-          title="Undo last edit (⌘/Ctrl+Z) · Redo (⌘/Ctrl+Shift+Z)"
-        >
-          <button
-            onClick={undoTwin}
-            disabled={!canUndo}
-            style={{
-              background: 'transparent',
-              color: canUndo ? SW_COLORS.steel : SW_COLORS.muted,
-              border: 'none',
-              padding: '6px 10px',
-              fontFamily: SW_FONTS.display,
-              fontSize: 10,
-              fontWeight: 900,
-              letterSpacing: '0.08em',
-              cursor: canUndo ? 'pointer' : 'not-allowed',
-              opacity: canUndo ? 1 : 0.45,
-              borderRadius: 4,
-            }}
-          >
-            ↶ UNDO
-          </button>
-          <button
-            onClick={redoTwin}
-            disabled={!canRedo}
-            style={{
-              background: 'transparent',
-              color: canRedo ? SW_COLORS.steel : SW_COLORS.muted,
-              border: 'none',
-              padding: '6px 10px',
-              fontFamily: SW_FONTS.display,
-              fontSize: 10,
-              fontWeight: 900,
-              letterSpacing: '0.08em',
-              cursor: canRedo ? 'pointer' : 'not-allowed',
-              opacity: canRedo ? 1 : 0.45,
-              borderRadius: 4,
-            }}
-          >
-            ↷ REDO
-          </button>
-        </div>
-
-        {/* SELECT tool — drag a rectangle on the canvas background to pick
-            every workstation whose footprint centre lands inside. */}
-        <div
-          style={{
-            display: 'flex',
-            gap: 4,
-            background: SW_COLORS.paperDeep,
-            padding: 3,
-            borderRadius: 6,
-            border: `1px solid ${SW_COLORS.line}`,
-          }}
-          title="Select tool (V) — drag a rectangle to pick multiple workstations · hold ⇧ to add to the existing selection"
-        >
-          <button
-            onClick={() => {
-              // Toggling the select tool clears any other armed tool so the
-              // canvas isn't in two modes at once.
-              setTool((t) => (t === 'select' ? 'pointer' : 'select'));
-              setDrop({ kind: 'none' });
-              setConnect((c) => ({ ...c, on: false, fromWsId: null, fromPort: null }));
-              setSelectRect(null);
-            }}
-            style={{
-              background: tool === 'select' ? SW_COLORS.brand : 'transparent',
-              color: tool === 'select' ? '#fff' : SW_COLORS.steel,
-              border: 'none',
-              padding: '6px 12px',
-              fontFamily: SW_FONTS.display,
-              fontSize: 10,
-              fontWeight: 900,
-              letterSpacing: '0.08em',
-              cursor: 'pointer',
-              borderRadius: 4,
-            }}
-          >
-            ▭ SELECT
-          </button>
-        </div>
+        {/* Undo / redo and the SELECT tool used to live here as toolbar
+            chips; they were removed because the keyboard shortcuts
+            (⌘/Ctrl+Z, ⌘/Ctrl+Shift+Z, V) cover the same ground without
+            crowding the header. The handlers below — undoTwin, redoTwin,
+            and the tool toggle in the keydown listener — stay wired so
+            the features themselves are unchanged. */}
 
         {/* Selection + clipboard chip — surfaces the number of workstations
             currently selected (use the SELECT tool's rectangle marquee to
@@ -2208,6 +2112,10 @@ export function BuilderPage() {
             selected={selected}
             onSelect={setSelected}
             connect={connect}
+            zoom={zoom}
+            pan={pan}
+            onPan={setPan}
+            onZoom={setZoom}
             onPickFromPort={(wsId, portId) =>
               setConnect((c) => ({ ...c, fromWsId: wsId, fromPort: portId }))
             }
@@ -4021,6 +3929,12 @@ interface BuilderProcessViewProps {
    *  the source is already chosen. Implementations should call
    *  addConnector and then advance the connect chain. */
   onPickToPort: (wsId: string, portId: string) => void;
+  /** Shared zoom/pan state — the same store that drives the iso canvas,
+   *  so the bottom-right ⊖/⊕/⤒ controls work identically across modes. */
+  zoom: number;
+  pan: { x: number; y: number };
+  onPan: (p: { x: number; y: number } | ((prev: { x: number; y: number }) => { x: number; y: number })) => void;
+  onZoom: (z: number | ((prev: number) => number)) => void;
 }
 
 /** Layout result for a single workstation block. */
@@ -4069,6 +3983,10 @@ function BuilderProcessView({
   connect,
   onPickFromPort,
   onPickToPort,
+  zoom,
+  pan,
+  onPan,
+  onZoom,
 }: BuilderProcessViewProps) {
   const BLOCK_W = 168;
   const BLOCK_H = 80;
@@ -4193,6 +4111,39 @@ function BuilderProcessView({
       inPortLabel: string;
     }[];
 
+  const ZOOM_MIN = 0.3;
+  const ZOOM_MAX = 3;
+  const clampZoom = (z: number) => Math.min(ZOOM_MAX, Math.max(ZOOM_MIN, z));
+
+  // Drag-to-pan: capture the starting pan + pointer, then translate as the
+  // mouse moves. We only start a pan when the user mouse-downs on empty
+  // diagram space (not on a block or port), so block selection still works.
+  const onBackgroundMouseDown = (e: React.MouseEvent) => {
+    if (e.target !== e.currentTarget) return;
+    e.preventDefault();
+    const startX = e.clientX;
+    const startY = e.clientY;
+    const p0 = pan;
+    const move = (ev: MouseEvent) => {
+      onPan({ x: p0.x + (ev.clientX - startX), y: p0.y + (ev.clientY - startY) });
+    };
+    const up = () => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
+  // Wheel: ctrl/meta-wheel zooms around the cursor; plain wheel falls through
+  // to the container's native overflow scroll so the user can still trackpad-pan.
+  const onWheel = (e: React.WheelEvent) => {
+    if (!(e.ctrlKey || e.metaKey)) return;
+    e.preventDefault();
+    const factor = e.deltaY < 0 ? 1.15 : 1 / 1.15;
+    onZoom((z) => clampZoom(z * factor));
+  };
+
   return (
     <>
     <div
@@ -4204,17 +4155,24 @@ function BuilderProcessView({
         backgroundImage:
           'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px)',
         backgroundSize: '24px 24px',
+        cursor: 'grab',
       }}
       onClick={(e) => {
         if (e.target === e.currentTarget) onSelect(null);
       }}
+      onMouseDown={onBackgroundMouseDown}
+      onWheel={onWheel}
     >
       <svg
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="xMinYMin meet"
         width={W}
         height={H}
-        style={{ display: 'block' }}
+        style={{
+          display: 'block',
+          transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
+          transformOrigin: '0 0',
+        }}
         onClick={() => onSelect(null)}
       >
         <defs>
@@ -5126,6 +5084,12 @@ function Inspector(props: InspectorProps) {
           </div>
         )}
       </LensSection>
+
+      <div style={{ height: 12 }} />
+      <div style={sectionLabel}>Queue analysis</div>
+      <div style={{ marginTop: 6 }}>
+        <InspectorQueuePanel ws={ws} />
+      </div>
 
       <FlowSection
         ws={ws}

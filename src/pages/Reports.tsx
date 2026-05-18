@@ -1,6 +1,6 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, type OperatorAssignment } from '../components';
-import { useEffect, useMemo, useState } from 'react';
+import { useEffect, useMemo, useState, type ReactNode } from 'react';
 import { useNavigate } from 'react-router-dom';
 import {
   smoothnessIndex,
@@ -561,22 +561,126 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       <>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label={`OUTPUT / ${periodLabel}`} mean={scaledProducedMean} std={scaledProducedStd} unit="pcs" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.brand}/>
+          <KpiTile
+            label={`OUTPUT / ${periodLabel}`}
+            mean={scaledProducedMean}
+            std={scaledProducedStd}
+            unit="pcs"
+            formatter={(v) => Math.round(v).toLocaleString()}
+            color={SW_COLORS.brand}
+            info={
+              <KpiFormula
+                formula="output = pieces produced in one 480-min shift × period multiplier"
+                where={[
+                  ['pieces produced', 'finished pieces that exited the last station of the line during the shift'],
+                  ['period multiplier', `${periodLabel} → ×${periodMultiplier} (SHIFT ×1 · DAY ×1 · WEEK ×6 · MONTH ×26)`],
+                ]}
+                replication={runs > 1 ? `Mean across ${runs} replications (seeds ${runConfig.randomSeed}..${runConfig.randomSeed + runs - 1}); ± shows std of that mean.` : undefined}
+              />
+            }
+          />
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="THROUGHPUT" mean={throughputPerHr} std={runs > 1 ? kpiSource.throughputPerHr.std : 0} unit="pcs/hr" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.ok}/>
+          <KpiTile
+            label="THROUGHPUT"
+            mean={throughputPerHr}
+            std={runs > 1 ? kpiSource.throughputPerHr.std : 0}
+            unit="pcs/hr"
+            formatter={(v) => Math.round(v).toLocaleString()}
+            color={SW_COLORS.ok}
+            info={
+              <KpiFormula
+                formula="throughput = pieces produced ÷ shift hours"
+                where={[
+                  ['shift hours', '480 simulated minutes ÷ 60 = 8 h'],
+                  ['pieces produced', 'pieces exiting the line during the shift (post-warm-up)'],
+                ]}
+                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
+              />
+            }
+          />
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="EFFICIENCY" mean={efficiency} std={runs > 1 ? kpiSource.efficiencyPct.std : 0} unit="%" formatter={(v) => v.toFixed(1)} color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+          <KpiTile
+            label="EFFICIENCY"
+            mean={efficiency}
+            std={runs > 1 ? kpiSource.efficiencyPct.std : 0}
+            unit="%"
+            formatter={(v) => v.toFixed(1)}
+            color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}
+            info={
+              <KpiFormula
+                formula="efficiency = (Σ SAM earned ÷ Σ paid operator-minutes) × 100"
+                where={[
+                  ['SAM earned', 'pieces produced × per-operation SAM, summed over operations'],
+                  ['paid operator-minutes', 'operators × shift minutes (480)'],
+                ]}
+                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
+              />
+            }
+          />
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="MEAN LEAD"  mean={meanLeadTime} std={runs > 1 ? kpiSource.meanLeadTime.std : 0} unit="min" formatter={(v) => v.toFixed(1)} color={SW_COLORS.bobbin}/>
+          <KpiTile
+            label="MEAN LEAD"
+            mean={meanLeadTime}
+            std={runs > 1 ? kpiSource.meanLeadTime.std : 0}
+            unit="min"
+            formatter={(v) => v.toFixed(1)}
+            color={SW_COLORS.bobbin}
+            info={
+              <KpiFormula
+                formula="mean lead = average (exit-time − release-time) across finished bundles"
+                where={[
+                  ['release-time', 'sim-clock minute the bundle enters the first station'],
+                  ['exit-time', 'sim-clock minute the bundle leaves the last station'],
+                ]}
+                note="Equivalent to Little's Law check: WIP ≈ throughput × lead-time."
+                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
+              />
+            }
+          />
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="WIP"        mean={wipBundles} std={runs > 1 ? kpiSource.wipBundles.std : 0} unit="bundles" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.warn}/>
+          <KpiTile
+            label="WIP"
+            mean={wipBundles}
+            std={runs > 1 ? kpiSource.wipBundles.std : 0}
+            unit="bundles"
+            formatter={(v) => Math.round(v).toLocaleString()}
+            color={SW_COLORS.warn}
+            info={
+              <KpiFormula
+                formula="WIP = time-averaged number of bundles on the line"
+                where={[
+                  ['time-averaged', '∫ N(t) dt ÷ shift minutes, with N(t) = bundles released − bundles exited at sim-minute t'],
+                ]}
+                note="Counted in bundles, not pieces — multiply by bundle size for piece-WIP."
+                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
+              />
+            }
+          />
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="UTIL"       mean={utilization * 100} std={runs > 1 ? kpiSource.utilization.std * 100 : 0} unit="%" formatter={(v) => v.toFixed(0)} color={SW_COLORS.thread}/>
+          <KpiTile
+            label="UTIL"
+            mean={utilization * 100}
+            std={runs > 1 ? kpiSource.utilization.std * 100 : 0}
+            unit="%"
+            formatter={(v) => v.toFixed(0)}
+            color={SW_COLORS.thread}
+            info={
+              <KpiFormula
+                formula="util = (Σ busy operator-minutes ÷ Σ paid operator-minutes) × 100"
+                where={[
+                  ['busy', 'operator processing a bundle (not idle, not blocked, not starved)'],
+                  ['paid', 'operators × shift minutes (480)'],
+                ]}
+                note="Mean across stations — single bottleneck stations may sit near 100% while the line average is lower."
+                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
+              />
+            }
+          />
         </HideableBox>
       </div>
 
@@ -1096,6 +1200,7 @@ interface KpiTileProps {
   unit: string;
   formatter: (value: number) => string;
   color: string;
+  info?: ReactNode;
 }
 
 /**
@@ -1264,8 +1369,49 @@ const DEPT_LINE_COLORS: Record<string, string> = {
   thread: SW_COLORS.thread,
 };
 
+/** Renders the structured body of a KPI-tile info popover. */
+function KpiFormula({
+  formula,
+  where,
+  note,
+  replication,
+}: {
+  formula: string;
+  where?: [string, string][];
+  note?: string;
+  replication?: string;
+}) {
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div style={{ fontFamily: SW_FONTS.mono, fontWeight: 700, color: SW_COLORS.ink }}>
+        {formula}
+      </div>
+      {where && where.length > 0 && (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+          <div style={{ fontSize: 9, fontWeight: 800, letterSpacing: '0.08em', color: SW_COLORS.muted, textTransform: 'uppercase' }}>
+            where
+          </div>
+          {where.map(([k, v]) => (
+            <div key={k} style={{ fontSize: 11, color: SW_COLORS.steel }}>
+              <span style={{ color: SW_COLORS.ink, fontWeight: 700 }}>{k}</span> — {v}
+            </div>
+          ))}
+        </div>
+      )}
+      {note && (
+        <div style={{ fontSize: 11, color: SW_COLORS.steel, fontStyle: 'italic' }}>{note}</div>
+      )}
+      {replication && (
+        <div style={{ fontSize: 10, color: SW_COLORS.muted, borderTop: `1px solid ${SW_COLORS.line}`, paddingTop: 6 }}>
+          {replication}
+        </div>
+      )}
+    </div>
+  );
+}
+
 /** Stat tile that gracefully shows ± std when std > 0. */
-function KpiTile({ label, mean, std, unit, formatter, color }: KpiTileProps) {
+function KpiTile({ label, mean, std, unit, formatter, color, info }: KpiTileProps) {
   return (
     <Stat
       big
@@ -1282,6 +1428,7 @@ function KpiTile({ label, mean, std, unit, formatter, color }: KpiTileProps) {
       }
       unit={unit}
       color={color}
+      info={info}
     />
   );
 }

@@ -63,6 +63,24 @@ export interface TwinStationMeta {
   workersRequested: number;
 }
 
+/** One physical workstation kept in the simulation, with its authored Builder
+ *  coords. Many cells can share an `opId` — the engine collapses them into one
+ *  multi-server station, but the renderer can still place each cell at its
+ *  own floor position so the sim view reads like the factory the user built. */
+export interface TwinWorkstationCell {
+  wsId: string;
+  opId: string;
+  /** World-cell coords from Builder (top-left of the workstation footprint). */
+  gx: number;
+  gy: number;
+  /** 0/90/180/270, in case the renderer wants to honour rotation. */
+  rotation: number;
+  /** Which sewing line this cell belongs to (when the twin defines lines). */
+  lineId?: string;
+  /** Workstation display name from Builder. */
+  name: string;
+}
+
 export interface BuildFromTwinMeta {
   /** Workstations that participated in the simulation, in operation order. */
   simulatedWsIds: string[];
@@ -82,6 +100,10 @@ export interface BuildFromTwinMeta {
   topologySource: 'connectors' | 'opIdPrecedence';
   /** Per-engine-station extras the renderer needs to honour Builder positions. */
   stations: TwinStationMeta[];
+  /** Per-physical-workstation cells in operation order. The renderer uses this
+   *  to draw one box per machine the user placed in Builder — preserves the
+   *  spatial structure of the floor that `stations[]` collapses away. */
+  workstations: TwinWorkstationCell[];
   /** Garment template chosen as the dominant context for this run. */
   garment: GarmentTemplate;
   /** True when the chosen garment was inferred from a workstation pin (a
@@ -240,6 +262,7 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
   const operations: Operation[] = [];
   const stationServers: number[] = [];
   const stations: TwinStationMeta[] = [];
+  const workstations: TwinWorkstationCell[] = [];
   const serviceDistributions: (ServiceDist | undefined)[] = [];
   const stationCapacities: (number | undefined)[] = [];
   const queueDisciplines: (QueueDiscipline | undefined)[] = [];
@@ -265,6 +288,15 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
       sumY += ws.position.y;
       const bs = ws.operation.bundleSize;
       if (bs && bs > 0) bundleSizeSamples.push(bs);
+      workstations.push({
+        wsId: ws.id,
+        opId,
+        gx: ws.position.x,
+        gy: ws.position.y,
+        rotation: ws.rotation ?? 0,
+        lineId: ws.lineId,
+        name: ws.name,
+      });
     }
     totalWorkers += workersAtOp;
     stations.push({
@@ -317,6 +349,7 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
     seedBundleSize,
     topologySource,
     stations,
+    workstations,
     garment,
     garmentPinned: bestCount > 0,
   };
@@ -434,6 +467,7 @@ export function buildLinesFromTwin(
             seedBundleSize: 0,
             topologySource: 'opIdPrecedence',
             stations: [],
+            workstations: [],
             garment: opts.garmentsById[opts.defaultGarmentId] ?? Object.values(opts.garmentsById)[0],
             garmentPinned: false,
           },

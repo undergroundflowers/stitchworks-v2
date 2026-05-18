@@ -377,7 +377,7 @@ export function ProcessCodeView({ twin }: ProcessCodeViewProps) {
         style={{
           position: 'absolute',
           top: 14,
-          right: 14,
+          left: 14,
           zIndex: 6,
           background: '#0e1116',
           color: '#d8dee9',
@@ -401,7 +401,7 @@ export function ProcessCodeView({ twin }: ProcessCodeViewProps) {
       style={{
         position: 'absolute',
         top: 14,
-        right: 14,
+        left: 14,
         zIndex: 6,
         width: 480,
         maxHeight: '70vh',
