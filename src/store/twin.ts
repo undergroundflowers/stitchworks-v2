@@ -46,6 +46,7 @@ import {
   newLineId,
   newWorkstationId,
   newScenarioId,
+  newTwinId,
   newRunId,
   newConnectorId,
   makeWorkstation,
@@ -202,6 +203,17 @@ export interface TwinState {
     fromScenarioId: string,
     input: { name: string; notes?: string; activate?: boolean },
   ) => string | null;
+  /** Push a fully-built twin as a new scenario without touching the canonical.
+   *  Used by the Orders / Simulation "Build / Edit in Builder" buttons to
+   *  open a side-by-side blank draft (seeded with a single line) in a new tab
+   *  while leaving the originating tab's view untouched. The new scenario is
+   *  NOT activated by default — set activate=true to switch the active twin. */
+  createScenarioFromTwin: (input: {
+    name: string;
+    notes?: string;
+    twin: Twin;
+    activate?: boolean;
+  }) => string;
   renameScenario: (id: string, name: string) => void;
   deleteScenario: (id: string) => void;
   setActiveScenario: (id: string | null) => void;
@@ -758,6 +770,42 @@ export const useTwin = create<TwinState>()(
         return id;
       },
 
+      createScenarioFromTwin: ({ name, notes, twin, activate }) => {
+        const id = newScenarioId();
+        const now = new Date().toISOString();
+        // Stamp the caller-supplied twin with a fresh id + scenario name so it
+        // can't collide with another scenario's parent twin id. The twin is
+        // marked non-canonical because it lives inside a scenario, not at the
+        // top of the tree.
+        const scenarioTwin: Twin = {
+          ...twin,
+          id: newTwinId(),
+          name,
+          isCanonical: false,
+          createdAt: now,
+          modifiedAt: now,
+        };
+        set((s) => {
+          const scenario: Scenario = {
+            id,
+            name,
+            notes,
+            createdAt: now,
+            modifiedAt: now,
+            twin: scenarioTwin,
+            runs: [],
+          };
+          return {
+            ...s,
+            scenarios: [scenario, ...s.scenarios],
+            activeScenarioId: activate ? id : s.activeScenarioId,
+            past: activate ? [] : s.past,
+            future: activate ? [] : s.future,
+          };
+        });
+        return id;
+      },
+
       renameScenario: (id, name) =>
         set((s) => ({
           ...s,
@@ -881,6 +929,7 @@ export const useTwin = create<TwinState>()(
           setBlock: get().setBlock,
           createScenarioFromCanonical: get().createScenarioFromCanonical,
           forkScenario: get().forkScenario,
+          createScenarioFromTwin: get().createScenarioFromTwin,
           renameScenario: get().renameScenario,
           deleteScenario: get().deleteScenario,
           setActiveScenario: get().setActiveScenario,

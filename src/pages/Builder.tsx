@@ -25,7 +25,7 @@ import {
   type CSSProperties,
   type ReactNode,
 } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS } from '../design/tokens';
 import { HudSelect, StageOverlay } from '../components';
 import { ProcessCodeView } from '../components/ProcessCodeView';
@@ -233,11 +233,72 @@ const INSPECTOR_MAX = 560;
 const SPLITTER_W = 5;
 
 // ============================================================================
+// DEEP-LINK INITIAL STATE
+// ============================================================================
+
+/**
+ * Read `?scenario=<id>&line=<id>` from the URL the BuilderPage first mounts
+ * with, activate the requested scenario synchronously in the twin store, and
+ * return the dept selection + flash-chip target the page should paint on
+ * its first render. This is invoked from a lazy `useState` initialiser so
+ * the selection is committed in the very first paint — no later effect can
+ * race with it and the Inspector opens straight on the seeded line's dept.
+ *
+ * Side-effect: calls `useTwin.getState().setActiveScenario(...)` when a
+ * scenario id is supplied (or implied by the line lookup). Safe to call
+ * during render because zustand's `set` is synchronous and the twin store
+ * doesn't subscribe back to React during this call.
+ */
+function resolveDeepLinkInitialState(searchParams: URLSearchParams): {
+  selected: { kind: 'dept' | 'ws'; id: string } | null;
+  lineDeepLink: string | null;
+} {
+  const scenarioId = searchParams.get('scenario');
+  const lineId = searchParams.get('line');
+  if (!scenarioId && !lineId) return { selected: null, lineDeepLink: null };
+
+  const store = useTwin.getState();
+
+  // Resolve which twin the line lives in. Prefer the supplied scenario; fall
+  // back to scanning every scenario, then the canonical twin.
+  let twinForLine: ReturnType<typeof selectActiveTwin> | null = null;
+  let scenarioToActivate: string | null | undefined = undefined;
+  if (scenarioId && store.scenarios.some((s) => s.id === scenarioId)) {
+    twinForLine = store.scenarios.find((s) => s.id === scenarioId)!.twin;
+    scenarioToActivate = scenarioId;
+  }
+  if (!twinForLine && lineId) {
+    for (const scn of store.scenarios) {
+      if ((scn.twin.lines ?? []).some((l) => l.id === lineId)) {
+        twinForLine = scn.twin;
+        scenarioToActivate = scn.id;
+        break;
+      }
+    }
+    if (!twinForLine && (store.canonical.lines ?? []).some((l) => l.id === lineId)) {
+      twinForLine = store.canonical;
+      scenarioToActivate = null;
+    }
+  }
+  if (scenarioToActivate !== undefined) {
+    store.setActiveScenario(scenarioToActivate);
+  }
+  const line = lineId && twinForLine
+    ? (twinForLine.lines ?? []).find((l) => l.id === lineId) ?? null
+    : null;
+  return {
+    selected: line ? { kind: 'dept', id: line.deptId } : null,
+    lineDeepLink: line?.id ?? null,
+  };
+}
+
+// ============================================================================
 // MAIN PAGE
 // ============================================================================
 
 export function BuilderPage() {
   const navigate = useNavigate();
+  const [searchParams, setSearchParams] = useSearchParams();
   const twin = useTwin(selectActiveTwin);
   const activeScenarioId = useTwin((s) => s.activeScenarioId);
   const scenarios = useTwin((s) => s.scenarios);
@@ -318,9 +379,18 @@ export function BuilderPage() {
     fromWsId: string | null;
     fromPort: string | null;
   }>({ on: false, kind: 'flow', fromWsId: null, fromPort: null });
+  // Resolve the deep-link target (?scenario=<id>&line=<id>) synchronously
+  // during the very first render so `selected` is initialised to the seeded
+  // line's parent dept BEFORE any other effect can race with it. This also
+  // activates the draft scenario in the twin store as a side-effect so the
+  // selector below resolves against the right twin. Cleaning the URL params
+  // is deferred to a useEffect — that doesn't affect the resolved selection.
+  const initialSelection = useState(() =>
+    resolveDeepLinkInitialState(searchParams),
+  )[0];
   const [selected, setSelected] = useState<
     { kind: 'dept' | 'ws'; id: string } | null
-  >(null);
+  >(initialSelection.selected);
   /** Additional workstation ids selected via SHIFT+click. The `selected`
    *  anchor (when it's a workstation) is always implicitly part of the
    *  selection set — `selectedWsIds` below merges the two for rendering
@@ -350,6 +420,32 @@ export function BuilderPage() {
     if (!import.meta.env.DEV) return;
     (window as unknown as { __swUseTwin?: typeof useTwin }).__swUseTwin = useTwin;
   }, []);
+
+  // Flash chip ("✎ EDITING LINE …") shown for ~4s when the user lands here
+  // via a deep-link from Orders or Simulation. Initial value is captured by
+  // resolveDeepLinkInitialState (which also activated the scenario during
+  // the very first render), so the chip paints in the same commit as the
+  // selected-dept Inspector — no flicker.
+  const [lineDeepLink, setLineDeepLink] = useState<string | null>(
+    initialSelection.lineDeepLink,
+  );
+  useEffect(() => {
+    // Clean the URL once we've consumed the params so a refresh inside the
+    // Builder doesn't re-fire activation. Auto-hide the flash chip after 4s.
+    const scenarioId = searchParams.get('scenario');
+    const lineId = searchParams.get('line');
+    if (scenarioId || lineId) {
+      const next = new URLSearchParams(searchParams);
+      next.delete('scenario');
+      next.delete('line');
+      setSearchParams(next, { replace: true });
+    }
+    if (!initialSelection.lineDeepLink) return;
+    const t = setTimeout(() => setLineDeepLink(null), 4000);
+    return () => clearTimeout(t);
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [searchParams]);
+
   /** Which simulation engine the ▶ RUN SIM button uses.
    *  • pml    — graph-driven DES over the twin's PML blocks + connectors
    *  • legacy — opens the operation-list LiveSim page (current behaviour) */
@@ -636,9 +732,13 @@ export function BuilderPage() {
   );
 
   const beginSelectRect = useCallback(
-    (startX: number, startY: number) => {
+    (startX: number, startY: number, additive: boolean) => {
       const { sx: sx0, sy: sy0 } = screenToWorldSvg(startX, startY);
       setSelectRect({ sx0, sy0, sx1: sx0, sy1: sy0 });
+      // Snapshot the existing selection so SHIFT+marquee can UNION rather than
+      // replace. Captured at gesture start so live React state changes during
+      // the drag don't muddy the merge.
+      const baseIds = additive ? new Set(selectedWsIdsRef.current) : new Set<string>();
       let moved = false;
       function move(ev: MouseEvent) {
         const { sx, sy } = screenToWorldSvg(ev.clientX, ev.clientY);
@@ -651,9 +751,13 @@ export function BuilderPage() {
         window.removeEventListener('mouseup', up);
         if (!moved) {
           // Plain click with the select tool — clear selection like the
-          // pointer tool would, so the gesture isn't a dead-end.
-          setSelected(null);
-          setExtraSelectedWs(new Set());
+          // pointer tool would, so the gesture isn't a dead-end. SHIFT+click
+          // on empty canvas preserves the current selection (additive intent
+          // with nothing to add is a no-op).
+          if (!additive) {
+            setSelected(null);
+            setExtraSelectedWs(new Set());
+          }
           setSelectRect(null);
           return;
         }
@@ -675,11 +779,14 @@ export function BuilderPage() {
             hits.push(w.id);
           }
         }
-        if (hits.length === 0) {
+        const merged = new Set<string>(baseIds);
+        for (const id of hits) merged.add(id);
+        if (merged.size === 0) {
           setSelected(null);
           setExtraSelectedWs(new Set());
         } else {
-          const [first, ...rest] = hits;
+          const all = Array.from(merged);
+          const [first, ...rest] = all;
           setSelected({ kind: 'ws', id: first });
           setExtraSelectedWs(new Set(rest));
         }
@@ -700,7 +807,7 @@ export function BuilderPage() {
     if (t.tagName !== 'svg' && !(t as SVGElement).getAttribute?.('data-canvas-bg')) return;
     if (tool === 'select') {
       e.preventDefault();
-      beginSelectRect(e.clientX, e.clientY);
+      beginSelectRect(e.clientX, e.clientY, e.shiftKey);
       return;
     }
     beginPanFromPoint(e.clientX, e.clientY);
@@ -766,10 +873,15 @@ export function BuilderPage() {
       })();
       if (!initial) return;
       // Preserve a multi-selection when the user grabs a workstation that's
-      // already part of it. Otherwise replace with a single selection.
+      // already part of it. Otherwise replace with a single selection. SHIFT
+      // is reserved for toggling — leave the selection untouched on mousedown
+      // so the click handler (fires on mouseup-without-drag) can flip the
+      // membership without us first replacing it here.
       const inMulti = kind === 'ws' && selectedWsIdsRef.current.has(id);
-      setSelected({ kind, id });
-      if (!inMulti) setExtraSelectedWs(new Set());
+      if (!e.shiftKey) {
+        setSelected({ kind, id });
+        if (!inMulti) setExtraSelectedWs(new Set());
+      }
       let moved = false;
       function onMove(ev: MouseEvent) {
         const dx = (ev.clientX - startX) / zoomRef.current;
@@ -889,6 +1001,12 @@ export function BuilderPage() {
       setSelected({ kind: 'ws', id: first });
       setExtraSelectedWs(new Set(rest));
     }
+    // Drop the buffer once the cluster lands so the paste-preview ghost
+    // and the "N ON CLIPBOARD" chip clear — the canvas returns to its
+    // resting drag/select look instead of trailing a ghost under the
+    // cursor after the paste is done. To paste another cluster, ⌘C re-fills
+    // the buffer. (⌘D still handles single-block duplication unchanged.)
+    setClipboard(null);
   }, [pasteWorkstations]);
 
   const cutSelection = useCallback(() => {
@@ -1227,6 +1345,31 @@ export function BuilderPage() {
           >
             {savedAt ? `✓ SAVED · ${savedAt}` : '💾 SAVE'}
           </button>
+          <button
+            onClick={() => {
+              if (activeScenarioId === null) return;
+              const name = twin.name || 'this scenario';
+              if (window.confirm(`Delete scenario "${name}"? This cannot be undone.`)) {
+                deleteScenario(activeScenarioId);
+                setSelected(null);
+              }
+            }}
+            disabled={activeScenarioId === null}
+            style={{
+              ...btnSec,
+              color: activeScenarioId === null ? SW_COLORS.muted : SW_COLORS.alarm,
+              borderColor: activeScenarioId === null ? SW_COLORS.line : SW_COLORS.alarm + '60',
+              cursor: activeScenarioId === null ? 'not-allowed' : 'pointer',
+              opacity: activeScenarioId === null ? 0.55 : 1,
+            }}
+            title={
+              activeScenarioId === null
+                ? 'Canonical factory cannot be deleted — switch to a scenario first, or fork via SAVE AS…'
+                : `Delete the active scenario "${twin.name}"`
+            }
+          >
+            🗑 DELETE
+          </button>
           {(() => {
             const simulatableCount = twin.workstations.filter(
               (ws) => ws.operation.opId != null,
@@ -1300,19 +1443,6 @@ export function BuilderPage() {
               </span>
             </button>
           )}
-          {activeScenarioId !== null && (
-            <button
-              onClick={() => {
-                if (window.confirm('Delete this scenario?')) {
-                  deleteScenario(activeScenarioId);
-                }
-              }}
-              style={{ ...btnSec, color: SW_COLORS.alarm, borderColor: SW_COLORS.alarm + '60' }}
-              title="Delete the active scenario"
-            >
-              ✕
-            </button>
-          )}
         </div>
 
         <div style={{ flex: 1 }} />
@@ -1383,7 +1513,7 @@ export function BuilderPage() {
             borderRadius: 6,
             border: `1px solid ${SW_COLORS.line}`,
           }}
-          title="Select tool — drag a rectangle to pick multiple workstations"
+          title="Select tool (V) — drag a rectangle to pick multiple workstations · hold ⇧ to add to the existing selection"
         >
           <button
             onClick={() => {
@@ -1418,7 +1548,7 @@ export function BuilderPage() {
             clean at rest. */}
         {(selectedWsIds.size > 0 || clipboard) && (
           <div
-            title="Use the ▭ SELECT tool to drag a marquee · ⌘/Ctrl+C copy · ⌘/Ctrl+V paste at cursor · ⌘/Ctrl+X cut · ⌘/Ctrl+A select all"
+            title="▭ SELECT marquee · ⇧+Click toggles a station in/out · ⌘/Ctrl+A select all · ⌘/Ctrl+C copy · ⌘/Ctrl+X cut · ⌘/Ctrl+V paste at cursor · Esc clears"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -1765,6 +1895,46 @@ export function BuilderPage() {
         </div>
       )}
 
+      {/* Deep-link confirmation chip — shows for a few seconds after the
+          user lands on /builder?line=<id> from the Simulation or Orders tab,
+          confirming which line is now selected in the Inspector. */}
+      {lineDeepLink && (() => {
+        const ln = (twin.lines ?? []).find((l) => l.id === lineDeepLink);
+        if (!ln) return null;
+        return (
+          <div
+            onClick={() => setLineDeepLink(null)}
+            title="Click to dismiss"
+            style={{
+              gridColumn: '3',
+              gridRow: '2',
+              position: 'absolute',
+              top: 56,
+              right: 16,
+              zIndex: 6,
+              padding: '8px 12px',
+              background: SW_COLORS.ink,
+              color: '#fff',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              fontWeight: 700,
+              borderRadius: 6,
+              boxShadow: '0 6px 16px rgba(0,0,0,0.22)',
+              cursor: 'pointer',
+              borderLeft: `4px solid ${SW_COLORS.ok}`,
+              display: 'flex',
+              alignItems: 'center',
+              gap: 8,
+            }}
+          >
+            <span style={{ fontFamily: SW_FONTS.display, fontSize: 10, letterSpacing: '0.1em', color: SW_COLORS.ok }}>
+              ✎ EDITING LINE
+            </span>
+            <span>{ln.name}</span>
+          </div>
+        );
+      })()}
+
       {/* LEFT PALETTE */}
       <Palette
         tab={paletteTab}
@@ -1860,7 +2030,7 @@ export function BuilderPage() {
               borderRadius: 6,
             }}
           >
-            ▭ Drag a rectangle to select workstations (Esc or V to exit)
+            ▭ Drag to select · ⇧+drag adds to selection · ⇧+click toggles a station · Esc or V to exit
           </div>
         )}
 
@@ -1942,7 +2112,16 @@ export function BuilderPage() {
               zoom={zoom}
               pan={pan}
               stageSize={stageSize}
-              onSelect={(s) => {
+              clipboardGhost={
+                // Only paint the ghost when paste is the next likely action —
+                // i.e. no drop tool armed, not wiring connectors, not arming
+                // the marquee. Keeps the canvas quiet at rest while still
+                // showing the user exactly where ⌘V will land.
+                clipboard && drop.kind === 'none' && !connect.on && tool === 'pointer' && hoverCell
+                  ? { workstations: clipboard.workstations, anchor: clipboard.anchor }
+                  : null
+              }
+              onSelect={(s, modifiers) => {
                 if (connect.on && s?.kind === 'ws') {
                   if (connect.fromWsId === null) {
                     // Default fromPort to the source block's first output —
@@ -1967,8 +2146,45 @@ export function BuilderPage() {
                   }
                   return;
                 }
-                // Plain click — single selection. Multi-select happens via
-                // the SELECT tool's rectangle marquee, not modifier keys.
+                // SHIFT+click toggles a workstation in/out of multi-selection
+                // without disturbing the rest — the Figma/Sketch convention.
+                // Departments are not multi-selectable, so SHIFT+dept still
+                // behaves like a single-select.
+                if (modifiers?.shift && s?.kind === 'ws') {
+                  const id = s.id;
+                  const anchorIsWs = selected?.kind === 'ws';
+                  const anchorId = anchorIsWs ? selected.id : null;
+                  const inExtras = extraSelectedWs.has(id);
+                  if (anchorId === id) {
+                    // Toggling off the anchor — promote an extra if any, else
+                    // clear the selection entirely.
+                    if (extraSelectedWs.size > 0) {
+                      const [next, ...rest] = Array.from(extraSelectedWs);
+                      setSelected({ kind: 'ws', id: next });
+                      setExtraSelectedWs(new Set(rest));
+                    } else {
+                      setSelected(null);
+                    }
+                    return;
+                  }
+                  if (inExtras) {
+                    const next = new Set(extraSelectedWs);
+                    next.delete(id);
+                    setExtraSelectedWs(next);
+                    return;
+                  }
+                  // Not yet selected — add. If no ws anchor, this id becomes
+                  // the anchor (preserving any dept anchor would be confusing
+                  // since multi-select is ws-only).
+                  if (!anchorIsWs) {
+                    setSelected({ kind: 'ws', id });
+                    setExtraSelectedWs(new Set());
+                  } else {
+                    setExtraSelectedWs(new Set([...extraSelectedWs, id]));
+                  }
+                  return;
+                }
+                // Plain click — single selection (resets any multi-select).
                 setExtraSelectedWs(new Set());
                 setSelected(s);
               }}
@@ -2093,22 +2309,10 @@ export function BuilderPage() {
         >
           <CountChip label="DEPTS" value={twin.departments.length} />
           <CountChip label="STATIONS" value={twin.workstations.length} />
-          <span
-            style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 9,
-              fontWeight: 600,
-              color: SW_COLORS.muted,
-              letterSpacing: '0.06em',
-              padding: '6px 10px',
-              background: SW_COLORS.paper + 'cc',
-              border: `1px solid ${SW_COLORS.line}`,
-              borderRadius: 6,
-            }}
-          >
-            DRAG · R rotate · Del remove · ⌘D duplicate · Esc cancel · SCROLL zoom · SPACE pan · ⌘0 reset
-          </span>
         </div>
+
+        {/* Top-right controls dropdown — keyboard / pointer shortcut reference */}
+        <ControlsMenu />
       </div>
 
       {/* RIGHT SPLITTER (canvas ↔ inspector) */}
@@ -2515,9 +2719,17 @@ interface CanvasSVGProps {
   stageSize: { w: number; h: number };
   onSelect: (
     s: { kind: 'dept' | 'ws'; id: string } | null,
+    modifiers?: { shift: boolean },
   ) => void;
   onRemoveConnector: (id: string) => void;
   onStartDrag: (kind: 'ws' | 'dept', id: string, e: React.MouseEvent) => void;
+  /** Clipboard ghost — when non-empty AND no other tool is armed, the canvas
+   *  paints translucent footprints at the cursor previewing where ⌘V would
+   *  drop the buffered cluster. Lets users aim a paste without guessing. */
+  clipboardGhost: {
+    workstations: Workstation[];
+    anchor: { x: number; y: number };
+  } | null;
 }
 
 /** Footprint center of a workstation in screen coordinates. Used as the
@@ -2528,7 +2740,7 @@ function workstationScreenCenter(ws: Workstation): { sx: number; sy: number } {
 }
 
 function CanvasSVG(props: CanvasSVGProps) {
-  const { twin, lens, hoverCell, drop, selected, selectedWsIds, selectRect, zoom, pan, stageSize } = props;
+  const { twin, lens, hoverCell, drop, selected, selectedWsIds, selectRect, zoom, pan, stageSize, clipboardGhost } = props;
 
   // Grid subdivision density. As the user zooms in, each integer cell is
   // divided into more sub-cells (powers of 2). Steps are tuned so the next
@@ -2704,7 +2916,7 @@ function CanvasSVG(props: CanvasSVGProps) {
           dept={d}
           selected={selected?.kind === 'dept' && selected.id === d.id}
           placing={props.drop.kind !== 'none'}
-          onClick={() => props.onSelect({ kind: 'dept', id: d.id })}
+          onClick={(e) => props.onSelect({ kind: 'dept', id: d.id }, { shift: e.shiftKey })}
           onMouseDown={(e) => props.onStartDrag('dept', d.id, e)}
         />
       ))}
@@ -2731,7 +2943,7 @@ function CanvasSVG(props: CanvasSVGProps) {
               connectSource={isConnectSource}
               lens={lens}
               placing={props.drop.kind !== 'none'}
-              onClick={() => props.onSelect({ kind: 'ws', id: w.id })}
+              onClick={(e) => props.onSelect({ kind: 'ws', id: w.id }, { shift: e.shiftKey })}
               onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
             />
           );
@@ -2747,6 +2959,38 @@ function CanvasSVG(props: CanvasSVGProps) {
       {/* HOVER PREVIEW */}
       {hoverCell && drop.kind !== 'none' && (
         <HoverPreview cell={hoverCell} drop={drop} />
+      )}
+
+      {/* CLIPBOARD GHOST — translucent footprints showing where ⌘V will
+          paste the buffered cluster. Anchored to the hover cell minus the
+          clipboard anchor offset so the buffer's top-left lands exactly
+          where the cursor is, matching pasteClipboard's anchor math. */}
+      {hoverCell && clipboardGhost && (
+        <g pointerEvents="none">
+          {clipboardGhost.workstations.map((w) => {
+            const dx = hoverCell.x - clipboardGhost.anchor.x;
+            const dy = hoverCell.y - clipboardGhost.anchor.y;
+            const nx = w.position.x + dx;
+            const ny = w.position.y + dy;
+            const fp = wsFootprint(w);
+            const tl = isoProj(nx, ny);
+            const tr = isoProj(nx + fp.w, ny);
+            const br = isoProj(nx + fp.w, ny + fp.d);
+            const bl = isoProj(nx, ny + fp.d);
+            return (
+              <polygon
+                key={w.id}
+                points={ptsToStr([tl, tr, br, bl])}
+                fill={SW_COLORS.brand}
+                fillOpacity={0.1}
+                stroke={SW_COLORS.brand}
+                strokeOpacity={0.6}
+                strokeWidth={1.5 / Math.max(0.001, zoom)}
+                strokeDasharray={`${3 / Math.max(0.001, zoom)} ${2 / Math.max(0.001, zoom)}`}
+              />
+            );
+          })}
+        </g>
       )}
 
       {/* SELECT-TOOL MARQUEE — drawn last so it sits on top of everything.
@@ -2783,7 +3027,7 @@ function DepartmentShape({
   dept: Department;
   selected: boolean;
   placing: boolean;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
   const tl = isoProj(dept.bounds.x, dept.bounds.y);
@@ -2799,7 +3043,7 @@ function DepartmentShape({
       onClick={(e) => {
         if (placing) return; // let stage's onCanvasClick handle placement
         e.stopPropagation();
-        onClick();
+        onClick(e);
       }}
       onMouseDown={(e) => {
         if (placing) return; // don't start a dept drag while a tool is armed
@@ -5484,6 +5728,173 @@ function CountChip({ label, value }: { label: string; value: number }) {
     >
       <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1.2px' }}>{label}</span>
       <strong style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, color: SW_COLORS.ink }}>{value}</strong>
+    </div>
+  );
+}
+
+const CONTROL_ROWS: { keys: string; desc: string }[] = [
+  { keys: 'DRAG',     desc: 'Move workstation' },
+  { keys: 'R',        desc: 'Rotate' },
+  { keys: 'Del',      desc: 'Remove' },
+  { keys: '⌘D',       desc: 'Duplicate' },
+  { keys: 'V',        desc: 'Select tool · marquee' },
+  { keys: '⇧+CLICK',  desc: 'Add / remove from selection' },
+  { keys: '⌘A',       desc: 'Select all stations' },
+  { keys: '⌘C',       desc: 'Copy selection' },
+  { keys: '⌘X',       desc: 'Cut selection' },
+  { keys: '⌘V',       desc: 'Paste at cursor' },
+  { keys: '⌘Z',       desc: 'Undo · ⇧⌘Z redo' },
+  { keys: 'Esc',      desc: 'Cancel · clear selection' },
+  { keys: 'SCROLL',   desc: 'Zoom' },
+  { keys: 'SPACE',    desc: 'Pan' },
+  { keys: '⌘0',       desc: 'Reset view' },
+];
+
+function ControlsMenu() {
+  const [open, setOpen] = useState(false);
+  const rootRef = useRef<HTMLDivElement>(null);
+
+  useEffect(() => {
+    if (!open) return;
+    const onClick = (e: MouseEvent) => {
+      if (!rootRef.current?.contains(e.target as Node)) setOpen(false);
+    };
+    const onKey = (e: KeyboardEvent) => {
+      if (e.key === 'Escape') setOpen(false);
+    };
+    document.addEventListener('mousedown', onClick);
+    document.addEventListener('keydown', onKey);
+    return () => {
+      document.removeEventListener('mousedown', onClick);
+      document.removeEventListener('keydown', onKey);
+    };
+  }, [open]);
+
+  return (
+    <div
+      ref={rootRef}
+      style={{
+        position: 'absolute',
+        top: 12,
+        right: 12,
+        zIndex: 6,
+      }}
+    >
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        aria-haspopup="listbox"
+        aria-expanded={open}
+        style={{
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 8,
+          fontFamily: SW_FONTS.mono,
+          fontSize: 9,
+          fontWeight: 700,
+          color: SW_COLORS.muted,
+          letterSpacing: '0.12em',
+          padding: '6px 10px',
+          background: SW_COLORS.paper + 'cc',
+          border: `1px solid ${open ? SW_COLORS.brand + '99' : SW_COLORS.line}`,
+          borderRadius: 6,
+          cursor: 'pointer',
+          textTransform: 'uppercase',
+          transition: 'border-color 120ms ease',
+        }}
+      >
+        <span>Controls</span>
+        <span
+          aria-hidden
+          style={{
+            display: 'inline-block',
+            transform: open ? 'rotate(180deg)' : 'rotate(0deg)',
+            transition: 'transform 180ms ease',
+            color: open ? SW_COLORS.brand : SW_COLORS.muted,
+            fontSize: 10,
+            lineHeight: 1,
+          }}
+        >
+          ▾
+        </span>
+      </button>
+      <div
+        role="listbox"
+        style={{
+          position: 'absolute',
+          top: 'calc(100% + 4px)',
+          right: 0,
+          // Wide enough that every description fits on a single line and the
+          // key column doesn't squeeze them. The two-column grid below relies
+          // on this so chips of different widths can't shove descriptions
+          // around the way the old space-between flex layout did.
+          minWidth: 280,
+          background: '#FFFFFFF5',
+          backdropFilter: 'blur(8px)',
+          WebkitBackdropFilter: 'blur(8px)',
+          border: open ? `1px solid ${SW_COLORS.brand}66` : '1px solid transparent',
+          borderRadius: 6,
+          boxShadow: open
+            ? '0 12px 32px rgba(15,20,25,0.18), 0 2px 6px rgba(15,20,25,0.1)'
+            : 'none',
+          padding: open ? 4 : 0,
+          maxHeight: open ? 480 : 0,
+          overflow: 'hidden',
+          opacity: open ? 1 : 0,
+          pointerEvents: open ? 'auto' : 'none',
+          transition: 'max-height 220ms cubic-bezier(0.22, 1, 0.36, 1), border-color 160ms ease, box-shadow 160ms ease, opacity 160ms ease',
+        }}
+      >
+        {CONTROL_ROWS.map((row) => (
+          <div
+            key={row.keys}
+            role="option"
+            aria-selected={false}
+            style={{
+              // Fixed-width key column · flexible description column. Keeps
+              // every chip in the same lane (no shifting) and every label
+              // hanging from the same left edge regardless of chip width.
+              display: 'grid',
+              gridTemplateColumns: '92px 1fr',
+              alignItems: 'center',
+              gap: 12,
+              padding: '6px 8px',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              color: SW_COLORS.ink,
+              borderRadius: 4,
+            }}
+          >
+            <span
+              style={{
+                fontWeight: 800,
+                color: SW_COLORS.ink,
+                background: '#0F141908',
+                border: `1px solid ${SW_COLORS.line}`,
+                borderRadius: 4,
+                padding: '2px 6px',
+                letterSpacing: '0.04em',
+                textAlign: 'center',
+                whiteSpace: 'nowrap',
+                justifySelf: 'stretch',
+              }}
+            >
+              {row.keys}
+            </span>
+            <span
+              style={{
+                color: SW_COLORS.steel,
+                fontWeight: 600,
+                letterSpacing: '0.02em',
+                textAlign: 'left',
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {row.desc}
+            </span>
+          </div>
+        ))}
+      </div>
     </div>
   );
 }

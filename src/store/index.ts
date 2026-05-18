@@ -15,6 +15,7 @@ export {
   type CustomMachineSpec,
   type CustomWorkerArchetype,
   type CustomProductSpec,
+  type OrderDraft,
 } from './project';
 export {
   useFactoryLibrary,

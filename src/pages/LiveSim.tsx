@@ -14,7 +14,7 @@
 import { useEffect, useMemo, useRef, useState } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Button, ToggleGroup, HudSelect, TimeDisplay } from '../components';
+import { Button, ToggleGroup, HudSelect, TimeDisplay, type HudSelectOption } from '../components';
 import {
   buildSimConfig,
   buildSimConfigFromTwin,
@@ -39,12 +39,17 @@ import {
   shiftProgressPct,
   unitToSeconds,
 } from '../simulation/timeUnit';
-import { useProject, useGarments } from '../store';
+import { useProject, useGarments, type OrderDraft } from '../store';
 import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, PRODUCTION_SYSTEMS, MACHINE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
 import { getBlockSpec, apparelRoleFor } from '../domain/pml';
-import type { Workstation } from '../domain/twin';
+import {
+  type DepartmentColorKey,
+  type ProductionSystemKey,
+  type Workstation,
+} from '../domain/twin';
+import { buildSeededDraftTwin } from '../lib/build-draft-twin';
 import { REFERENCE_MODELS, REFERENCE_MODELS_BY_SLUG, type ReferenceModel } from '../domain/reference-models';
 import { buildReferenceTwin, buildGarmentTwin } from '../domain/reference-twin';
 import type { GarmentTemplate } from '../domain/garments';
@@ -146,10 +151,27 @@ export function LiveSimPage() {
   }, [refCtx.slug, refCtx.variantKey]);
 
   // Source select — twin path (default when no reference is loaded) draws the
-  // simulation from the user's Factory Builder twin; reference path keeps the
-  // legacy garment-template flow for paper comparisons.
+  // simulation from the user's Factory Builder twin; `source=reference` keeps
+  // the legacy garment-template flow for paper comparisons; `source=order:<id>`
+  // means the user came from the Orders wizard (or picked an order from the
+  // SOURCE dropdown) and wants the run driven by that order's garment / crew /
+  // production system rather than whatever the canonical twin pins.
   const sourceParam = searchParams.get('source');
-  const useTwinSource = sourceParam === 'twin' || (!refOverride && sourceParam !== 'reference');
+  // Accept legacy `source=order` (no id) by falling through to the latest
+  // saved order — keeps deep-links from older sessions working.
+  const orderIdFromParam = sourceParam?.startsWith('order:')
+    ? sourceParam.slice('order:'.length)
+    : sourceParam === 'order'
+      ? project.orders[0]?.id ?? null
+      : null;
+  const activeOrder = useMemo(
+    () => (orderIdFromParam ? project.orders.find((o) => o.id === orderIdFromParam) ?? null : null),
+    [orderIdFromParam, project.orders],
+  );
+  const isOrderSource = !!activeOrder;
+  const useTwinSource =
+    sourceParam === 'twin' ||
+    (!refOverride && sourceParam !== 'reference' && !isOrderSource && !sourceParam?.startsWith('order'));
 
   // Engine scope — three levels: a single sewing line, an entire department
   // (every wired line whose deptId matches), or the whole factory (every
@@ -217,19 +239,29 @@ export function LiveSimPage() {
     }
   }, [useTwinSource, activeTwin, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all, selectedLineId]);
 
+  // When the user picks an order from the SOURCE dropdown (or arrives from
+  // the Orders wizard), the engine should reflect that order's garment and
+  // crew instead of the global `selectedGarmentId` / slider state.
+  const orderGarment = activeOrder ? garments.byId[activeOrder.garmentTemplateId] ?? null : null;
+
   const garment = twinBuild?.meta.garment
     ?? refOverride?.garment
+    ?? orderGarment
     ?? (garments.byId[garmentId] ?? garments.all[0]);
   // Effective operator count for display + reference path. Twin path always
   // shows the slider's current value (re-seeded by the effect below when the
   // twin changes). Reference path uses the variant's authored count.
-  const effectiveOperators = twinBuild ? operators : (refOverride?.operators ?? operators);
+  const effectiveOperators = twinBuild
+    ? operators
+    : activeOrder
+      ? operators
+      : (refOverride?.operators ?? operators);
 
   // Production-system bundle size — picked up from the Orders wizard. PBS
   // batches 30, modular/UPS/make-through run piece-by-piece (size 1), etc.
   // Reference-paper runs keep the paper's own bundle size, so they're
   // unaffected by this hook-up.
-  const productionSystemId = project.selectedProductionSystem;
+  const productionSystemId = activeOrder?.productionSystem ?? project.selectedProductionSystem;
   const productionSystemDef = PRODUCTION_SYSTEMS[productionSystemId];
   const systemBundleSize = refOverride
     ? undefined
@@ -277,6 +309,24 @@ export function LiveSimPage() {
       lastSeedRef.current = twinBuild.meta.seedOperators;
     }
   }, [twinBuild]);
+
+  // Snap slider state to the active order whenever the user switches between
+  // orders in the SOURCE dropdown (or arrives via /sim?source=order:<id>).
+  // Tracked separately from the twin seed so toggling Order → Twin → Order
+  // restores the order's values instead of leaving the prior twin state.
+  const lastOrderIdRef = useRef<string | null>(null);
+  useEffect(() => {
+    if (!activeOrder) {
+      lastOrderIdRef.current = null;
+      return;
+    }
+    if (lastOrderIdRef.current !== activeOrder.id) {
+      setGarmentId(activeOrder.garmentTemplateId);
+      setOperators(activeOrder.operators);
+      setBundleOverride(null);
+      lastOrderIdRef.current = activeOrder.id;
+    }
+  }, [activeOrder]);
 
   const baseSim = useSim(config);
 
@@ -551,19 +601,29 @@ export function LiveSimPage() {
         </div>
         <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
 
-        {/* SOURCE chip — surfaces whether the engine is reading the
-            Builder-authored twin (the user's factory) or a published
-            reference paper, plus the count of workstations being simulated. */}
-        <SimSourceChip
+        {/* SOURCE picker — clicking opens a dropdown of every source the
+            engine can run: the Builder-authored twin (the user's factory),
+            any orders they've committed from the Orders wizard, and the
+            loaded reference paper (when active). Switching is instant —
+            the slider/garment/system snap to the picked source. */}
+        <SimSourceMenu
+          activeOrderId={activeOrder?.id ?? null}
+          orders={project.orders}
+          garmentsById={garments.byId}
           twinBuild={inMultiLineScope && effectiveTwinMeta ? { meta: effectiveTwinMeta } : twinBuild}
           refOverride={refOverride}
           refLoadedLabel={refLoadedLabel}
           totalWorkstations={activeTwin.workstations.length}
           factoryName={project.meta.name}
-          onClearReference={() => {
-            clearRefContext();
+          onPickTwin={() => {
+            if (refOverride) clearRefContext();
             setSearchParams({ source: 'twin' });
           }}
+          onPickOrder={(id) => {
+            if (refOverride) clearRefContext();
+            setSearchParams({ source: `order:${id}` });
+          }}
+          onNewOrder={() => navigate('/orders')}
         />
 
         <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
@@ -785,6 +845,96 @@ export function LiveSimPage() {
           </div>
         )}
         <div style={{ flex: 1 }} />
+
+        {/* EDIT IN BUILDER — opens a fresh, isolated Builder draft in a new
+            browser tab. We DO NOT touch the active twin: instead we build a
+            blank twin in memory with a single Sewing dept + one SewingLine
+            seeded from the currently-scoped line (name, garment, production
+            system, operator target), push it as a non-active scenario, and
+            open `/builder?scenario=<id>&line=<id>` in a new tab. The
+            originating tab keeps its current view and simulation state.
+            When scope is factory/dept (no specific line), the seed line
+            still carries the active sim's garment/operator-count so the
+            user lands on something coherent. */}
+        {(() => {
+          const scopedLine =
+            scope.kind === 'line'
+              ? linesInTwin.find((l) => l.id === scope.id)
+              : null;
+          const label = scopedLine
+            ? `Edit ${scopedLine.name} in Builder`
+            : 'Open Builder draft';
+          return (
+            <button
+              type="button"
+              onClick={() => {
+                // Pick the garment template the seed should populate. A
+                // specific line's pinned garment wins; otherwise we use the
+                // sim's active garment so the draft reflects what the user
+                // is currently looking at.
+                const seedGarmentId =
+                  scopedLine?.garmentId ?? garmentId;
+                const seedGarment = garments.byId[seedGarmentId];
+                const draftName = scopedLine
+                  ? scopedLine.name
+                  : `Line · ${seedGarment?.name ?? seedGarmentId ?? 'New line'}`;
+                const blank = buildSeededDraftTwin({
+                  draftName,
+                  productionSystem: (scopedLine?.productionSystem ?? 'PBS') as ProductionSystemKey,
+                  garment: seedGarment,
+                  operatorTarget: operators,
+                  color: (scopedLine?.color ?? 'brand') as DepartmentColorKey,
+                  notes: scopedLine
+                    ? `Draft branched from ${scopedLine.name}.`
+                    : `Draft opened from Simulation (${seedGarment?.name ?? seedGarmentId}, ${operators} operators).`,
+                });
+                const scenarioId = useTwin
+                  .getState()
+                  .createScenarioFromTwin({
+                    name: `Draft · ${draftName}`,
+                    notes: scopedLine
+                      ? `Edit-in-Builder draft of ${scopedLine.name}.`
+                      : 'Edit-in-Builder draft from Simulation.',
+                    twin: blank.twin,
+                    activate: false,
+                  });
+                const targetHash = `#/builder?scenario=${encodeURIComponent(scenarioId)}&line=${encodeURIComponent(blank.lineId)}`;
+                const url = `${window.location.pathname}${window.location.search}${targetHash}`;
+                const win = window.open(url, '_blank', 'noopener');
+                if (!win) {
+                  // Popup blocked — fall through to in-tab navigation so the
+                  // user still ends up in the draft.
+                  navigate(
+                    `/builder?scenario=${encodeURIComponent(scenarioId)}&line=${encodeURIComponent(blank.lineId)}`,
+                  );
+                }
+              }}
+              title={
+                scopedLine
+                  ? `Open ${scopedLine.name} in a fresh Builder draft (new tab). The current factory is untouched.`
+                  : 'Open a fresh Builder draft in a new tab. The current factory is untouched.'
+              }
+              style={{
+                display: 'inline-flex',
+                alignItems: 'center',
+                gap: 6,
+                padding: '6px 12px',
+                fontFamily: SW_FONTS.display,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.12em',
+                color: '#fff',
+                background: scopedLine ? SW_COLORS.brand : '#ffffff14',
+                border: `1px solid ${scopedLine ? SW_COLORS.brand : '#ffffff30'}`,
+                borderRadius: SW_RADIUS.sm,
+                cursor: 'pointer',
+              }}
+            >
+              <span aria-hidden style={{ fontSize: 12, lineHeight: 1 }}>↗</span>
+              {label.toUpperCase()}
+            </button>
+          );
+        })()}
       </div>
 
       {/* REFERENCE-LINE PICKER ─────────────────────────────────────────────
@@ -1398,112 +1548,172 @@ export function LiveSimPage() {
   );
 }
 
-interface SimSourceChipProps {
+interface SimSourceMenuProps {
+  activeOrderId: string | null;
+  orders: OrderDraft[];
+  garmentsById: Record<string, GarmentTemplate>;
   twinBuild: { meta: BuildFromTwinMeta } | null;
   refOverride: { garment: GarmentTemplate; operators: number } | null;
   refLoadedLabel: string | null;
   totalWorkstations: number;
   factoryName: string;
-  onClearReference: () => void;
+  onPickTwin: () => void;
+  onPickOrder: (id: string) => void;
+  onNewOrder: () => void;
 }
 
-function SimSourceChip({
+/**
+ * SOURCE picker — a HudSelect-styled dropdown showing every source the engine
+ * can run: the canonical twin (always), each saved order from the Orders
+ * wizard, and the loaded reference paper (when active). Selecting an option
+ * switches the engine; the slider/garment snap to the picked source via the
+ * order-seed effect in LiveSimPage.
+ */
+function SimSourceMenu({
+  activeOrderId,
+  orders,
+  garmentsById,
   twinBuild,
   refOverride,
   refLoadedLabel,
   totalWorkstations,
   factoryName,
-  onClearReference,
-}: SimSourceChipProps) {
-  // The chip echoes the project's factory name verbatim so the SOURCE
-  // banner matches the TopBar (no hardcoded "MY FACTORY" placeholder).
+  onPickTwin,
+  onPickOrder,
+  onNewOrder,
+}: SimSourceMenuProps) {
   const factoryLabel = (factoryName?.trim() || 'Untitled factory').toUpperCase();
-  const isTwinSource = !!twinBuild && !refOverride;
+  const isOrderSource = !!activeOrderId && !refOverride;
   const isRefSource = !!refOverride;
+  const isTwinSource = !isOrderSource && !isRefSource;
   const simCount = twinBuild?.meta.simulatedWsIds.length ?? 0;
   const infraCount = twinBuild?.meta.infrastructure.length ?? 0;
-  const skipCount = twinBuild?.meta.skipped.length ?? 0;
-  // Stations + infrastructure = elements actually wired into the run. Genuine
-  // skipped count reflects only user errors (a Service block with no opId or
-  // an unresolved opId).
   const wiredCount = simCount + infraCount;
   const tone = isRefSource
     ? SW_COLORS.fabric
-    : isTwinSource
-      ? SW_COLORS.brand
-      : SW_COLORS.warn;
-  const stationsLabel = `${simCount} station${simCount === 1 ? '' : 's'}`;
-  const infraLabel = infraCount > 0
-    ? ` + ${infraCount} infra (Source/Pool/Sink)`
-    : '';
-  const label = isRefSource
-    ? `REFERENCE · ${refLoadedLabel ?? '—'}`
-    : isTwinSource
-      ? `${factoryLabel} · ${wiredCount} of ${totalWorkstations} wired · ${stationsLabel}${infraLabel}`
-      : 'NO SOURCE · build a factory first';
-  const skipTooltip =
-    twinBuild && twinBuild.meta.skipped.length > 0
-      ? '\n\nSkipped:\n' +
-        twinBuild.meta.skipped
-          .map(
-            (s) =>
-              `  • ${s.name} — ${s.reason === 'no-op-id' ? 'no operation assigned' : 'unresolved operation'}`,
-          )
-          .join('\n')
-      : '';
-  const infraTooltip =
-    twinBuild && twinBuild.meta.infrastructure.length > 0
-      ? '\n\nInfrastructure (wired as engine parameters):\n' +
-        twinBuild.meta.infrastructure
-          .map((i) => `  • ${i.name} — ${i.role}`)
-          .join('\n')
-      : '';
+    : isOrderSource
+      ? SW_COLORS.thread
+      : SW_COLORS.brand;
+
+  type SourceValue = `twin` | `order:${string}` | `ref`;
+
+  // The FACTORY row's meta has to be sensible in every mode — twinBuild is
+  // null when an order/reference is active, so fall back to the raw station
+  // count from activeTwin (which the parent already gives us via
+  // `totalWorkstations`). Only print "build a factory first" when the twin
+  // is genuinely empty.
+  const twinMeta = twinBuild
+    ? `${wiredCount} of ${totalWorkstations} wired · ${simCount} station${simCount === 1 ? '' : 's'}`
+    : totalWorkstations > 0
+      ? `${totalWorkstations} workstation${totalWorkstations === 1 ? '' : 's'}`
+      : 'build a factory first';
+
+  const orderOptions: HudSelectOption<SourceValue>[] = orders.map((o) => {
+    const g = garmentsById[o.garmentTemplateId];
+    const sys = PRODUCTION_SYSTEMS[o.productionSystem];
+    return {
+      value: `order:${o.id}`,
+      label: `${o.po} · ${g?.name ?? o.style}`,
+      tag: 'ORDER',
+      meta: `${o.operators} OPR · ${sys.short} · ${o.qty}/${o.deadlineDays}d`,
+    };
+  });
+
+  const refOption: HudSelectOption<SourceValue>[] = isRefSource
+    ? [{
+        value: 'ref',
+        label: refLoadedLabel ?? '—',
+        tag: 'REF',
+        meta: `${refOverride!.operators} OPR`,
+        disabled: true,
+      }]
+    : [];
+
+  const options: HudSelectOption<SourceValue>[] = [
+    {
+      value: 'twin',
+      label: factoryLabel,
+      tag: 'FACTORY',
+      meta: twinMeta,
+    },
+    ...orderOptions,
+    ...refOption,
+  ];
+
+  const currentValue: SourceValue = isRefSource
+    ? 'ref'
+    : isOrderSource
+      ? (`order:${activeOrderId}` as SourceValue)
+      : 'twin';
+
   const title = isTwinSource
-    ? `Reading workstations + connectors from Factory Builder.\nTopology: ${twinBuild?.meta.topologySource === 'connectors' ? 'flow connectors' : 'operation precedence'}.${infraTooltip}${skipTooltip}`
+    ? `Reading workstations + connectors from Factory Builder.\nTopology: ${twinBuild?.meta.topologySource === 'connectors' ? 'flow connectors' : 'operation precedence'}.`
     : isRefSource
-      ? `Reading a published case-study line. Clear the reference to return to ${factoryName?.trim() || 'your factory'}.`
-      : 'Open Factory Builder and assign an operation to a workstation.';
+      ? `Reading a published case-study line. Pick Factory to return to ${factoryName?.trim() || 'your factory'}.`
+      : `Running an order from the Orders wizard. Pick Factory or another order from the menu to switch.`;
 
   return (
-    <div
-      title={title}
-      style={{
-        display: 'flex',
-        alignItems: 'center',
-        gap: 8,
-        padding: '4px 10px',
-        border: `1px solid ${tone}55`,
-        background: `${tone}1a`,
-        borderRadius: SW_RADIUS.sm,
-        fontFamily: SW_FONTS.mono,
-        fontSize: 11,
-        fontWeight: 700,
-        color: '#fff',
-        cursor: 'help',
-      }}
-    >
-      <span style={{ color: tone, letterSpacing: '0.1em' }}>SOURCE</span>
-      <span>{label}</span>
-      {isTwinSource && skipCount > 0 && (
-        <span style={{ color: SW_COLORS.warn, fontSize: 10 }}>
-          · {skipCount} skipped
-        </span>
-      )}
-      {isRefSource && (
+    <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+      <span
+        style={{
+          color: tone,
+          fontFamily: SW_FONTS.mono,
+          fontSize: 11,
+          fontWeight: 800,
+          letterSpacing: '0.1em',
+        }}
+      >
+        SOURCE
+      </span>
+      <HudSelect<SourceValue>
+        value={currentValue}
+        options={options}
+        onChange={(v) => {
+          if (v === 'twin') onPickTwin();
+          else if (v.startsWith('order:')) onPickOrder(v.slice('order:'.length));
+        }}
+        mono
+        minWidth={300}
+        title={title}
+        variant="dark"
+        size="sm"
+      />
+      {orders.length === 0 ? (
         <button
-          onClick={onClearReference}
-          title={`Clear reference and return to ${factoryName?.trim() || 'your factory'}`}
+          onClick={onNewOrder}
+          title="Create a new production order"
+          style={{
+            background: 'transparent',
+            border: `1px dashed ${SW_COLORS.thread}99`,
+            color: SW_COLORS.thread,
+            padding: '4px 8px',
+            borderRadius: SW_RADIUS.sm,
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 800,
+            letterSpacing: '0.08em',
+            cursor: 'pointer',
+          }}
+        >
+          + NEW ORDER
+        </button>
+      ) : (
+        <button
+          onClick={onNewOrder}
+          title="Open the Orders wizard"
           style={{
             background: 'transparent',
             border: 'none',
-            color: tone,
-            cursor: 'pointer',
+            color: SW_COLORS.thread,
+            padding: '0 2px',
+            fontFamily: SW_FONTS.mono,
             fontSize: 14,
+            fontWeight: 900,
             lineHeight: 1,
-            padding: 0,
+            cursor: 'pointer',
           }}
         >
-          ×
+          +
         </button>
       )}
     </div>

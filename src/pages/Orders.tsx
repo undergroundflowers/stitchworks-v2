@@ -14,6 +14,36 @@ import type { Operation, OperationCategory } from '../domain/operations';
 import type { MachineCode } from '../domain/machines';
 import type { SkillId } from '../domain/workers';
 import { useProject, useGarments } from '../store';
+import { useTwin } from '../store/twin';
+import type { ProductionSystemKey } from '../domain/twin';
+import { buildSeededDraftTwin } from '../lib/build-draft-twin';
+
+/**
+ * Map the rich `ProductionSystem` set used by the Orders wizard onto the
+ * narrower `ProductionSystemKey` the Builder's SewingLine accepts. Anything
+ * outside the canonical five falls back to its closest cousin so the line
+ * still receives a sensible default.
+ */
+function mapToLineSystem(sys: ProductionSystem): ProductionSystemKey {
+  switch (sys) {
+    case 'PBS':
+    case 'modular':
+    case 'UPS':
+    case 'synchro':
+    case 'straight':
+      return sys;
+    case 'make_through':
+      return 'straight';
+    case 'clump':
+      return 'modular';
+    case 'bundle':
+      return 'PBS';
+    case 'unit_handle':
+      return 'UPS';
+    default:
+      return 'PBS';
+  }
+}
 
 interface OrderState {
   po: string;
@@ -61,14 +91,86 @@ export function OrdersPage() {
 
   /**
    * Save the order's chosen garment + computed crew to the project store,
-   * then navigate. Downstream pages (LiveSim, Reports, Resources skill tab)
-   * pick the new defaults up automatically.
+   * then navigate to LiveSim. Downstream pages (LiveSim, Reports, Resources
+   * skill tab) pick the new defaults up automatically.
    */
   function commit(target: '/sim') {
+    const saved = persistOrder();
+    navigate(`${target}?source=order:${saved.id}`);
+  }
+
+  /**
+   * Build-in-Builder flow — opens a fresh, isolated Factory Builder draft in
+   * a NEW BROWSER TAB so the user's current factory stays untouched on the
+   * original tab. Steps:
+   *
+   *   1. Persist the order (so it shows up in the LiveSim source dropdown).
+   *   2. Build a blank twin in memory with one Sewing department and one
+   *      seeded SewingLine carrying the order's garment, system and crew.
+   *   3. Push that twin as a new (non-active) scenario via the twin store.
+   *      It enters the user's scenario library so it can be returned to from
+   *      the canonical-factory picker later.
+   *   4. Open `/builder?scenario=<id>&line=<id>` in a new tab. Builder
+   *      activates the scenario in *this tab only* and selects the seeded
+   *      line's parent dept so the Inspector opens straight to its lines.
+   *
+   * Falling back to in-tab navigation when the popup is blocked keeps the
+   * flow usable when the browser refuses window.open.
+   */
+  function commitToBuilder() {
+    const saved = persistOrder();
+    const garment = garments.byId[saved.garmentTemplateId];
+    const draftName = `${saved.po} · ${garment?.name ?? saved.style}`;
+
+    // Shared builder also auto-places one workstation per operation in the
+    // garment bulletin, so the user lands on a populated sewing line ready
+    // to refine — not an empty Sewing Floor.
+    const draft = buildSeededDraftTwin({
+      draftName,
+      productionSystem: mapToLineSystem(saved.productionSystem),
+      garment,
+      operatorTarget: saved.operators,
+      color: 'brand',
+      notes: `Auto-created from ${saved.po} (${saved.client}). ${saved.qty} pcs in ${saved.deadlineDays} d.`,
+    });
+
+    const scenarioId = useTwin.getState().createScenarioFromTwin({
+      name: `Draft · ${draftName}`,
+      notes: `Build-in-Builder draft for ${saved.po} (${saved.client}).`,
+      twin: draft.twin,
+      // Do NOT activate in the originating tab — the new tab activates this
+      // scenario on its own, keeping this tab's view stable.
+      activate: false,
+    });
+
+    const targetHash = `#/builder?scenario=${encodeURIComponent(scenarioId)}&line=${encodeURIComponent(draft.lineId)}`;
+    const url = `${window.location.pathname}${window.location.search}${targetHash}`;
+    const win = window.open(url, '_blank', 'noopener');
+    if (!win) {
+      // Popup blocked — fall back to in-tab navigation so the flow still
+      // resolves. The scenario already exists in the library either way.
+      navigate(`/builder?scenario=${encodeURIComponent(scenarioId)}&line=${encodeURIComponent(draft.lineId)}`);
+    }
+  }
+
+  /** Shared side-effect for both flows: pin the order's garment, crew and
+   *  production system as the project's working defaults and push the order
+   *  onto the recent-orders list. Returns the persisted draft so callers
+   *  can address it by id. */
+  function persistOrder() {
     project.setSelectedGarment(order.garmentTemplateId);
     project.setDefaultOperators(crewSize);
     project.setSelectedProductionSystem(system);
-    navigate(target);
+    return project.addOrder({
+      po: order.po,
+      client: order.client,
+      style: order.style,
+      qty: order.qty,
+      deadlineDays: order.deadlineDays,
+      garmentTemplateId: order.garmentTemplateId,
+      operators: crewSize,
+      productionSystem: system,
+    });
   }
 
   const template = garments.byId[order.garmentTemplateId];
@@ -301,6 +403,9 @@ export function OrdersPage() {
 
         <div style={{ marginTop: 18, display:'flex', justifyContent:'flex-end', gap:10, flexWrap:'wrap' }}>
           <Button variant="secondary" onClick={()=>navigate('/builder')}>Save draft</Button>
+          <Button variant="dark" size="lg" icon="✎" onClick={commitToBuilder}>
+            Build in Builder
+          </Button>
           <Button variant="primary" size="lg" onClick={() => commit('/sim')}>Run simulation →</Button>
         </div>
       </div>
