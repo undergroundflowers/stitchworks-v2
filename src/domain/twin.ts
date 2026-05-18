@@ -40,7 +40,7 @@ import {
 // SCHEMA
 // ============================================================================
 
-export const TWIN_SCHEMA_VERSION = 6 as const;
+export const TWIN_SCHEMA_VERSION = 7 as const;
 export type TwinSchemaVersion = typeof TWIN_SCHEMA_VERSION;
 
 // ============================================================================
@@ -89,6 +89,48 @@ export interface Department {
   /** Axis-aligned bounds in world cells. v1 is rect-only; polygon is a
    *  future extension that bumps TWIN_SCHEMA_VERSION. */
   bounds: Rect;
+  notes?: string;
+}
+
+// ============================================================================
+// SEWING LINE — logical grouping of workstations inside one department
+// ============================================================================
+
+/**
+ * Production system that paces a line. Drives bundle size, WIP norms, and
+ * the canvas badge colour. Mirrors the legacy `productionSystem` string on
+ * the project-store `Line` so the two models stay aligned.
+ */
+export type ProductionSystemKey =
+  | 'PBS'       // Progressive Bundle System
+  | 'modular'   // Modular cell
+  | 'UPS'       // Unit Production System (overhead rail)
+  | 'synchro'   // Synchronised / takt
+  | 'straight'; // Straight line (no batching)
+
+/**
+ * A SewingLine is a named group of workstations inside one department.
+ * One department can hold several lines, each manufacturing a particular
+ * product (garmentId) under a particular production system. Lines do NOT
+ * own geometry — their footprint is the convex hull of their member
+ * workstations, computed at render time.
+ */
+export interface SewingLine {
+  id: string;
+  /** Parent department (must exist in the same twin). */
+  deptId: string;
+  name: string;
+  /** Production system that paces this line. */
+  productionSystem: ProductionSystemKey;
+  /** Garment template id this line is configured to produce. Optional —
+   *  empty during initial set-up. */
+  garmentId?: string;
+  /** Accent colour for the canvas band + tree pip. Defaults to the parent
+   *  department's colour when unset at create time. */
+  color: DepartmentColorKey;
+  /** Target operator headcount across the line. Informational — the engine
+   *  reads `workersRequired` per workstation. */
+  operatorTarget?: number;
   notes?: string;
 }
 
@@ -190,6 +232,12 @@ export interface Workstation {
   /** Department this workstation belongs to (Department.id). Required —
    *  every workstation lives inside a department. */
   deptId: string;
+  /** Sewing line this workstation belongs to, when its parent department
+   *  has any. Optional — workstations that don't sit on a line (storage
+   *  racks, supervisor desks, generic tables) leave this unset. The
+   *  simulation engine groups by `lineId` when present so each line runs
+   *  as its own end-to-end tandem network. */
+  lineId?: string;
   /** Catalogue id from ISO_FIXTURE_CATALOG. Drives the sprite + footprint. */
   catalogId: string;
   /** Display name. Defaults to the catalogue label at create time. */
@@ -243,6 +291,10 @@ export interface Twin {
   gridW: number;
   gridH: number;
   departments: Department[];
+  /** Named sewing lines that group workstations inside a department.
+   *  Optional in the payload for backwards compatibility — older twins
+   *  read it as `[]` after normalisation. */
+  lines: SewingLine[];
   workstations: Workstation[];
   /** Directed flow/operator/material links between workstations. Edge geometry
    *  is computed from the source + target workstation footprints; this list
@@ -316,6 +368,7 @@ function newId(prefix: string): string {
 }
 
 export const newDeptId = () => newId('dept');
+export const newLineId = () => newId('line');
 export const newWorkstationId = () => newId('ws');
 export const newTwinId = () => newId('twin');
 export const newScenarioId = () => newId('scn');
@@ -342,6 +395,7 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
     gridW: 36,
     gridH: 28,
     departments: [],
+    lines: [],
     workstations: [],
     connectors: [],
   };
@@ -365,6 +419,7 @@ export function normalizeTwin(input: unknown): Twin {
     gridW: t.gridW ?? 36,
     gridH: t.gridH ?? 28,
     departments: t.departments ?? [],
+    lines: (t.lines as SewingLine[] | undefined) ?? [],
     workstations: t.workstations ?? [],
     connectors: t.connectors ?? [],
     notes: t.notes,
@@ -391,8 +446,19 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
     { id: dStore,  name: 'Storage',     kind: 'Storage',   color: 'cream',  bounds: { x: 1,  y: 1, w: 8,  h: 6  }, notes: 'Inbound fabric rolls + finished-goods staging.' },
     { id: dCut,    name: 'Cutting',     kind: 'Cutting',   color: 'green',  bounds: { x: 10, y: 1, w: 14, h: 6  }, notes: 'Spread + auto-cut + bundle.' },
     { id: dQc,     name: 'QC Bay',      kind: 'QC',        color: 'red',    bounds: { x: 25, y: 1, w: 9,  h: 6  }, notes: '4-point fabric inspection + audit.' },
-    { id: dSew,    name: 'Sewing Line', kind: 'Sewing',    color: 'blue',   bounds: { x: 1,  y: 8, w: 23, h: 14 }, notes: 'T-shirt assembly · 8 stations · PBS.' },
+    { id: dSew,    name: 'Sewing Floor', kind: 'Sewing',   color: 'blue',   bounds: { x: 1,  y: 8, w: 23, h: 14 }, notes: 'Two production lines — T-shirt assembly · PBS · single shift.' },
     { id: dFinish, name: 'Finishing',   kind: 'Finishing', color: 'yellow', bounds: { x: 25, y: 8, w: 9,  h: 14 }, notes: 'Press · pack · dispatch.' },
+  ];
+
+  // Two sewing lines on the sewing floor. Line A is the full 8-station
+  // assembly line that the workstation seeds below get assigned to; Line B
+  // is a skeleton placeholder so the user can see the multi-line UI even
+  // before they wire it up.
+  const lineA = newLineId();
+  const lineB = newLineId();
+  const lines: SewingLine[] = [
+    { id: lineA, deptId: dSew, name: 'Line A · T-shirt assembly', productionSystem: 'PBS',     garmentId: 'tshirt', color: 'blue',   operatorTarget: 12, notes: 'Eight stations, PBS, bundle 20.' },
+    { id: lineB, deptId: dSew, name: 'Line B · Polo (planning)',  productionSystem: 'modular', garmentId: 'polo',   color: 'brand',  operatorTarget: 14, notes: 'Modular cell — empty placeholder, drop machines from the palette to wire it.' },
   ];
 
   type WsSeed = {
@@ -402,6 +468,8 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
     name: string;
     /** Optional Operations-lens binding to a tshirt op + bundle size. */
     op?: { opId: string; bundleSize?: number };
+    /** Optional sewing-line attribution. */
+    lineId?: string;
   };
 
   const seeds: WsSeed[] = [
@@ -424,43 +492,48 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
     { deptId: dQc, catalogId: 'buf_in',          position: { x: 31, y: 2 }, name: 'Cut-bundle IN' },
     { deptId: dQc, catalogId: 'buf_out',         position: { x: 31, y: 4 }, name: 'Audit OUT' },
 
-    // ── SEWING — 8-station T-shirt line + buffers + iron + WIP racks ───────
-    { deptId: dSew, catalogId: 'buf_in',      position: { x: 1,  y: 9 },  name: 'Bundle IN' },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 4,  y: 9 },  name: 'Shoulder OL-01',     op: { opId: 'ts-07', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_snls',      position: { x: 6,  y: 9 },  name: 'Neck Rib Tack SN-01', op: { opId: 'ts-09', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 8,  y: 9 },  name: 'Neck Rib OL-02',     op: { opId: 'ts-10', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 10, y: 9 },  name: 'Sleeve Hem FL-01',   op: { opId: 'ts-17', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 12, y: 9 },  name: 'Sleeve OL-03',       op: { opId: 'ts-19', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 14, y: 9 },  name: 'Side Seam OL-04',    op: { opId: 'ts-21', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 16, y: 9 },  name: 'Body Hem FL-02',     op: { opId: 'ts-23', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_snls',      position: { x: 18, y: 9 },  name: 'Care Label SN-02',   op: { opId: 'ts-01', bundleSize: 20 } },
-    { deptId: dSew, catalogId: 'a_iron_inline', position: { x: 20, y: 9 }, name: 'Inline Iron IR-01' },
-    { deptId: dSew, catalogId: 'buf_out',     position: { x: 22, y: 9 },  name: 'Bundle OUT' },
+    // ── SEWING — Line A · 8-station T-shirt assembly ────────────────────
+    { deptId: dSew, catalogId: 'buf_in',      position: { x: 1,  y: 9 },  name: 'Bundle IN', lineId: lineA },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 4,  y: 9 },  name: 'Shoulder OL-01',     op: { opId: 'ts-07', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_snls',      position: { x: 6,  y: 9 },  name: 'Neck Rib Tack SN-01', op: { opId: 'ts-09', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 8,  y: 9 },  name: 'Neck Rib OL-02',     op: { opId: 'ts-10', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 10, y: 9 },  name: 'Sleeve Hem FL-01',   op: { opId: 'ts-17', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 12, y: 9 },  name: 'Sleeve OL-03',       op: { opId: 'ts-19', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_4ol',       position: { x: 14, y: 9 },  name: 'Side Seam OL-04',    op: { opId: 'ts-21', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_flatlock',  position: { x: 16, y: 9 },  name: 'Body Hem FL-02',     op: { opId: 'ts-23', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_snls',      position: { x: 18, y: 9 },  name: 'Care Label SN-02',   op: { opId: 'ts-01', bundleSize: 20 }, lineId: lineA },
+    { deptId: dSew, catalogId: 'a_iron_inline', position: { x: 20, y: 9 }, name: 'Inline Iron IR-01', lineId: lineA },
+    { deptId: dSew, catalogId: 'buf_out',     position: { x: 22, y: 9 },  name: 'Bundle OUT', lineId: lineA },
 
-    // Operators in front of each machine
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 4,  y: 12 }, name: 'OPR-01 · Lakshmi' },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 6,  y: 12 }, name: 'OPR-02 · Suman' },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 8,  y: 12 }, name: 'OPR-03 · Geetha' },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 10, y: 12 }, name: 'OPR-04 · Kala' },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 12, y: 12 }, name: 'OPR-05 · Manju' },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 14, y: 12 }, name: 'OPR-06 · Devi' },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 16, y: 12 }, name: 'OPR-07 · Sita' },
-    { deptId: dSew, catalogId: 'op_sewer', position: { x: 18, y: 12 }, name: 'OPR-08 · Roja' },
-    { deptId: dSew, catalogId: 'op_helper', position: { x: 20, y: 12 }, name: 'Iron — Mohan' },
+    // Operators in front of each machine (Line A)
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 4,  y: 12 }, name: 'OPR-01 · Lakshmi', lineId: lineA },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 6,  y: 12 }, name: 'OPR-02 · Suman',   lineId: lineA },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 8,  y: 12 }, name: 'OPR-03 · Geetha',  lineId: lineA },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 10, y: 12 }, name: 'OPR-04 · Kala',    lineId: lineA },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 12, y: 12 }, name: 'OPR-05 · Manju',   lineId: lineA },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 14, y: 12 }, name: 'OPR-06 · Devi',    lineId: lineA },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 16, y: 12 }, name: 'OPR-07 · Sita',    lineId: lineA },
+    { deptId: dSew, catalogId: 'op_sewer', position: { x: 18, y: 12 }, name: 'OPR-08 · Roja',    lineId: lineA },
+    { deptId: dSew, catalogId: 'op_helper', position: { x: 20, y: 12 }, name: 'Iron — Mohan',    lineId: lineA },
 
-    // WIP racks behind operators
-    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 4,  y: 14 }, name: 'WIP Rack 1' },
-    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 10, y: 14 }, name: 'WIP Rack 2' },
-    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 16, y: 14 }, name: 'WIP Rack 3' },
+    // WIP racks behind Line A operators
+    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 4,  y: 14 }, name: 'WIP Rack 1', lineId: lineA },
+    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 10, y: 14 }, name: 'WIP Rack 2', lineId: lineA },
+    { deptId: dSew, catalogId: 'a_wip_rack', position: { x: 16, y: 14 }, name: 'WIP Rack 3', lineId: lineA },
 
-    // Conveyor along the bottom of the line
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 3,  y: 17 }, name: 'Conveyor C1' },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 7,  y: 17 }, name: 'Conveyor C2' },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 11, y: 17 }, name: 'Conveyor C3' },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 15, y: 17 }, name: 'Conveyor C4' },
-    { deptId: dSew, catalogId: 'conv_str', position: { x: 19, y: 17 }, name: 'Conveyor C5' },
+    // Conveyor along the bottom of Line A
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 3,  y: 17 }, name: 'Conveyor C1', lineId: lineA },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 7,  y: 17 }, name: 'Conveyor C2', lineId: lineA },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 11, y: 17 }, name: 'Conveyor C3', lineId: lineA },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 15, y: 17 }, name: 'Conveyor C4', lineId: lineA },
+    { deptId: dSew, catalogId: 'conv_str', position: { x: 19, y: 17 }, name: 'Conveyor C5', lineId: lineA },
 
+    // Supervisor floats — not pinned to a line on purpose
     { deptId: dSew, catalogId: 'op_super', position: { x: 12, y: 19 }, name: 'Supervisor — Arjun' },
+
+    // ── SEWING — Line B · skeleton (in / out + one cell, awaiting build-out)
+    { deptId: dSew, catalogId: 'buf_in',  position: { x: 1,  y: 20 }, name: 'Line B · Bundle IN',  lineId: lineB },
+    { deptId: dSew, catalogId: 'buf_out', position: { x: 22, y: 20 }, name: 'Line B · Bundle OUT', lineId: lineB },
 
     // ── FINISHING ──────────────────────────────────────────────────────────
     { deptId: dFinish, catalogId: 'a_iron_inline', position: { x: 26, y: 9 },  name: 'Press IR-A' },
@@ -490,6 +563,7 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
         bundleSize: s.op.bundleSize,
       };
     }
+    if (s.lineId) w.lineId = s.lineId;
     return w;
   });
 
@@ -504,6 +578,7 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
     gridW: 36,
     gridH: 26,
     departments,
+    lines,
     workstations,
     connectors: [],
     notes: 'Demo factory — T-shirt line, PBS, single shift. Use as a starting point.',
@@ -600,6 +675,16 @@ export function forkTwin(
     bounds: { ...d.bounds },
   }));
 
+  // Re-key lines and remap their parent dept ids so the fork stays internally
+  // consistent. Workstation.lineId is remapped a few lines down via lineIdMap.
+  const lineIdMap = new Map<string, string>();
+  for (const ln of source.lines ?? []) lineIdMap.set(ln.id, newLineId());
+  const lines: SewingLine[] = (source.lines ?? []).map((ln) => ({
+    ...ln,
+    id: lineIdMap.get(ln.id)!,
+    deptId: deptIdMap.get(ln.deptId) ?? ln.deptId,
+  }));
+
   // Map old → new workstation ids so connectors can be remapped.
   const wsIdMap = new Map<string, string>();
   const workstations: Workstation[] = source.workstations.map((w) => {
@@ -609,6 +694,7 @@ export function forkTwin(
       ...w,
       id: newWsId,
       deptId: deptIdMap.get(w.deptId) ?? w.deptId,
+      lineId: w.lineId ? lineIdMap.get(w.lineId) ?? undefined : undefined,
       position: { ...w.position },
       props: { ...w.props },
       operation: { ...w.operation },
@@ -654,6 +740,7 @@ export function forkTwin(
     gridW: source.gridW,
     gridH: source.gridH,
     departments,
+    lines,
     workstations,
     connectors,
     notes: options.notes,
@@ -691,15 +778,24 @@ export function validateTwin(twin: Twin): string[] {
   // time. Cast to number so the union-narrowed literal type doesn't make
   // the equality check tautological at compile time.
   const ver = twin.schemaVersion as number;
-  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== 4 && ver !== 5 && ver !== (TWIN_SCHEMA_VERSION as number)) {
+  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== 4 && ver !== 5 && ver !== 6 && ver !== (TWIN_SCHEMA_VERSION as number)) {
     errs.push(
-      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, or ${TWIN_SCHEMA_VERSION}`,
+      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, 6, or ${TWIN_SCHEMA_VERSION}`,
     );
   }
   const deptIds = new Set(twin.departments.map((d) => d.id));
+  const lineIds = new Set((twin.lines ?? []).map((l) => l.id));
+  for (const l of twin.lines ?? []) {
+    if (!deptIds.has(l.deptId)) {
+      errs.push(`Line ${l.id} references missing department ${l.deptId}`);
+    }
+  }
   for (const w of twin.workstations) {
     if (!deptIds.has(w.deptId)) {
       errs.push(`Workstation ${w.id} references missing department ${w.deptId}`);
+    }
+    if (w.lineId && !lineIds.has(w.lineId)) {
+      errs.push(`Workstation ${w.id} references missing line ${w.lineId}`);
     }
   }
   // Duplicate ids
@@ -833,6 +929,7 @@ export function migrateLegacyFactoryToTwin(
     gridW: 36,
     gridH: Math.max(28, cursorY),
     departments,
+    lines: [],
     workstations,
     connectors: [],
     notes: 'Auto-migrated from legacy floors+lines structure',

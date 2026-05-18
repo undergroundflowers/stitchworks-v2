@@ -7,6 +7,7 @@ import {
   useProject,
   useFactoryLibrary,
   archiveAndStartFresh,
+  isFactoryNameTaken,
   FACTORY_LIBRARY_MAX,
 } from '../store';
 import { fmtCalendar } from '../simulation/timeUnit';
@@ -43,13 +44,22 @@ export function MenuPage() {
   const atCap = slotsUsed >= FACTORY_LIBRARY_MAX;
 
   const openNewFactoryDialog = () => {
-    setNewFactoryName('New Factory');
+    // Pick a starting name that doesn't already collide.
+    let seed = 'New Factory';
+    if (isFactoryNameTaken(seed)) {
+      for (let i = 2; i < 1000; i++) {
+        const candidate = `New Factory (${i})`;
+        if (!isFactoryNameTaken(candidate)) { seed = candidate; break; }
+      }
+    }
+    setNewFactoryName(seed);
     setNewFactoryOpen(true);
   };
   const confirmNewFactory = () => {
     const name = newFactoryName.trim();
     if (!name) return;
     if (atCap) return; // belt + braces; button is disabled in this state
+    if (isFactoryNameTaken(name)) return; // belt + braces; button is disabled
     archiveAndStartFresh(name);
     setNewFactoryOpen(false);
     navigate('/builder');
@@ -117,6 +127,9 @@ export function MenuPage() {
           </Button>
           <Button variant="secondary" size="lg" onClick={() => navigate('/reference')} icon="📖">
             REFERENCE MODELS
+          </Button>
+          <Button variant="secondary" size="lg" onClick={() => navigate('/pilot')} icon="⚗">
+            PILOT STUDY
           </Button>
         </div>
 
@@ -339,7 +352,12 @@ function NewFactoryModal({
   onCancel,
   onConfirm,
 }: NewFactoryModalProps) {
-  const canCreate = name.trim().length > 0;
+  const trimmed = name.trim();
+  // Re-evaluate on every keystroke. isFactoryNameTaken reads zustand state
+  // directly so the check stays accurate as the user types or as the
+  // saved-factories list changes.
+  const duplicate = trimmed.length > 0 && isFactoryNameTaken(trimmed);
+  const canCreate = trimmed.length > 0 && !duplicate;
   return (
     <div
       role="dialog"
@@ -395,16 +413,29 @@ function NewFactoryModal({
                 if (e.key === 'Enter' && canCreate) onConfirm();
                 if (e.key === 'Escape') onCancel();
               }}
+              aria-invalid={duplicate || undefined}
               style={{
                 padding: '8px 10px',
-                border: `1px solid ${SW_COLORS.line}`,
+                border: `1px solid ${duplicate ? SW_COLORS.alarm : SW_COLORS.line}`,
                 borderRadius: SW_RADIUS.sm,
                 background: '#fff',
                 fontFamily: SW_FONTS.body,
                 fontSize: 13,
                 color: SW_COLORS.ink,
+                outline: 'none',
               }}
             />
+            {duplicate && (
+              <span style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 11,
+                fontWeight: 700,
+                color: SW_COLORS.alarm,
+                marginTop: 2,
+              }}>
+                A factory named "{trimmed}" already exists. Pick a different name.
+              </span>
+            )}
           </label>
 
           {archiving && (

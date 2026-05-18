@@ -17,7 +17,7 @@
  */
 
 import type { GarmentTemplate, Operation } from '../domain';
-import type { Twin, Workstation } from '../domain/twin';
+import type { Twin, Workstation, SewingLine } from '../domain/twin';
 import type { SimConfig } from './engine';
 import type { ServiceDist, QueueDiscipline } from './index';
 import type { ModelTimeUnit } from './timeUnit';
@@ -104,6 +104,10 @@ export interface BuildFromTwinOptions {
   smvVariance?: number;
   randomSeed?: number;
   arrivalRatePerHour?: number;
+  /** When set, only workstations whose `lineId` matches are considered. The
+   *  rest are filtered out of the build so the engine runs as a single-line
+   *  tandem network — the multi-line LiveSim view picks one line at a time. */
+  lineId?: string;
 }
 
 export interface BuildFromTwinResult {
@@ -119,14 +123,29 @@ export interface BuildFromTwinResult {
  * disabled-state tooltip or an empty-state panel.
  */
 export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwinResult {
-  const { twin, garmentsById, defaultGarmentId } = opts;
+  const { twin, garmentsById, defaultGarmentId, lineId } = opts;
+
+  // Filter to a single sewing line when one is requested. Everything else
+  // (garment-detection, op classification, server collapse) then runs on the
+  // narrowed set as if the line were its own factory.
+  const scopedWs = lineId
+    ? twin.workstations.filter((w) => w.lineId === lineId)
+    : twin.workstations;
 
   // ── Step 1: pick the dominant garment ─────────────────────────────────
   // When multiple workstations reference different garmentIds, the most-
   // common wins; ties fall back to the default. The engine is single-product
   // by design — one garment per run is honest to the current capability.
   const garmentCounts = new Map<string, number>();
-  for (const ws of twin.workstations) {
+  // If the caller pinned a line, prefer the line's authored `garmentId` so a
+  // skeleton line (no opIds assigned yet) still reports the right product.
+  if (lineId) {
+    const line = (twin.lines ?? []).find((l) => l.id === lineId);
+    if (line?.garmentId && garmentsById[line.garmentId]) {
+      garmentCounts.set(line.garmentId, 1);
+    }
+  }
+  for (const ws of scopedWs) {
     const gid = ws.operation.garmentId;
     if (gid && garmentsById[gid]) {
       garmentCounts.set(gid, (garmentCounts.get(gid) ?? 0) + 1);
@@ -158,7 +177,7 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
   const kept: Workstation[] = [];
   const infrastructure: InfraWorkstation[] = [];
   const skipped: SkippedWorkstation[] = [];
-  for (const ws of twin.workstations) {
+  for (const ws of scopedWs) {
     const blockKind = ws.block?.kind;
     if (blockKind && NON_SERVICE_BLOCK_KINDS.has(blockKind)) {
       infrastructure.push({
@@ -196,7 +215,13 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
   // Connector path wins when any flow edge exists in the twin. Otherwise
   // fall back to the garment template's array order (which already
   // encodes `precedes`/`follows`).
-  const flowEdges = twin.connectors.filter((c) => c.kind === 'flow');
+  // When scoped to a single line, restrict flow edges to those whose endpoints
+  // are both inside the kept set — otherwise stray cross-line edges would
+  // pollute the topo-sort.
+  const keptIds = new Set(kept.map((w) => w.id));
+  const flowEdges = twin.connectors
+    .filter((c) => c.kind === 'flow')
+    .filter((c) => !lineId || (keptIds.has(c.fromWsId) && keptIds.has(c.toWsId)));
   let orderedOpIds: string[];
   let topologySource: 'connectors' | 'opIdPrecedence';
   if (flowEdges.length > 0) {
@@ -353,4 +378,68 @@ function topoSortByConnectors(
     }
   }
   return ordered;
+}
+
+// ============================================================================
+// MULTI-LINE — build one SimConfig per sewing line in the twin
+// ============================================================================
+
+export interface LineBuild {
+  line: SewingLine;
+  build: BuildFromTwinResult;
+  /** True when this line built cleanly. False when no workstation under the
+   *  line resolved to a known operation — the LiveSim panel still surfaces
+   *  the line so the user knows it's there, but can't run it yet. */
+  ok: boolean;
+  reason?: string;
+}
+
+/**
+ * Build per-line configs for every sewing line in the twin. Useful for the
+ * LiveSim "ALL LINES" view, where each line becomes its own KPI card driven
+ * by its own analytical model. Lines with no simulatable workstation report
+ * back with `ok: false` so the UI can render a placeholder card instead of
+ * blowing up.
+ */
+export function buildLinesFromTwin(
+  opts: Omit<BuildFromTwinOptions, 'lineId'>,
+): LineBuild[] {
+  const out: LineBuild[] = [];
+  for (const line of opts.twin.lines ?? []) {
+    try {
+      const build = buildSimConfigFromTwin({ ...opts, lineId: line.id });
+      out.push({ line, build, ok: true });
+    } catch (err) {
+      out.push({
+        line,
+        ok: false,
+        reason: err instanceof Error ? err.message : String(err),
+        // Empty stand-in so consumers can read `.build.meta.simulatedWsIds.length`
+        // without a null check.
+        build: {
+          config: {
+            garmentTemplateId: '',
+            operations: [],
+            stationServers: [],
+            bundleSize: 1,
+            arrivalRatePerHour: 0,
+            smvVariance: 0,
+            randomSeed: 0,
+          },
+          meta: {
+            simulatedWsIds: [],
+            skipped: [],
+            infrastructure: [],
+            seedOperators: 0,
+            seedBundleSize: 0,
+            topologySource: 'opIdPrecedence',
+            stations: [],
+            garment: opts.garmentsById[opts.defaultGarmentId] ?? Object.values(opts.garmentsById)[0],
+            garmentPinned: false,
+          },
+        },
+      });
+    }
+  }
+  return out;
 }

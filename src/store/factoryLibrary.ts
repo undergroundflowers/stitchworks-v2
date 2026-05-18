@@ -61,10 +61,60 @@ export interface FactoryLibraryState {
   deleteFactory: (id: string) => void;
   /** Rename a saved factory in place. */
   renameFactory: (id: string, name: string) => void;
+  /** Sweep saved factories and suffix any whose names collide with the
+   *  active project or an earlier entry. Idempotent — safe to call on
+   *  every rehydrate. Returns the number of entries that were renamed. */
+  dedupeSavedFactories: () => number;
 }
 
 function newId(): string {
   return `fac-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+}
+
+/** Comparison key: trimmed and case-insensitive. "Brandix" and "brandix " collide. */
+function nameKey(s: string): string {
+  return s.trim().toLowerCase();
+}
+
+/**
+ * True if `name` is already in use by either a saved factory or the currently
+ * active project. Pass `excludeSavedId` to ignore one saved entry (used when
+ * renaming an existing slot to its own current name). Pass `includeActive`
+ * = false when the caller knows the active factory is being replaced and its
+ * name should not block the check.
+ */
+export function isFactoryNameTaken(
+  name: string,
+  opts: { excludeSavedId?: string; includeActive?: boolean } = {},
+): boolean {
+  const { excludeSavedId, includeActive = true } = opts;
+  const key = nameKey(name);
+  if (!key) return false;
+  if (includeActive) {
+    const activeName = useProject.getState().meta.name;
+    if (nameKey(activeName) === key) return true;
+  }
+  const saved = useFactoryLibrary.getState().savedFactories;
+  return saved.some((f) => f.id !== excludeSavedId && nameKey(f.name) === key);
+}
+
+/**
+ * Returns `name` if it's free, otherwise appends ` (2)`, ` (3)`, … until
+ * unique. Used by archive paths where the user did not pick the name, so
+ * collisions should be resolved silently rather than rejected.
+ */
+function uniquifyFactoryName(
+  name: string,
+  opts: { excludeSavedId?: string; includeActive?: boolean } = {},
+): string {
+  const base = name.trim() || 'Untitled Factory';
+  if (!isFactoryNameTaken(base, opts)) return base;
+  for (let i = 2; i < 1000; i++) {
+    const candidate = `${base} (${i})`;
+    if (!isFactoryNameTaken(candidate, opts)) return candidate;
+  }
+  // Pathological fallback — append a short random suffix.
+  return `${base} (${Math.random().toString(36).slice(2, 6)})`;
 }
 
 function captureProject(): ProjectState {
@@ -107,7 +157,11 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
       archiveCurrent: (overrideName) => {
         const project = captureProject();
         const twin = captureTwin();
-        const name = (overrideName ?? project.meta.name ?? 'Untitled Factory').trim() || 'Untitled Factory';
+        // The active project is becoming an archived snapshot — its name is
+        // free to collide with itself, so excludeActive. Dedupe against
+        // existing saved entries so the slot list never shows duplicates.
+        const requested = (overrideName ?? project.meta.name ?? 'Untitled Factory').trim() || 'Untitled Factory';
+        const name = uniquifyFactoryName(requested, { includeActive: false });
         const entry: SavedFactory = {
           id: newId(),
           name,
@@ -136,10 +190,46 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
       deleteFactory: (id) =>
         set((s) => ({ savedFactories: s.savedFactories.filter((f) => f.id !== id) })),
 
-      renameFactory: (id, name) =>
+      renameFactory: (id, name) => {
+        // Dedupe against the active project and other saved entries. The
+        // entry being renamed is excluded so renaming to its own current
+        // name is a no-op rather than an auto-suffix.
+        const safe = uniquifyFactoryName(name, { excludeSavedId: id, includeActive: true });
         set((s) => ({
-          savedFactories: s.savedFactories.map((f) => (f.id === id ? { ...f, name } : f)),
-        })),
+          savedFactories: s.savedFactories.map((f) => (f.id === id ? { ...f, name: safe } : f)),
+        }));
+      },
+
+      dedupeSavedFactories: () => {
+        // Walk the saved list in its current order (newest-first as kept
+        // by archiveCurrent). The first entry with a given name key wins;
+        // later collisions get suffixed. The active project's name takes
+        // precedence over any saved entry — if a saved entry shares the
+        // active name, the saved one gets suffixed.
+        const activeKey = nameKey(useProject.getState().meta.name);
+        const taken = new Set<string>();
+        if (activeKey) taken.add(activeKey);
+        let renamed = 0;
+        const next = get().savedFactories.map((f) => {
+          const key = nameKey(f.name);
+          if (!taken.has(key)) {
+            taken.add(key);
+            return f;
+          }
+          // Collision — generate a unique suffix not in `taken`.
+          const base = (f.name.trim() || 'Untitled Factory');
+          let candidate = base;
+          for (let i = 2; i < 1000; i++) {
+            candidate = `${base} (${i})`;
+            if (!taken.has(nameKey(candidate))) break;
+          }
+          taken.add(nameKey(candidate));
+          renamed++;
+          return { ...f, name: candidate };
+        });
+        if (renamed > 0) set({ savedFactories: next });
+        return renamed;
+      },
     }),
     {
       name: 'stitchworks.library.v1',
@@ -149,6 +239,17 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
         schemaVersion: state.schemaVersion,
         savedFactories: state.savedFactories,
       }),
+      // After persisted state is rehydrated, repair any name collisions
+      // that pre-date the uniqueness rule. Defer to a microtask so the
+      // project store has finished its own rehydrate and getState() can
+      // read the user's true active-factory name.
+      onRehydrateStorage: () => (state) => {
+        if (!state) return;
+        queueMicrotask(() => {
+          const n = state.dedupeSavedFactories();
+          if (n > 0) console.info(`[factoryLibrary] deduped ${n} saved factor${n === 1 ? 'y' : 'ies'}`);
+        });
+      },
     },
   ),
 );
@@ -166,11 +267,16 @@ export function archiveAndStartFresh(newName: string): void {
   useTwin.getState().resetTwin();
   const trimmed = newName.trim();
   if (trimmed) {
+    // Dedupe against saved entries (the just-archived snapshot counts)
+    // before naming the fresh active factory. The UI already validates,
+    // so this is belt-and-braces — programmatic callers can't accidentally
+    // produce a duplicate.
+    const safe = uniquifyFactoryName(trimmed, { includeActive: false });
     // Keep the project meta and twin canonical names in sync so every
     // surface that reads either (TopBar reads project.meta.name; Builder
     // picker reads twin.canonical.name) shows the same label.
-    useProject.getState().rename(trimmed);
-    useTwin.getState().renameActive(trimmed);
+    useProject.getState().rename(safe);
+    useTwin.getState().renameActive(safe);
   }
 }
 

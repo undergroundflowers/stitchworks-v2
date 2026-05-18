@@ -20,15 +20,19 @@ export {
 export { buildSimConfig, efficiencyFromSkillMatrix, type BuildModelOptions } from './model';
 export {
   buildSimConfigFromTwin,
+  buildLinesFromTwin,
   type BuildFromTwinOptions,
   type BuildFromTwinResult,
   type BuildFromTwinMeta,
+  type LineBuild,
   type SkippedWorkstation,
   type TwinStationMeta,
 } from './model-from-twin';
 export { useSim, type UseSimResult } from './useSim';
+export { useMultiSim, mergeSimStates, mergeTwinMetas, type UseMultiSimResult } from './useMultiSim';
 export { MinHeap, mulberry32 } from './priority-queue';
 export { runReplications, type ReplicationResult, type AggregateKpis } from './replications';
+export { aggregateFactoryKpis, type FactoryLineInput } from './factory-aggregate';
 export {
   sample,
   meanOf,

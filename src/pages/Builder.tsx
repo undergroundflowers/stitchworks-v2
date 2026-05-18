@@ -50,6 +50,8 @@ import type {
   Workstation,
   Connector,
   ConnectorKind,
+  SewingLine,
+  ProductionSystemKey,
 } from '../domain/twin';
 import {
   getBlockSpec,
@@ -245,12 +247,17 @@ export function BuilderPage() {
   const moveDepartment = useTwin((s) => s.moveDepartment);
   const updateDepartment = useTwin((s) => s.updateDepartment);
   const removeDepartment = useTwin((s) => s.removeDepartment);
+  const addLine = useTwin((s) => s.addLine);
+  const updateLine = useTwin((s) => s.updateLine);
+  const removeLine = useTwin((s) => s.removeLine);
+  const setLineForWorkstations = useTwin((s) => s.setLineForWorkstations);
   const addWorkstation = useTwin((s) => s.addWorkstation);
   const moveWorkstation = useTwin((s) => s.moveWorkstation);
   const updateWorkstation = useTwin((s) => s.updateWorkstation);
   const removeWorkstation = useTwin((s) => s.removeWorkstation);
   const rotateWorkstation = useTwin((s) => s.rotateWorkstation);
   const duplicateWorkstation = useTwin((s) => s.duplicateWorkstation);
+  const pasteWorkstations = useTwin((s) => s.pasteWorkstations);
   const setOperation = useTwin((s) => s.setOperation);
   const setResources = useTwin((s) => s.setResources);
   const setKpiTargets = useTwin((s) => s.setKpiTargets);
@@ -276,8 +283,27 @@ export function BuilderPage() {
   const savedFactories = useFactoryLibrary((s) => s.savedFactories);
   const loadSavedFactory = useFactoryLibrary((s) => s.loadFactory);
 
+  // Undo / redo wired off the twin store. Both update history in place; the
+  // toolbar disables the buttons when the relevant stack is empty.
+  const undoTwin = useTwin((s) => s.undo);
+  const redoTwin = useTwin((s) => s.redo);
+  const canUndo = useTwin((s) => s.past.length > 0);
+  const canRedo = useTwin((s) => s.future.length > 0);
+
   // ── Local UI state ─────────────────────────────────────────────────────────
   const [drop, setDrop] = useState<DropTool>({ kind: 'none' });
+  /** Active canvas tool. 'pointer' is the default authoring mode where
+   *  clicking selects a single entity and dragging an entity moves it.
+   *  'select' arms the rectangle-select gesture — dragging on canvas
+   *  background paints a marquee that picks every workstation whose
+   *  footprint centre lands inside it. */
+  const [tool, setTool] = useState<'pointer' | 'select'>('pointer');
+  /** Live marquee rectangle while the user is drawing one. Coordinates are
+   *  in iso-projected SVG user-space (the same space the canvas <g>
+   *  renders in), so the rect can be drawn directly without re-mapping. */
+  const [selectRect, setSelectRect] = useState<
+    { sx0: number; sy0: number; sx1: number; sy1: number } | null
+  >(null);
   /** Connect-flow modal tool state. When `on` is true:
    *    • In ISO mode, clicking a workstation picks the source (if
    *      `fromWsId` is null) or the target — fromPort/toPort default
@@ -295,6 +321,22 @@ export function BuilderPage() {
   const [selected, setSelected] = useState<
     { kind: 'dept' | 'ws'; id: string } | null
   >(null);
+  /** Additional workstation ids selected via SHIFT+click. The `selected`
+   *  anchor (when it's a workstation) is always implicitly part of the
+   *  selection set — `selectedWsIds` below merges the two for rendering
+   *  and clipboard operations. Plain click clears this set; SHIFT+click
+   *  toggles ids into/out of it. Departments are not multi-selectable. */
+  const [extraSelectedWs, setExtraSelectedWs] = useState<Set<string>>(() => new Set());
+  /** In-memory copy/paste buffer for workstations. Captured snapshots are
+   *  deep-cloned at copy time so later edits to the originals don't bleed
+   *  into pending pastes. `anchor` is the top-left of the snapshot bounding
+   *  box; paste re-anchors that point to the current hover cell so the
+   *  cluster lands where the cursor is. */
+  const [clipboard, setClipboard] = useState<{
+    workstations: Workstation[];
+    connectors: Connector[];
+    anchor: { x: number; y: number };
+  } | null>(null);
   const [lens, setLens] = useState<Lens>('operations');
   const [canvasMode, setCanvasMode] = useState<CanvasMode>('iso');
 
@@ -327,6 +369,19 @@ export function BuilderPage() {
     () => (engineMode === 'pml' ? validatePmlGraph(twin) : []),
     [engineMode, twin],
   );
+
+  /** Effective selected-workstation id set: the primary `selected` anchor
+   *  (when it's a ws) plus every id in `extraSelectedWs`. This is what the
+   *  canvas highlights and what copy/cut operate on. */
+  const selectedWsIds = useMemo<Set<string>>(() => {
+    const ids = new Set(extraSelectedWs);
+    if (selected?.kind === 'ws') ids.add(selected.id);
+    return ids;
+  }, [extraSelectedWs, selected]);
+  // Mirror to a ref so the drag-handler closure (created once with stable
+  // dependencies) can read the latest selection without re-binding.
+  const selectedWsIdsRef = useRef(selectedWsIds);
+  selectedWsIdsRef.current = selectedWsIds;
 
   // Best scenario — leader on latest-run throughput/hr, with efficiencyPct as
   // a tiebreaker. Scenarios with no runs are ignored. Null when nothing's
@@ -405,6 +460,14 @@ export function BuilderPage() {
   panRef.current = pan;
   const spacePanRef = useRef(false);
   spacePanRef.current = spacePan;
+  // Hover cell mirror — paste reads the latest cursor cell without re-binding
+  // the keyboard effect on every mouse move.
+  const hoverCellRef = useRef(hoverCell);
+  hoverCellRef.current = hoverCell;
+  const clipboardRef = useRef(clipboard);
+  clipboardRef.current = clipboard;
+  const twinRef = useRef(twin);
+  twinRef.current = twin;
 
   const ZOOM_MIN = 0.3;
   const ZOOM_MAX = 3;
@@ -532,9 +595,13 @@ export function BuilderPage() {
       setDrop({ kind: 'none' });
       return;
     }
+    // When the select tool is armed, the mouseup half of the marquee
+    // gesture already handled selection — don't second-guess it here.
+    if (tool === 'select') return;
     // No tool: clicking empty canvas clears selection.
     setSelected(null);
-  }, [hoverCell, drop, addDepartment, addWorkstation, twin.departments]);
+    setExtraSelectedWs(new Set());
+  }, [hoverCell, drop, tool, addDepartment, addWorkstation, twin.departments]);
 
   const beginPanFromPoint = useCallback((startX: number, startY: number) => {
     const p0 = { ...panRef.current };
@@ -551,13 +618,91 @@ export function BuilderPage() {
     window.addEventListener('mouseup', up);
   }, []);
 
+  /** Project a screen point to SVG user-space — the same coordinate system
+   *  the canvas <g> renders in after applying `translate(pan) scale(zoom)`.
+   *  Used by the marquee handler so the rectangle can be authored in the
+   *  same space the workstation centres live in. */
+  const screenToWorldSvg = useCallback(
+    (clientX: number, clientY: number) => {
+      const el = stageRef.current;
+      if (!el) return { sx: 0, sy: 0 };
+      const r = el.getBoundingClientRect();
+      return {
+        sx: (clientX - r.left - r.width / 2 - pan.x) / zoom,
+        sy: (clientY - r.top - r.height / 2 - pan.y) / zoom,
+      };
+    },
+    [pan, zoom],
+  );
+
+  const beginSelectRect = useCallback(
+    (startX: number, startY: number) => {
+      const { sx: sx0, sy: sy0 } = screenToWorldSvg(startX, startY);
+      setSelectRect({ sx0, sy0, sx1: sx0, sy1: sy0 });
+      let moved = false;
+      function move(ev: MouseEvent) {
+        const { sx, sy } = screenToWorldSvg(ev.clientX, ev.clientY);
+        if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 3) return;
+        moved = true;
+        setSelectRect({ sx0, sy0, sx1: sx, sy1: sy });
+      }
+      function up(ev: MouseEvent) {
+        window.removeEventListener('mousemove', move);
+        window.removeEventListener('mouseup', up);
+        if (!moved) {
+          // Plain click with the select tool — clear selection like the
+          // pointer tool would, so the gesture isn't a dead-end.
+          setSelected(null);
+          setExtraSelectedWs(new Set());
+          setSelectRect(null);
+          return;
+        }
+        const { sx: sx1, sy: sy1 } = screenToWorldSvg(ev.clientX, ev.clientY);
+        const minSx = Math.min(sx0, sx1);
+        const maxSx = Math.max(sx0, sx1);
+        const minSy = Math.min(sy0, sy1);
+        const maxSy = Math.max(sy0, sy1);
+        // Every workstation whose iso-projected footprint centre falls
+        // inside the marquee joins the selection. We use the centre rather
+        // than the bounding rect so small marquees can still pick
+        // tightly-packed stations without overlap fights.
+        const t = twinRef.current;
+        const hits: string[] = [];
+        for (const w of t.workstations) {
+          const fp = wsFootprint(w);
+          const c = isoProj(w.position.x + fp.w / 2, w.position.y + fp.d / 2);
+          if (c.sx >= minSx && c.sx <= maxSx && c.sy >= minSy && c.sy <= maxSy) {
+            hits.push(w.id);
+          }
+        }
+        if (hits.length === 0) {
+          setSelected(null);
+          setExtraSelectedWs(new Set());
+        } else {
+          const [first, ...rest] = hits;
+          setSelected({ kind: 'ws', id: first });
+          setExtraSelectedWs(new Set(rest));
+        }
+        setSelectRect(null);
+      }
+      window.addEventListener('mousemove', move);
+      window.addEventListener('mouseup', up);
+    },
+    [screenToWorldSvg],
+  );
+
   const onPanStart = (e: React.MouseEvent) => {
     if (drop.kind !== 'none') return;
     if (e.button !== 0) return;
     if (spacePan) return; // capture-phase listener handles space-pan
     const t = e.target as Element;
-    // Only pan when clicking the canvas background — let entity clicks bubble.
+    // Only react to background drags — let entity clicks bubble.
     if (t.tagName !== 'svg' && !(t as SVGElement).getAttribute?.('data-canvas-bg')) return;
+    if (tool === 'select') {
+      e.preventDefault();
+      beginSelectRect(e.clientX, e.clientY);
+      return;
+    }
     beginPanFromPoint(e.clientX, e.clientY);
   };
 
@@ -620,7 +765,11 @@ export function BuilderPage() {
         return d ? { x: d.bounds.x, y: d.bounds.y } : null;
       })();
       if (!initial) return;
+      // Preserve a multi-selection when the user grabs a workstation that's
+      // already part of it. Otherwise replace with a single selection.
+      const inMulti = kind === 'ws' && selectedWsIdsRef.current.has(id);
       setSelected({ kind, id });
+      if (!inMulti) setExtraSelectedWs(new Set());
       let moved = false;
       function onMove(ev: MouseEvent) {
         const dx = (ev.clientX - startX) / zoomRef.current;
@@ -648,6 +797,110 @@ export function BuilderPage() {
     },
     [moveWorkstation, moveDepartment],
   );
+
+  // ── Select / Copy / Paste ──────────────────────────────────────────────────
+  // `selectAllWs` floods every workstation in the active twin into the
+  // multi-select set, with the first as the anchor. Useful for "copy this
+  // whole factory's layout into a scenario fork" workflows.
+  const selectAllWs = useCallback(() => {
+    const t = twinRef.current;
+    if (t.workstations.length === 0) {
+      setSelected(null);
+      setExtraSelectedWs(new Set());
+      return;
+    }
+    const [first, ...rest] = t.workstations;
+    setSelected({ kind: 'ws', id: first.id });
+    setExtraSelectedWs(new Set(rest.map((w) => w.id)));
+  }, []);
+
+  /** Snapshot the current workstation selection into the clipboard. The
+   *  anchor is the top-left of the selection bounding box so paste can
+   *  re-anchor cleanly at the cursor. Connectors with both endpoints in
+   *  the selection are captured as well so wired-up clusters round-trip
+   *  cleanly. */
+  const copySelection = useCallback(() => {
+    const t = twinRef.current;
+    const ids = new Set<string>();
+    if (selected?.kind === 'ws') ids.add(selected.id);
+    for (const id of extraSelectedWs) ids.add(id);
+    if (ids.size === 0) return false;
+    const wss = t.workstations.filter((w) => ids.has(w.id));
+    if (wss.length === 0) return false;
+    let minX = Infinity, minY = Infinity;
+    for (const w of wss) {
+      if (w.position.x < minX) minX = w.position.x;
+      if (w.position.y < minY) minY = w.position.y;
+    }
+    const conns = (t.connectors ?? []).filter(
+      (c) => ids.has(c.fromWsId) && ids.has(c.toWsId),
+    );
+    setClipboard({
+      workstations: wss.map((w) => structuredClone(w)),
+      connectors: conns.map((c) => structuredClone(c)),
+      anchor: { x: minX, y: minY },
+    });
+    return true;
+  }, [selected, extraSelectedWs]);
+
+  /** Paste the clipboard contents at the current hover cell. Positions
+   *  preserve relative offsets from the captured anchor. Each pasted ws
+   *  is re-homed to whatever department covers its new cell — if it lands
+   *  outside any department, the snapshot is skipped (no orphan ws). */
+  const pasteClipboard = useCallback(() => {
+    const cb = clipboardRef.current;
+    if (!cb || cb.workstations.length === 0) return;
+    const t = twinRef.current;
+    // Anchor target: prefer the hover cell so the user can aim the paste.
+    // Falls back to +2 of the original anchor when the cursor is off-stage
+    // (e.g. focused on a side panel), matching the "duplicate-ish" idiom.
+    const hc = hoverCellRef.current;
+    const tx = hc ? hc.x : cb.anchor.x + 2;
+    const ty = hc ? hc.y : cb.anchor.y + 2;
+    const dx = tx - cb.anchor.x;
+    const dy = ty - cb.anchor.y;
+    const snaps = cb.workstations
+      .map((w) => {
+        const nx = w.position.x + dx;
+        const ny = w.position.y + dy;
+        const dept = t.departments.find(
+          (d) =>
+            nx >= d.bounds.x &&
+            nx < d.bounds.x + d.bounds.w &&
+            ny >= d.bounds.y &&
+            ny < d.bounds.y + d.bounds.h,
+        );
+        if (!dept) return null;
+        return {
+          ...w,
+          _srcId: w.id,
+          deptId: dept.id,
+          position: { x: nx, y: ny },
+        };
+      })
+      .filter((s): s is Workstation & { _srcId: string } => Boolean(s));
+    if (snaps.length === 0) return;
+    const result = pasteWorkstations({
+      snapshots: snaps,
+      connectors: cb.connectors,
+    });
+    if (result.newWsIds.length > 0) {
+      const [first, ...rest] = result.newWsIds;
+      setSelected({ kind: 'ws', id: first });
+      setExtraSelectedWs(new Set(rest));
+    }
+  }, [pasteWorkstations]);
+
+  const cutSelection = useCallback(() => {
+    const ok = copySelection();
+    if (!ok) return;
+    const ids = new Set<string>();
+    if (selected?.kind === 'ws') ids.add(selected.id);
+    for (const id of extraSelectedWs) ids.add(id);
+    for (const id of ids) removeWorkstation(id);
+    setSelected(null);
+    setExtraSelectedWs(new Set());
+  }, [copySelection, selected, extraSelectedWs, removeWorkstation]);
 
   // ── Keyboard shortcuts ─────────────────────────────────────────────────────
   useEffect(() => {
@@ -681,17 +934,84 @@ export function BuilderPage() {
       if (e.key === 'Escape') {
         setDrop({ kind: 'none' });
         setConnect((c) => (c.on ? { ...c, on: false, fromWsId: null, fromPort: null } : c));
+        setExtraSelectedWs(new Set());
+        setTool('pointer');
+        setSelectRect(null);
         return;
       }
-      if (!selected) return;
+
+      // Cmd/Ctrl+Z — undo. Cmd/Ctrl+Shift+Z (or Cmd/Ctrl+Y) — redo.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'z' || e.key === 'Z')) {
+        e.preventDefault();
+        if (e.shiftKey) redoTwin();
+        else undoTwin();
+        return;
+      }
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'y' || e.key === 'Y')) {
+        e.preventDefault();
+        redoTwin();
+        return;
+      }
+
+      // V — toggle the SELECT tool (Figma/Sketch convention).
+      if (e.key === 'v' || e.key === 'V') {
+        if (!e.metaKey && !e.ctrlKey) {
+          setTool((t) => (t === 'select' ? 'pointer' : 'select'));
+          setDrop({ kind: 'none' });
+          setConnect((c) => ({ ...c, on: false, fromWsId: null, fromPort: null }));
+          setSelectRect(null);
+          return;
+        }
+      }
+
+      // Cmd/Ctrl+A — select every workstation in the active twin.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'a' || e.key === 'A')) {
+        e.preventDefault();
+        selectAllWs();
+        return;
+      }
+      // Cmd/Ctrl+C — copy current ws selection.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'c' || e.key === 'C') && !e.shiftKey) {
+        if (copySelection()) e.preventDefault();
+        return;
+      }
+      // Cmd/Ctrl+X — cut current ws selection.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'x' || e.key === 'X')) {
+        const before = (selected?.kind === 'ws' ? 1 : 0) + extraSelectedWs.size;
+        if (before > 0) {
+          e.preventDefault();
+          cutSelection();
+        }
+        return;
+      }
+      // Cmd/Ctrl+V — paste at cursor.
+      if ((e.metaKey || e.ctrlKey) && (e.key === 'v' || e.key === 'V')) {
+        if (clipboardRef.current && clipboardRef.current.workstations.length > 0) {
+          e.preventDefault();
+          pasteClipboard();
+        }
+        return;
+      }
+
+      if (!selected && extraSelectedWs.size === 0) return;
       if (e.key === 'r' || e.key === 'R') {
-        if (selected.kind === 'ws') rotateWorkstation(selected.id, e.shiftKey ? -1 : 1);
+        if (selected?.kind === 'ws') rotateWorkstation(selected.id, e.shiftKey ? -1 : 1);
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
-        if (selected.kind === 'ws') removeWorkstation(selected.id);
-        else removeDepartment(selected.id);
+        // Delete the entire ws selection set (anchor + extras). Departments
+        // are still removed only when they are the lone anchor — multi-select
+        // is workstation-only.
+        const ids = new Set<string>();
+        if (selected?.kind === 'ws') ids.add(selected.id);
+        for (const id of extraSelectedWs) ids.add(id);
+        if (ids.size > 0) {
+          for (const id of ids) removeWorkstation(id);
+        } else if (selected?.kind === 'dept') {
+          removeDepartment(selected.id);
+        }
         setSelected(null);
+        setExtraSelectedWs(new Set());
       } else if ((e.metaKey || e.ctrlKey) && (e.key === 'd' || e.key === 'D')) {
-        if (selected.kind === 'ws') {
+        if (selected?.kind === 'ws') {
           e.preventDefault();
           const newId = duplicateWorkstation(selected.id);
           if (newId) setSelected({ kind: 'ws', id: newId });
@@ -707,7 +1027,7 @@ export function BuilderPage() {
       window.removeEventListener('keydown', onKey);
       window.removeEventListener('keyup', onKeyUp);
     };
-  }, [selected, rotateWorkstation, removeWorkstation, removeDepartment, duplicateWorkstation, resetView]);
+  }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, removeDepartment, duplicateWorkstation, resetView, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
 
   // ── Export JSON ────────────────────────────────────────────────────────────
   const onExportJson = useCallback(() => {
@@ -996,6 +1316,145 @@ export function BuilderPage() {
         </div>
 
         <div style={{ flex: 1 }} />
+
+        {/* Undo / redo — operates on the active twin's edit history. The
+            twin store keeps an in-memory stack of pre-mutation snapshots,
+            so reloading the page wipes history (intentional — undoing
+            across sessions invites surprise). */}
+        <div
+          style={{
+            display: 'flex',
+            gap: 4,
+            background: SW_COLORS.paperDeep,
+            padding: 3,
+            borderRadius: 6,
+            border: `1px solid ${SW_COLORS.line}`,
+          }}
+          title="Undo last edit (⌘/Ctrl+Z) · Redo (⌘/Ctrl+Shift+Z)"
+        >
+          <button
+            onClick={undoTwin}
+            disabled={!canUndo}
+            style={{
+              background: 'transparent',
+              color: canUndo ? SW_COLORS.steel : SW_COLORS.muted,
+              border: 'none',
+              padding: '6px 10px',
+              fontFamily: SW_FONTS.display,
+              fontSize: 10,
+              fontWeight: 900,
+              letterSpacing: '0.08em',
+              cursor: canUndo ? 'pointer' : 'not-allowed',
+              opacity: canUndo ? 1 : 0.45,
+              borderRadius: 4,
+            }}
+          >
+            ↶ UNDO
+          </button>
+          <button
+            onClick={redoTwin}
+            disabled={!canRedo}
+            style={{
+              background: 'transparent',
+              color: canRedo ? SW_COLORS.steel : SW_COLORS.muted,
+              border: 'none',
+              padding: '6px 10px',
+              fontFamily: SW_FONTS.display,
+              fontSize: 10,
+              fontWeight: 900,
+              letterSpacing: '0.08em',
+              cursor: canRedo ? 'pointer' : 'not-allowed',
+              opacity: canRedo ? 1 : 0.45,
+              borderRadius: 4,
+            }}
+          >
+            ↷ REDO
+          </button>
+        </div>
+
+        {/* SELECT tool — drag a rectangle on the canvas background to pick
+            every workstation whose footprint centre lands inside. */}
+        <div
+          style={{
+            display: 'flex',
+            gap: 4,
+            background: SW_COLORS.paperDeep,
+            padding: 3,
+            borderRadius: 6,
+            border: `1px solid ${SW_COLORS.line}`,
+          }}
+          title="Select tool — drag a rectangle to pick multiple workstations"
+        >
+          <button
+            onClick={() => {
+              // Toggling the select tool clears any other armed tool so the
+              // canvas isn't in two modes at once.
+              setTool((t) => (t === 'select' ? 'pointer' : 'select'));
+              setDrop({ kind: 'none' });
+              setConnect((c) => ({ ...c, on: false, fromWsId: null, fromPort: null }));
+              setSelectRect(null);
+            }}
+            style={{
+              background: tool === 'select' ? SW_COLORS.brand : 'transparent',
+              color: tool === 'select' ? '#fff' : SW_COLORS.steel,
+              border: 'none',
+              padding: '6px 12px',
+              fontFamily: SW_FONTS.display,
+              fontSize: 10,
+              fontWeight: 900,
+              letterSpacing: '0.08em',
+              cursor: 'pointer',
+              borderRadius: 4,
+            }}
+          >
+            ▭ SELECT
+          </button>
+        </div>
+
+        {/* Selection + clipboard chip — surfaces the number of workstations
+            currently selected (use the SELECT tool's rectangle marquee to
+            pick many at once) and the size of the copy buffer, plus the
+            shortcuts. Hidden when both are empty so the toolbar stays
+            clean at rest. */}
+        {(selectedWsIds.size > 0 || clipboard) && (
+          <div
+            title="Use the ▭ SELECT tool to drag a marquee · ⌘/Ctrl+C copy · ⌘/Ctrl+V paste at cursor · ⌘/Ctrl+X cut · ⌘/Ctrl+A select all"
+            style={{
+              display: 'flex',
+              alignItems: 'center',
+              gap: 6,
+              padding: '4px 9px',
+              borderRadius: 6,
+              border: `1px solid ${SW_COLORS.line}`,
+              background: SW_COLORS.paperDeep,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '0.04em',
+              color: SW_COLORS.steel,
+            }}
+          >
+            {selectedWsIds.size > 0 && (
+              <span>
+                <span style={{ color: SW_COLORS.brand, fontWeight: 900 }}>
+                  {selectedWsIds.size}
+                </span>
+                {' '}SELECTED
+              </span>
+            )}
+            {selectedWsIds.size > 0 && clipboard && (
+              <span style={{ opacity: 0.4 }}>·</span>
+            )}
+            {clipboard && (
+              <span>
+                <span style={{ color: SW_COLORS.bobbin, fontWeight: 900 }}>
+                  {clipboard.workstations.length}
+                </span>
+                {' '}ON CLIPBOARD
+              </span>
+            )}
+          </div>
+        )}
 
         {/* Canvas-mode toggle — iso authoring vs dept-flow logic vs PML block diagram */}
         <div style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }} title="Switch the canvas: ISO authoring · LOGIC dept-flow · PROCESS PML block diagram with input/output ports">
@@ -1351,9 +1810,11 @@ export function BuilderPage() {
             ? (isPanning ? 'grabbing' : 'grab')
             : isPanning
               ? 'grabbing'
-              : drop.kind === 'none'
-                ? 'default'
-                : 'crosshair',
+              : drop.kind !== 'none'
+                ? 'crosshair'
+                : tool === 'select'
+                  ? 'crosshair'
+                  : 'default',
           touchAction: 'none',
         }}
       >
@@ -1379,6 +1840,27 @@ export function BuilderPage() {
             {drop.kind === 'dept'
               ? `Click canvas to place ${drop.preset.label}`
               : 'Click inside a department to place workstation'}
+          </div>
+        )}
+
+        {tool === 'select' && drop.kind === 'none' && !connect.on && (
+          <div
+            style={{
+              position: 'absolute',
+              top: 12,
+              left: 12,
+              zIndex: 5,
+              padding: '8px 12px',
+              background: SW_COLORS.brand,
+              color: '#fff',
+              fontFamily: SW_FONTS.display,
+              fontSize: 11,
+              fontWeight: 900,
+              letterSpacing: '0.06em',
+              borderRadius: 6,
+            }}
+          >
+            ▭ Drag a rectangle to select workstations (Esc or V to exit)
           </div>
         )}
 
@@ -1454,6 +1936,8 @@ export function BuilderPage() {
               hoverCell={hoverCell}
               drop={drop}
               selected={selected}
+              selectedWsIds={selectedWsIds}
+              selectRect={selectRect}
               connect={connect}
               zoom={zoom}
               pan={pan}
@@ -1483,6 +1967,9 @@ export function BuilderPage() {
                   }
                   return;
                 }
+                // Plain click — single selection. Multi-select happens via
+                // the SELECT tool's rectangle marquee, not modifier keys.
+                setExtraSelectedWs(new Set());
                 setSelected(s);
               }}
               onRemoveConnector={removeConnector}
@@ -1660,6 +2147,21 @@ export function BuilderPage() {
         onSetKpiTargets={setKpiTargets}
         onSetBlock={setBlock}
         onRemoveConnector={removeConnector}
+        onAddLine={(deptId) => {
+          const dept = twin.departments.find((d) => d.id === deptId);
+          if (!dept) return;
+          const n = (twin.lines ?? []).filter((l) => l.deptId === deptId).length + 1;
+          addLine({
+            deptId,
+            name: `Line ${String.fromCharCode(64 + n)} · new`,
+            productionSystem: 'PBS',
+            color: dept.color,
+            garmentId: undefined,
+          });
+        }}
+        onRemoveLine={(id) => removeLine(id)}
+        onUpdateLine={(id, patch) => updateLine(id, patch)}
+        onAssignLine={(wsId, lineId) => setLineForWorkstations([wsId], lineId)}
       />
     </div>
   );
@@ -1992,6 +2494,14 @@ interface CanvasSVGProps {
   hoverCell: { x: number; y: number } | null;
   drop: DropTool;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
+  /** Full set of workstation ids currently in the selection (primary +
+   *  marquee-extended). Every id in here gets the selection ring on the
+   *  canvas. Passed in addition to `selected` so the Inspector still
+   *  binds to the single anchor. */
+  selectedWsIds: Set<string>;
+  /** Live marquee rectangle in SVG user-space (post-pan/zoom). When
+   *  non-null, the canvas paints a translucent select rect overlay. */
+  selectRect: { sx0: number; sy0: number; sx1: number; sy1: number } | null;
   connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null };
   /** Current canvas zoom — used to choose grid subdivision density so the
    *  grid divides further when the user zooms in. */
@@ -2003,7 +2513,9 @@ interface CanvasSVGProps {
   /** Live size of the stage element in CSS pixels. Used to set a centred,
    *  1:1 viewBox and to compute which cells are currently on screen. */
   stageSize: { w: number; h: number };
-  onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
+  onSelect: (
+    s: { kind: 'dept' | 'ws'; id: string } | null,
+  ) => void;
   onRemoveConnector: (id: string) => void;
   onStartDrag: (kind: 'ws' | 'dept', id: string, e: React.MouseEvent) => void;
 }
@@ -2016,7 +2528,7 @@ function workstationScreenCenter(ws: Workstation): { sx: number; sy: number } {
 }
 
 function CanvasSVG(props: CanvasSVGProps) {
-  const { twin, lens, hoverCell, drop, selected, zoom, pan, stageSize } = props;
+  const { twin, lens, hoverCell, drop, selected, selectedWsIds, selectRect, zoom, pan, stageSize } = props;
 
   // Grid subdivision density. As the user zooms in, each integer cell is
   // divided into more sub-cells (powers of 2). Steps are tuned so the next
@@ -2197,6 +2709,14 @@ function CanvasSVG(props: CanvasSVGProps) {
         />
       ))}
 
+      {/* SEWING LINE BANDS — translucent halo around the convex bounding box
+          of each line's member workstations. Drawn above departments so the
+          line accent reads on top of the dept fill, but below workstations so
+          machine sprites stay clickable. */}
+      {(twin.lines ?? []).map((line) => (
+        <SewingLineBand key={line.id} line={line} twin={twin} />
+      ))}
+
       {/* WORKSTATIONS — depth-sorted by x+y */}
       {[...twin.workstations]
         .sort((a, b) => a.position.x + a.position.y - (b.position.x + b.position.y))
@@ -2207,7 +2727,7 @@ function CanvasSVG(props: CanvasSVGProps) {
             <WorkstationSprite
               key={w.id}
               ws={w}
-              selected={selected?.kind === 'ws' && selected.id === w.id}
+              selected={selectedWsIds.has(w.id)}
               connectSource={isConnectSource}
               lens={lens}
               placing={props.drop.kind !== 'none'}
@@ -2227,6 +2747,24 @@ function CanvasSVG(props: CanvasSVGProps) {
       {/* HOVER PREVIEW */}
       {hoverCell && drop.kind !== 'none' && (
         <HoverPreview cell={hoverCell} drop={drop} />
+      )}
+
+      {/* SELECT-TOOL MARQUEE — drawn last so it sits on top of everything.
+          Coordinates are in SVG user-space, which is the same space the
+          <g> renders in after pan/zoom — so the rect tracks the cursor at
+          any zoom level without rescaling. */}
+      {selectRect && (
+        <rect
+          x={Math.min(selectRect.sx0, selectRect.sx1)}
+          y={Math.min(selectRect.sy0, selectRect.sy1)}
+          width={Math.abs(selectRect.sx1 - selectRect.sx0)}
+          height={Math.abs(selectRect.sy1 - selectRect.sy0)}
+          fill={SW_COLORS.brand + '18'}
+          stroke={SW_COLORS.brand}
+          strokeWidth={1 / Math.max(0.001, zoom)}
+          strokeDasharray={`${4 / Math.max(0.001, zoom)} ${3 / Math.max(0.001, zoom)}`}
+          style={{ pointerEvents: 'none' }}
+        />
       )}
       </g>
     </svg>
@@ -2295,6 +2833,91 @@ function DepartmentShape({
   );
 }
 
+// ── SEWING LINE band ──────────────────────────────────────────────────────────
+
+/**
+ * Soft outline around the bounding box of a sewing line's member workstations
+ * (clipped to the parent department's bounds). Decorative — does not catch
+ * pointer events so workstation clicks pass through. Hidden when the line has
+ * no member workstations yet (skeleton placeholder).
+ */
+function SewingLineBand({
+  line,
+  twin,
+}: {
+  line: SewingLine;
+  twin: ReturnType<typeof selectActiveTwin>;
+}) {
+  const members = twin.workstations.filter((w) => w.lineId === line.id);
+  if (members.length === 0) return null;
+  const dept = twin.departments.find((d) => d.id === line.deptId);
+
+  // Bounding box of all member workstations, in world cells.
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const w of members) {
+    const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === w.catalogId);
+    const fw = w.size?.w ?? fixture?.w ?? 1;
+    const fd = w.size?.d ?? fixture?.d ?? 1;
+    if (w.position.x < minX) minX = w.position.x;
+    if (w.position.y < minY) minY = w.position.y;
+    if (w.position.x + fw > maxX) maxX = w.position.x + fw;
+    if (w.position.y + fd > maxY) maxY = w.position.y + fd;
+  }
+  // 0.4-cell padding so the band breathes around the equipment.
+  const PAD = 0.4;
+  minX -= PAD; minY -= PAD; maxX += PAD; maxY += PAD;
+  // Clip to the parent department so the band never spills onto a neighbour.
+  if (dept) {
+    minX = Math.max(minX, dept.bounds.x);
+    minY = Math.max(minY, dept.bounds.y);
+    maxX = Math.min(maxX, dept.bounds.x + dept.bounds.w);
+    maxY = Math.min(maxY, dept.bounds.y + dept.bounds.h);
+  }
+  const tl = isoProj(minX, minY);
+  const tr = isoProj(maxX, minY);
+  const br = isoProj(maxX, maxY);
+  const bl = isoProj(minX, maxY);
+  const accent = DEPT_COLOR_HEX[line.color] ?? SW_COLORS.brand;
+
+  // Label anchored at the top-left corner so it doesn't fight the dept name.
+  const labelX = tl.sx + 8;
+  const labelY = tl.sy + 4;
+
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      <polygon
+        points={ptsToStr([tl, tr, br, bl])}
+        fill={accent}
+        fillOpacity={0.08}
+        stroke={accent}
+        strokeOpacity={0.85}
+        strokeWidth={1.6}
+        strokeDasharray="5 4"
+      />
+      <rect
+        x={labelX - 4}
+        y={labelY - 10}
+        width={Math.max(70, line.name.length * 5.6 + 18)}
+        height={14}
+        rx={2}
+        fill={accent}
+        opacity={0.92}
+      />
+      <text
+        x={labelX}
+        y={labelY}
+        fontFamily={SW_FONTS.mono}
+        fontSize={9}
+        fontWeight={800}
+        fill="#fff"
+        style={{ letterSpacing: '0.06em' }}
+      >
+        {line.name.toUpperCase()}
+      </text>
+    </g>
+  );
+}
+
 // ── WORKSTATION sprite ────────────────────────────────────────────────────────
 
 function WorkstationSprite({
@@ -2311,7 +2934,7 @@ function WorkstationSprite({
   connectSource: boolean;
   lens: Lens;
   placing: boolean;
-  onClick: () => void;
+  onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
   const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
@@ -2338,7 +2961,7 @@ function WorkstationSprite({
       onClick={(e) => {
         if (placing) return; // let placement click bubble to the stage
         e.stopPropagation();
-        onClick();
+        onClick(e);
       }}
       onMouseDown={(e) => {
         if (placing) return; // don't start a ws drag while a tool is armed
@@ -3852,6 +4475,14 @@ interface InspectorProps {
   /** Set or clear the workstation's PML block override. */
   onSetBlock: (wsId: string, block: PmlBlockOverride | null) => void;
   onRemoveConnector: (id: string) => void;
+  /** Add a new sewing line to a department. */
+  onAddLine: (deptId: string) => void;
+  /** Remove a sewing line. */
+  onRemoveLine: (id: string) => void;
+  /** Rename / re-style a sewing line. */
+  onUpdateLine: (id: string, patch: Partial<Omit<SewingLine, 'id' | 'deptId'>>) => void;
+  /** Assign / unassign a single workstation to a line. */
+  onAssignLine: (wsId: string, lineId: string | null) => void;
 }
 
 function Inspector(props: InspectorProps) {
@@ -3940,6 +4571,115 @@ function Inspector(props: InspectorProps) {
         <div style={sectionLabel}>
           Workstations in this dept · {props.twin.workstations.filter((w) => w.deptId === dept.id).length}
         </div>
+
+        {/* SEWING LINES — production lines that group workstations inside
+            this department. Authoring lives here so every department can be a
+            multi-line floor (or stay line-less for storage / QC). */}
+        <div style={{ height: 14 }} />
+        <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+          <div style={sectionLabel}>
+            Sewing lines · {(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).length}
+          </div>
+          <button
+            onClick={() => props.onAddLine(dept.id)}
+            style={{ ...btnSec, padding: '3px 9px', fontSize: 10 }}
+            title="Create a new production line inside this department"
+          >
+            + ADD LINE
+          </button>
+        </div>
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
+          {(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).map((line) => {
+            const memberCount = props.twin.workstations.filter((w) => w.lineId === line.id).length;
+            return (
+              <div
+                key={line.id}
+                style={{
+                  border: `1px solid ${SW_COLORS.line}`,
+                  borderLeft: `4px solid ${DEPT_COLOR_HEX[line.color]}`,
+                  borderRadius: 6,
+                  padding: 8,
+                  background: SW_COLORS.paperDeep,
+                }}
+              >
+                <div style={{ display: 'flex', gap: 6, alignItems: 'center' }}>
+                  <input
+                    value={line.name}
+                    onChange={(e) => props.onUpdateLine(line.id, { name: e.target.value })}
+                    style={{ ...inputBase, flex: 1, padding: '4px 6px', fontSize: 12 }}
+                  />
+                  <button
+                    onClick={() => {
+                      if (memberCount > 0 && !confirm(`Remove ${line.name}? ${memberCount} workstation${memberCount === 1 ? '' : 's'} will become unassigned but stay placed.`)) return;
+                      props.onRemoveLine(line.id);
+                    }}
+                    style={{ ...btnSec, color: SW_COLORS.alarm, padding: '3px 7px', fontSize: 10 }}
+                    title="Delete this line"
+                  >
+                    ✕
+                  </button>
+                </div>
+                <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6, marginTop: 6 }}>
+                  <div>
+                    <label style={{ ...fieldLabel, marginTop: 0 }}>System</label>
+                    <select
+                      value={line.productionSystem}
+                      onChange={(e) =>
+                        props.onUpdateLine(line.id, {
+                          productionSystem: e.target.value as ProductionSystemKey,
+                        })
+                      }
+                      style={{ ...inputBase, appearance: 'auto', padding: '3px 6px', fontSize: 11 }}
+                    >
+                      {(['PBS', 'modular', 'UPS', 'synchro', 'straight'] as const).map((sys) => (
+                        <option key={sys} value={sys}>
+                          {sys}
+                        </option>
+                      ))}
+                    </select>
+                  </div>
+                  <div>
+                    <label style={{ ...fieldLabel, marginTop: 0 }}>Garment</label>
+                    <input
+                      value={line.garmentId ?? ''}
+                      onChange={(e) =>
+                        props.onUpdateLine(line.id, {
+                          garmentId: e.target.value || undefined,
+                        })
+                      }
+                      placeholder="e.g. tshirt"
+                      style={{ ...inputBase, padding: '3px 6px', fontSize: 11 }}
+                    />
+                  </div>
+                </div>
+                <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
+                  {memberCount} workstation{memberCount === 1 ? '' : 's'} on this line
+                </div>
+                <div style={{ display: 'flex', gap: 4, marginTop: 6, flexWrap: 'wrap' }}>
+                  {(Object.keys(DEPT_COLOR_HEX) as DepartmentColorKey[]).map((c) => (
+                    <button
+                      key={c}
+                      onClick={() => props.onUpdateLine(line.id, { color: c })}
+                      title={`Line accent · ${c}`}
+                      style={{
+                        width: 14, height: 14, borderRadius: 3,
+                        background: DEPT_COLOR_HEX[c],
+                        border: line.color === c ? `2px solid ${SW_COLORS.ink}` : `1px solid ${SW_COLORS.line}`,
+                        cursor: 'pointer',
+                        padding: 0,
+                      }}
+                    />
+                  ))}
+                </div>
+              </div>
+            );
+          })}
+          {(props.twin.lines ?? []).filter((l) => l.deptId === dept.id).length === 0 && (
+            <div style={{ fontSize: 11, color: SW_COLORS.muted, padding: '4px 0' }}>
+              No production lines defined. Click <strong>+ ADD LINE</strong> to start one.
+            </div>
+          )}
+        </div>
       </div>
     );
   }
@@ -3949,6 +4689,8 @@ function Inspector(props: InspectorProps) {
   if (!ws) return <div style={wrapper}>Selection lost.</div>;
   const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
   const dept = props.twin.departments.find((d) => d.id === ws.deptId);
+  const linesInDept = (props.twin.lines ?? []).filter((l) => l.deptId === ws.deptId);
+  const wsLine = ws.lineId ? linesInDept.find((l) => l.id === ws.lineId) ?? null : null;
 
   return (
     <div style={wrapper}>
@@ -3970,6 +4712,45 @@ function Inspector(props: InspectorProps) {
         Fixture: <strong style={{ color: SW_COLORS.steel }}>{fixture?.label ?? ws.catalogId}</strong>{' '}
         · Dept: <strong style={{ color: SW_COLORS.steel }}>{dept?.name ?? '—'}</strong>
       </div>
+
+      {/* SEWING LINE — only meaningful when the parent dept has lines defined. */}
+      {linesInDept.length > 0 && (
+        <>
+          <div style={{ height: 10 }} />
+          <label style={fieldLabel}>Sewing line</label>
+          <select
+            value={ws.lineId ?? ''}
+            onChange={(e) =>
+              props.onAssignLine(ws.id, e.target.value === '' ? null : e.target.value)
+            }
+            style={{ ...inputBase, appearance: 'auto' }}
+          >
+            <option value="">— Unassigned (dept-level fixture) —</option>
+            {linesInDept.map((l) => (
+              <option key={l.id} value={l.id}>
+                {l.name}
+              </option>
+            ))}
+          </select>
+          {wsLine && (
+            <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>
+              <span
+                style={{
+                  display: 'inline-block',
+                  width: 8,
+                  height: 8,
+                  borderRadius: 2,
+                  background: DEPT_COLOR_HEX[wsLine.color],
+                  marginRight: 6,
+                  verticalAlign: 'middle',
+                }}
+              />
+              {wsLine.productionSystem.toUpperCase()}
+              {wsLine.garmentId ? ` · ${wsLine.garmentId}` : ''}
+            </div>
+          )}
+        </>
+      )}
 
       <div style={{ height: 12 }} />
       <div style={sectionLabel}>Position (cells)</div>

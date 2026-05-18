@@ -8,7 +8,7 @@ import {
   lineEfficiency,
   bottleneckSmv,
 } from '../domain';
-import { buildSimConfig, efficiencyFromSkillMatrix, runReplications, type AggregateKpis } from '../simulation';
+import { buildSimConfig, efficiencyFromSkillMatrix, runReplications, buildLinesFromTwin, aggregateFactoryKpis, type AggregateKpis, type LineBuild } from '../simulation';
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
@@ -110,12 +110,67 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     setAgg(runReplications({ config: runConfig, replications: runs, simMinutes: SHIFT_MIN }));
   }, [runConfig, runs]);
 
-  const efficiency = agg.efficiencyPct.mean;
-  const throughputPerHr = agg.throughputPerHr.mean;
-  const producedPieces = agg.producedPieces.mean;
-  const meanLeadTime = agg.meanLeadTime.mean;
-  const utilization = agg.utilization.mean;
-  const wipBundles = agg.wipBundles.mean;
+  // ── Per-line replication ─────────────────────────────────────────────────
+  // When the active twin has more than one wired sewing line, the
+  // single-garment KPIs above can't honestly speak for the factory (Line 1
+  // is knit, Line 2 is woven, etc.). Run a separate replication on each
+  // wired line's config so the Performance tab can show a per-line table
+  // alongside the aggregate Yamazumi-driven tiles.
+  const reportsTwin = useTwin(selectActiveTwin);
+  const lineBuildsForReports: LineBuild[] = useMemo(() => {
+    if ((reportsTwin.lines ?? []).length === 0) return [];
+    return buildLinesFromTwin({
+      twin: reportsTwin,
+      garmentsById: garments.byId,
+      defaultGarmentId: project.selectedGarmentId,
+      opEfficiency: efficiencyFromSkillMatrix(
+        project.skillMatrix,
+        (garments.byId[project.selectedGarmentId] ?? garments.all[0]).operations,
+      ),
+      modelTimeUnit: project.time.modelTimeUnit,
+    });
+  }, [reportsTwin, garments.byId, garments.all, project.selectedGarmentId, project.skillMatrix, project.time.modelTimeUnit]);
+  const perLineAggs = useMemo(() => {
+    return lineBuildsForReports
+      .filter((lb) => lb.ok)
+      .map((lb) => ({
+        line: lb.line,
+        bundleSize: lb.build.config.bundleSize,
+        // Operators = sum of parallel servers across stations. Matches the
+        // denominator the per-line efficiency calc in replications.ts uses,
+        // so the factory-weighted efficiency stays internally consistent.
+        operators: lb.build.config.stationServers.reduce((s, c) => s + c, 0),
+        // SAM per piece for this line's garment. Drives the SAM-consumed
+        // weight in the factory efficiency aggregation.
+        totalSmv: lb.build.config.operations.reduce((s, o) => s + o.smv, 0),
+        agg: runReplications({ config: lb.build.config, replications: runs, simMinutes: SHIFT_MIN }),
+      }));
+  }, [lineBuildsForReports, runs]);
+
+  // ── Factory-level aggregate across wired lines ──────────────────────────
+  // When the twin has ≥1 wired line, the top KPI tiles (and the FACTORY
+  // summary row in the per-line table) describe the whole factory, computed
+  // with proper IE weighting (operator-minutes for efficiency, operators for
+  // utilisation, pieces for lead time). Without this, the tiles would either
+  // (a) show a synthetic Yamazumi-target line that disagreed with the per-
+  // line table below, or (b) report a simple arithmetic mean of percentages,
+  // which silently misrepresents lines of different sizes.
+  const factoryAgg = useMemo<AggregateKpis | null>(() => {
+    if (perLineAggs.length === 0) return null;
+    return aggregateFactoryKpis(perLineAggs, SHIFT_MIN);
+  }, [perLineAggs]);
+
+  // Top KPI tiles read from the factory aggregate when wired lines exist,
+  // otherwise from the single-config Yamazumi run. This is the same data that
+  // populates the FACTORY summary row in the per-line table, so the two views
+  // stay numerically consistent.
+  const kpiSource: AggregateKpis = factoryAgg ?? agg;
+  const efficiency = kpiSource.efficiencyPct.mean;
+  const throughputPerHr = kpiSource.throughputPerHr.mean;
+  const producedPieces = kpiSource.producedPieces.mean;
+  const meanLeadTime = kpiSource.meanLeadTime.mean;
+  const utilization = kpiSource.utilization.mean;
+  const wipBundles = kpiSource.wipBundles.mean;
 
   // ── PML run section data ────────────────────────────────────────────────
   const pmlTwin = useTwin(selectActiveTwin);
@@ -226,7 +281,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const periodMultiplier = period === 'WEEK' ? 6 : period === 'MONTH' ? 26 : 1;
   const periodLabel = period === 'SHIFT' ? 'SHIFT' : period === 'DAY' ? 'DAY' : period === 'WEEK' ? 'WEEK' : 'MONTH';
   const scaledProducedMean = producedPieces * periodMultiplier;
-  const scaledProducedStd = (runs > 1 ? agg.producedPieces.std : 0) * periodMultiplier;
+  const scaledProducedStd = (runs > 1 ? kpiSource.producedPieces.std : 0) * periodMultiplier;
+  // True when the headline tiles describe the wired factory rather than the
+  // single-config Yamazumi run. Drives the sub-line copy below.
+  const factoryScope = factoryAgg !== null;
+  const factoryLineCount = perLineAggs.length;
 
   return (
     <div style={embedded
@@ -235,7 +294,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       <SectionHeader
         kicker="Reports"
         title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Model validation' : 'Production performance'}
-        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${yamTemplate.name} · ${yamOperators} operators · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
+        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : `${yamTemplate.name} · ${yamOperators} operators`} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
@@ -499,26 +558,54 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       )}
 
       {tab === 'performance' && (
+      <>
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
         <HideableBox toggleSize={22} toggleOffset={6}>
           <KpiTile label={`OUTPUT / ${periodLabel}`} mean={scaledProducedMean} std={scaledProducedStd} unit="pcs" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.brand}/>
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="THROUGHPUT" mean={throughputPerHr} std={runs > 1 ? agg.throughputPerHr.std : 0} unit="pcs/hr" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.ok}/>
+          <KpiTile label="THROUGHPUT" mean={throughputPerHr} std={runs > 1 ? kpiSource.throughputPerHr.std : 0} unit="pcs/hr" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.ok}/>
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="EFFICIENCY" mean={efficiency} std={runs > 1 ? agg.efficiencyPct.std : 0} unit="%" formatter={(v) => v.toFixed(1)} color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
+          <KpiTile label="EFFICIENCY" mean={efficiency} std={runs > 1 ? kpiSource.efficiencyPct.std : 0} unit="%" formatter={(v) => v.toFixed(1)} color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="MEAN LEAD"  mean={meanLeadTime} std={runs > 1 ? agg.meanLeadTime.std : 0} unit="min" formatter={(v) => v.toFixed(1)} color={SW_COLORS.bobbin}/>
+          <KpiTile label="MEAN LEAD"  mean={meanLeadTime} std={runs > 1 ? kpiSource.meanLeadTime.std : 0} unit="min" formatter={(v) => v.toFixed(1)} color={SW_COLORS.bobbin}/>
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="WIP"        mean={wipBundles} std={runs > 1 ? agg.wipBundles.std : 0} unit="bundles" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.warn}/>
+          <KpiTile label="WIP"        mean={wipBundles} std={runs > 1 ? kpiSource.wipBundles.std : 0} unit="bundles" formatter={(v) => Math.round(v).toLocaleString()} color={SW_COLORS.warn}/>
         </HideableBox>
         <HideableBox toggleSize={22} toggleOffset={6}>
-          <KpiTile label="UTIL"       mean={utilization * 100} std={runs > 1 ? agg.utilization.std * 100 : 0} unit="%" formatter={(v) => v.toFixed(0)} color={SW_COLORS.thread}/>
+          <KpiTile label="UTIL"       mean={utilization * 100} std={runs > 1 ? kpiSource.utilization.std * 100 : 0} unit="%" formatter={(v) => v.toFixed(0)} color={SW_COLORS.thread}/>
         </HideableBox>
       </div>
+
+      {perLineAggs.length > 1 && factoryAgg && (
+        <>
+          <PerLineKpiTable rows={perLineAggs} factoryAgg={factoryAgg} periodLabel={periodLabel} periodMultiplier={periodMultiplier} />
+          <HideableBox style={{ marginBottom: 20 }}>
+            <Card padding={20}>
+              <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 14, paddingRight: 36, flexWrap: 'wrap', gap: 8 }}>
+                <div>
+                  <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>PER-LINE OUTPUT OVER TIME</div>
+                  <div style={{ fontSize: 12, color: SW_COLORS.muted }}>
+                    Cumulative pieces produced per line, sampled every 5 sim-minutes and averaged across all {runs} replication{runs === 1 ? '' : 's'}.
+                  </div>
+                </div>
+                <div style={{ display: 'flex', gap: 14, fontSize: 11, fontFamily: SW_FONTS.mono, fontWeight: 700, flexWrap: 'wrap' }}>
+                  {perLineAggs.map((r) => (
+                    <span key={r.line.id}>
+                      <span style={{ color: DEPT_LINE_COLORS[r.line.color] ?? SW_COLORS.brand }}>■</span> {r.line.name}
+                    </span>
+                  ))}
+                </div>
+              </div>
+              <MultiLineHistoryChart rows={perLineAggs} />
+            </Card>
+          </HideableBox>
+        </>
+      )}
+      </>
       )}
 
       {/* Yamazumi — drag operations between operators to rebalance */}
@@ -533,6 +620,46 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               </div>
             </div>
             <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
+              {/* Line presets — quick-load a wired line's garment + operator
+                  target so the Yamazumi reflects the bulletin that line is
+                  actually running. Without this the user has to re-derive
+                  Line 2's setup from the LiveSim picker and type it in. */}
+              {lineBuildsForReports.filter((lb) => lb.ok && lb.line.garmentId).length > 0 && (
+                <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+                  <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>LOAD LINE</span>
+                  {lineBuildsForReports.filter((lb) => lb.ok && lb.line.garmentId).map((lb) => {
+                    const accent = DEPT_LINE_COLORS[lb.line.color] ?? SW_COLORS.brand;
+                    const lineGarmentId = lb.line.garmentId!;
+                    const isActive = yamGarment === lineGarmentId
+                      && yamOperators === (lb.line.operatorTarget ?? yamOperators);
+                    return (
+                      <button
+                        key={lb.line.id}
+                        onClick={() => {
+                          setYamGarment(lineGarmentId);
+                          if (lb.line.operatorTarget) setYamOperators(lb.line.operatorTarget);
+                        }}
+                        title={`Set Yamazumi to ${lb.line.name}: garment "${garments.byId[lineGarmentId]?.name ?? lineGarmentId}"${lb.line.operatorTarget ? ` · ${lb.line.operatorTarget} operators` : ''}`}
+                        style={{
+                          padding: '4px 10px',
+                          border: `1px solid ${isActive ? accent : SW_COLORS.line}`,
+                          borderLeft: `4px solid ${accent}`,
+                          background: isActive ? `${accent}22` : 'transparent',
+                          borderRadius: SW_RADIUS.sm,
+                          fontFamily: SW_FONTS.mono,
+                          fontSize: 10,
+                          fontWeight: 800,
+                          letterSpacing: '0.05em',
+                          color: isActive ? '#fff' : SW_COLORS.ink,
+                          cursor: 'pointer',
+                        }}
+                      >
+                        {lb.line.name.toUpperCase()}
+                      </button>
+                    );
+                  })}
+                </div>
+              )}
               <ToggleGroup value={yamGarment} onChange={setYamGarment} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
               <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
                 <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>OPERATORS</span>
@@ -567,7 +694,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:14, paddingRight: 36 }}>
               <div>
                 <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>OUTPUT OVER TIME</div>
-                <div style={{ fontSize:12, color: SW_COLORS.muted }}>Bundles produced per 5-min interval — sampled live from the engine.</div>
+                <div style={{ fontSize:12, color: SW_COLORS.muted }}>
+                  {factoryScope
+                    ? `Single-line trace from ${yamTemplate.name} — see PER-LINE OUTPUT OVER TIME below for the wired factory's per-line curves.`
+                    : 'Bundles produced per 5-min interval — sampled live from the engine.'}
+                </div>
               </div>
               <div style={{ display:'flex', gap:14, fontSize:11, fontFamily: SW_FONTS.mono, fontWeight:700 }}>
                 <span><span style={{ color: SW_COLORS.brand }}>■</span> Cumulative produced</span>
@@ -580,24 +711,36 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
 
         <HideableBox>
           <Card padding={20}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14, paddingRight: 36 }}>BOTTLENECKS (LIVE)</div>
-            {agg.firstStations.length === 0 ? (
-              <div style={{ fontSize:12, color: SW_COLORS.muted }}>Sim has not run yet.</div>
-            ) : (
-              [...agg.firstStations]
+            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom: 6, paddingRight: 36 }}>BOTTLENECKS (LIVE)</div>
+            <div style={{ fontSize: 11, color: SW_COLORS.muted, marginBottom: 10 }}>
+              {factoryScope
+                ? 'Top-queue stations across all wired lines, labelled with the line they belong to.'
+                : `Top-queue stations on ${yamTemplate.name}.`}
+            </div>
+            {(() => {
+              const stations = factoryScope
+                ? perLineAggs.flatMap((r) => r.agg.firstStations.map((s) => ({ ...s, lineName: r.line.name })))
+                : agg.firstStations.map((s) => ({ ...s, lineName: '' }));
+              if (stations.length === 0) {
+                return <div style={{ fontSize:12, color: SW_COLORS.muted }}>Sim has not run yet.</div>;
+              }
+              return stations
                 .sort((a, b) => b.queueLen - a.queueLen)
                 .slice(0, 6)
                 .map((s, i) => (
-                  <div key={s.opId} style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
+                  <div key={`${s.lineName}::${s.opId}`} style={{ display:'flex', alignItems:'center', gap:8, padding:'8px 0', borderTop: i?`1px solid ${SW_COLORS.line}`:'none' }}>
                     <span style={{ flex:1, fontSize:12, fontWeight:600 }}>
                       <span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, fontSize: 10, fontWeight: 700, marginRight: 6 }}>{s.opCode}</span>
                       {s.opName}
+                      {s.lineName && (
+                        <span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, fontSize: 10, fontWeight: 600, marginLeft: 6 }}>· {s.lineName}</span>
+                      )}
                     </span>
                     <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: s.queueLen > 5 ? SW_COLORS.alarm : SW_COLORS.muted }}>Q={s.queueLen}</span>
                     <span style={{ fontFamily: SW_FONTS.mono, fontSize:11, fontWeight:700, color: SW_COLORS.thread }}>{(s.utilization * 100).toFixed(0)}%</span>
                   </div>
-                ))
-            )}
+                ));
+            })()}
           </Card>
         </HideableBox>
       </div>
@@ -954,6 +1097,172 @@ interface KpiTileProps {
   formatter: (value: number) => string;
   color: string;
 }
+
+/**
+ * Per-line KPI table — surfaces a row per wired sewing line in twins that
+ * carry more than one line. Lets the user see who's contributing what when
+ * the aggregate tiles average across heterogeneous garments (e.g. Line 1
+ * knit T-shirt + Line 2 woven shirt produce wildly different rates and a
+ * single mean would hide that).
+ */
+function PerLineKpiTable({
+  rows,
+  factoryAgg,
+  periodLabel,
+  periodMultiplier,
+}: {
+  rows: Array<{ line: { id: string; name: string; color: string }; bundleSize: number; agg: AggregateKpis }>;
+  /** Pre-computed factory aggregate (extensive sums + IE-weighted intensives).
+   *  Sourced from the same helper that feeds the top KPI tiles so the FACTORY
+   *  row never disagrees with the headline numbers. */
+  factoryAgg: AggregateKpis;
+  periodLabel: string;
+  periodMultiplier: number;
+}) {
+  return (
+    <Card padding={16} style={{ marginBottom: 20 }}>
+      <SectionHeader title="PER LINE" sub="Replication-mean KPIs run independently on each wired sewing line. FACTORY row sums extensive KPIs (output, throughput, WIP) and weights intensives (efficiency by operator-minutes, util by operator count, lead time by pieces)." />
+      <div style={{ overflowX: 'auto' }}>
+        <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.mono, fontSize: 12 }}>
+          <thead>
+            <tr style={{ color: SW_COLORS.muted, fontSize: 10, letterSpacing: '0.1em', textAlign: 'right' }}>
+              <th style={{ textAlign: 'left', padding: '6px 8px', fontWeight: 700 }}>LINE</th>
+              <th style={{ padding: '6px 8px', fontWeight: 700 }}>{`OUTPUT / ${periodLabel}`}</th>
+              <th style={{ padding: '6px 8px', fontWeight: 700 }}>THROUGHPUT</th>
+              <th style={{ padding: '6px 8px', fontWeight: 700 }}>EFFICIENCY</th>
+              <th style={{ padding: '6px 8px', fontWeight: 700 }}>MEAN LEAD</th>
+              <th style={{ padding: '6px 8px', fontWeight: 700 }}>WIP</th>
+              <th style={{ padding: '6px 8px', fontWeight: 700 }}>UTIL</th>
+            </tr>
+          </thead>
+          <tbody>
+            {rows.map((r) => {
+              const accent = DEPT_LINE_COLORS[r.line.color] ?? SW_COLORS.brand;
+              return (
+                <tr key={r.line.id} style={{ borderTop: `1px solid ${SW_COLORS.line}` }}>
+                  <td style={{ padding: '8px', textAlign: 'left' }}>
+                    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 8 }}>
+                      <span aria-hidden style={{ width: 6, height: 6, borderRadius: 1, background: accent }} />
+                      <span style={{ fontWeight: 800 }}>{r.line.name}</span>
+                    </span>
+                  </td>
+                  <td style={{ padding: '8px', textAlign: 'right', color: SW_COLORS.brand, fontWeight: 800 }}>
+                    {Math.round(r.agg.producedPieces.mean * periodMultiplier).toLocaleString()}
+                  </td>
+                  <td style={{ padding: '8px', textAlign: 'right', color: SW_COLORS.ok, fontWeight: 800 }}>
+                    {Math.round(r.agg.throughputPerHr.mean).toLocaleString()}
+                  </td>
+                  <td style={{ padding: '8px', textAlign: 'right' }}>{r.agg.efficiencyPct.mean.toFixed(1)}%</td>
+                  <td style={{ padding: '8px', textAlign: 'right' }}>{r.agg.meanLeadTime.mean.toFixed(1)} min</td>
+                  <td style={{ padding: '8px', textAlign: 'right' }}>{Math.round(r.agg.wipBundles.mean).toLocaleString()}</td>
+                  <td style={{ padding: '8px', textAlign: 'right', color: SW_COLORS.thread, fontWeight: 800 }}>
+                    {Math.round(r.agg.utilization.mean * 100)}%
+                  </td>
+                </tr>
+              );
+            })}
+            <tr style={{ borderTop: `2px solid ${SW_COLORS.line}`, background: '#ffffff04' }}>
+              <td style={{ padding: '8px', textAlign: 'left', fontWeight: 900, letterSpacing: '0.08em' }}>FACTORY</td>
+              <td style={{ padding: '8px', textAlign: 'right', color: SW_COLORS.brand, fontWeight: 900 }}>
+                {Math.round(factoryAgg.producedPieces.mean * periodMultiplier).toLocaleString()}
+              </td>
+              <td style={{ padding: '8px', textAlign: 'right', color: SW_COLORS.ok, fontWeight: 900 }}>
+                {Math.round(factoryAgg.throughputPerHr.mean).toLocaleString()}
+              </td>
+              <td style={{ padding: '8px', textAlign: 'right' }}>{factoryAgg.efficiencyPct.mean.toFixed(1)}%</td>
+              <td style={{ padding: '8px', textAlign: 'right' }}>{factoryAgg.meanLeadTime.mean > 0 ? `${factoryAgg.meanLeadTime.mean.toFixed(1)} min` : '—'}</td>
+              <td style={{ padding: '8px', textAlign: 'right' }}>{Math.round(factoryAgg.wipBundles.mean).toLocaleString()}</td>
+              <td style={{ padding: '8px', textAlign: 'right', color: SW_COLORS.thread, fontWeight: 900 }}>
+                {Math.round(factoryAgg.utilization.mean * 100)}%
+              </td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
+    </Card>
+  );
+}
+
+/**
+ * Per-line cumulative-output chart. Overlays one stroke per sewing line,
+ * each in its dept-colour accent, with Y measured in pieces (the engine
+ * emits bundle-counted `produced`; we multiply by each line's bundleSize
+ * so the unit matches the per-line table above).
+ */
+function MultiLineHistoryChart({
+  rows,
+}: {
+  rows: Array<{ line: { id: string; name: string; color: string }; bundleSize: number; agg: AggregateKpis }>;
+}) {
+  const w = 600, h = 220;
+  const padL = 36, padR = 8, padT = 8, padB = 22;
+  const innerW = w - padL - padR;
+  const innerH = h - padT - padB;
+
+  const usable = rows.filter((r) => r.agg.averagedHistory.length >= 2);
+  if (usable.length === 0) {
+    return (
+      <div style={{ height: h, display: 'flex', alignItems: 'center', justifyContent: 'center', color: SW_COLORS.muted, fontSize: 12 }}>
+        Run a shift to see per-line output.
+      </div>
+    );
+  }
+
+  const maxT = Math.max(...usable.map((r) => r.agg.averagedHistory[r.agg.averagedHistory.length - 1].time));
+  const maxPcs = Math.max(
+    1,
+    ...usable.map((r) => Math.max(...r.agg.averagedHistory.map((p) => p.produced * r.bundleSize))),
+  );
+
+  const xs = (t: number) => padL + (t / maxT) * innerW;
+  const ys = (v: number) => padT + innerH - (v / maxPcs) * innerH;
+  const xTicks = 5;
+  const yTicks = 4;
+
+  return (
+    <svg viewBox={`0 0 ${w} ${h}`} style={{ width: '100%' }}>
+      {Array.from({ length: yTicks + 1 }).map((_, i) => {
+        const v = (maxPcs / yTicks) * i;
+        return (
+          <g key={i}>
+            <line x1={padL} y1={ys(v)} x2={w - padR} y2={ys(v)} stroke={SW_COLORS.line} />
+            <text x={padL - 4} y={ys(v) + 3} textAnchor="end" fill={SW_COLORS.muted} fontSize="9" fontFamily={SW_FONTS.mono}>
+              {Math.round(v).toLocaleString()}
+            </text>
+          </g>
+        );
+      })}
+      {Array.from({ length: xTicks + 1 }).map((_, i) => {
+        const t = (maxT / xTicks) * i;
+        return (
+          <text key={i} x={xs(t)} y={h - 6} textAnchor="middle" fill={SW_COLORS.muted} fontSize="9" fontFamily={SW_FONTS.mono}>
+            {Math.round(t)}m
+          </text>
+        );
+      })}
+      {usable.map((r) => {
+        const stroke = DEPT_LINE_COLORS[r.line.color] ?? SW_COLORS.brand;
+        const d = r.agg.averagedHistory
+          .map((p, i) => `${i ? 'L' : 'M'} ${xs(p.time)} ${ys(p.produced * r.bundleSize)}`)
+          .join(' ');
+        return <path key={r.line.id} d={d} fill="none" stroke={stroke} strokeWidth="2.5" />;
+      })}
+    </svg>
+  );
+}
+
+/** Department-colour palette mirrored from Builder so per-line rows pick up
+ *  the same accent the sewing-line strip uses in LiveSim. */
+const DEPT_LINE_COLORS: Record<string, string> = {
+  brand: SW_COLORS.brand,
+  blue: SW_COLORS.fabric,
+  green: SW_COLORS.ok,
+  yellow: SW_COLORS.warn,
+  red: SW_COLORS.alarm,
+  steel: SW_COLORS.steel,
+  bobbin: SW_COLORS.bobbin,
+  thread: SW_COLORS.thread,
+};
 
 /** Stat tile that gracefully shows ± std when std > 0. */
 function KpiTile({ label, mean, std, unit, formatter, color }: KpiTileProps) {

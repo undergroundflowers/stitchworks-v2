@@ -38,9 +38,12 @@ import {
   type KpiObservedAttrs,
   type Connector,
   type ConnectorKind,
+  type SewingLine,
+  type ProductionSystemKey,
   emptyTwin,
   forkTwin,
   newDeptId,
+  newLineId,
   newWorkstationId,
   newScenarioId,
   newRunId,
@@ -51,7 +54,21 @@ import {
 } from '../domain/twin';
 import type { PmlBlockOverride, PmlBlockParams } from '../domain/pml';
 
-export const TWIN_STORE_SCHEMA_VERSION = 4 as const;
+export const TWIN_STORE_SCHEMA_VERSION = 5 as const;
+
+/** Maximum number of pre-mutation snapshots kept in the undo stack.
+ *  Each snapshot is a structural clone of the full twin tree, so the cap
+ *  is a deliberate memory/UX tradeoff — 100 is plenty for an authoring
+ *  session and keeps localStorage out of it (history is in-memory only). */
+const MAX_HISTORY = 100;
+
+/** Immutable snapshot of the editable twin universe. Action references
+ *  are stored on the live state object — they don't belong in history. */
+interface TwinSnapshot {
+  canonical: Twin;
+  scenarios: Scenario[];
+  activeScenarioId: string | null;
+}
 
 // ============================================================================
 // STATE SHAPE
@@ -66,6 +83,17 @@ export interface TwinState {
   /** Which twin is currently being viewed/edited.
    *  null = canonical; otherwise a scenario id. */
   activeScenarioId: string | null;
+  /** Pre-mutation snapshots, oldest → newest. `undo` pops the tail. */
+  past: TwinSnapshot[];
+  /** Snapshots popped by `undo`, newest → oldest. `redo` pops the tail. */
+  future: TwinSnapshot[];
+
+  /** Restore the previous twin snapshot. Pushes the current state onto
+   *  `future` so the move is reversible via `redo`. No-op when the history
+   *  is empty. */
+  undo: () => void;
+  /** Reverse the most recent `undo`. No-op when nothing has been undone. */
+  redo: () => void;
 
   // ── Twin-level mutators (operate on the *active* twin) ────────────────────
   renameActive: (name: string) => void;
@@ -81,6 +109,17 @@ export interface TwinState {
   updateDepartment: (id: string, patch: Partial<Omit<Department, 'id'>>) => void;
   removeDepartment: (id: string) => void;
   moveDepartment: (id: string, bounds: Rect) => void;
+
+  // ── Sewing-Line CRUD ─────────────────────────────────────────────────────
+  /** Create a sewing line inside a department. Returns the new line's id. */
+  addLine: (input: Omit<SewingLine, 'id'>) => string;
+  /** Patch fields on a line. */
+  updateLine: (id: string, patch: Partial<Omit<SewingLine, 'id' | 'deptId'>>) => void;
+  /** Remove a line. Workstations that referenced it have their `lineId`
+   *  cleared but stay placed on the canvas. */
+  removeLine: (id: string) => void;
+  /** Bulk-assign / unassign workstations to a line. Pass `null` to clear. */
+  setLineForWorkstations: (wsIds: string[], lineId: string | null) => void;
 
   // ── Workstation CRUD ─────────────────────────────────────────────────────
   addWorkstation: (input: {
@@ -109,6 +148,15 @@ export interface TwinState {
   /** Clone a workstation, offsetting the copy slightly. Returns the new id
    *  (or null if the source id doesn't resolve in the active twin). */
   duplicateWorkstation: (id: string) => string | null;
+  /** Insert a cluster of workstation snapshots into the active twin with
+   *  fresh ids and the per-snapshot `deptId` / `position` already resolved.
+   *  Returned `idMap` maps each input snapshot's original id to its newly
+   *  minted id, so callers can re-route copied connectors. Snapshots whose
+   *  resolved `deptId` no longer exists in the active twin are skipped. */
+  pasteWorkstations: (input: {
+    snapshots: Array<Workstation & { _srcId: string }>;
+    connectors: Array<Omit<Connector, 'id'>>;
+  }) => { idMap: Record<string, string>; newWsIds: string[] };
 
   // ── Connector CRUD ───────────────────────────────────────────────────────
   /** Create a directed connector between two workstations. Returns the
@@ -189,9 +237,20 @@ export interface TwinState {
 // HELPERS
 // ============================================================================
 
-/** Update the currently-active twin (canonical or scenario fork) via a
- *  pure mapper. Bumps `modifiedAt` automatically. */
-function updateActive<S extends TwinState>(s: S, fn: (twin: Twin) => Twin): S {
+/** Capture the current twin tree as an undo snapshot — strips action
+ *  references so only data lands in history. */
+function snapshotOf(s: TwinState): TwinSnapshot {
+  return {
+    canonical: s.canonical,
+    scenarios: s.scenarios,
+    activeScenarioId: s.activeScenarioId,
+  };
+}
+
+/** Apply a pure update to the active twin (canonical or scenario fork)
+ *  *without* touching the undo history. Used by sim-side writes that
+ *  shouldn't pile onto the editor's undo stack (e.g. `setKpiObserved`). */
+function applyActive<S extends TwinState>(s: S, fn: (twin: Twin) => Twin): S {
   const now = new Date().toISOString();
   if (s.activeScenarioId === null) {
     const next = fn(s.canonical);
@@ -203,6 +262,17 @@ function updateActive<S extends TwinState>(s: S, fn: (twin: Twin) => Twin): S {
       : scn,
   );
   return { ...s, scenarios };
+}
+
+/** Update the currently-active twin (canonical or scenario fork) via a
+ *  pure mapper. Bumps `modifiedAt` automatically and pushes the
+ *  pre-mutation state onto the undo stack (clearing the redo stack). */
+function updateActive<S extends TwinState>(s: S, fn: (twin: Twin) => Twin): S {
+  const snap = snapshotOf(s);
+  const next = applyActive(s, fn);
+  const past = [...s.past, snap];
+  if (past.length > MAX_HISTORY) past.splice(0, past.length - MAX_HISTORY);
+  return { ...next, past, future: [] };
 }
 
 /** Mutate one workstation in the active twin, identified by id. No-op if
@@ -229,6 +299,42 @@ export const useTwin = create<TwinState>()(
       canonical: emptyTwin('My factory'),
       scenarios: [],
       activeScenarioId: null,
+      past: [],
+      future: [],
+
+      undo: () =>
+        set((s) => {
+          if (s.past.length === 0) return s;
+          const prev = s.past[s.past.length - 1];
+          const past = s.past.slice(0, -1);
+          const future = [...s.future, snapshotOf(s)];
+          if (future.length > MAX_HISTORY) future.splice(0, future.length - MAX_HISTORY);
+          return {
+            ...s,
+            canonical: prev.canonical,
+            scenarios: prev.scenarios,
+            activeScenarioId: prev.activeScenarioId,
+            past,
+            future,
+          };
+        }),
+
+      redo: () =>
+        set((s) => {
+          if (s.future.length === 0) return s;
+          const next = s.future[s.future.length - 1];
+          const future = s.future.slice(0, -1);
+          const past = [...s.past, snapshotOf(s)];
+          if (past.length > MAX_HISTORY) past.splice(0, past.length - MAX_HISTORY);
+          return {
+            ...s,
+            canonical: next.canonical,
+            scenarios: next.scenarios,
+            activeScenarioId: next.activeScenarioId,
+            past,
+            future,
+          };
+        }),
 
       renameActive: (name) =>
         set((s) => updateActive(s, (twin) => ({ ...twin, name }))),
@@ -276,6 +382,8 @@ export const useTwin = create<TwinState>()(
             return {
               ...twin,
               departments: twin.departments.filter((d) => d.id !== id),
+              // Lines belong to a department — cascade their removal too.
+              lines: (twin.lines ?? []).filter((l) => l.deptId !== id),
               workstations: twin.workstations.filter((w) => w.deptId !== id),
               connectors: (twin.connectors ?? []).filter(
                 (c) => !orphanedWsIds.has(c.fromWsId) && !orphanedWsIds.has(c.toWsId),
@@ -293,6 +401,55 @@ export const useTwin = create<TwinState>()(
             ),
           })),
         ),
+
+      // ── Sewing-Line CRUD ───────────────────────────────────────────────────
+      addLine: (input) => {
+        const id = newLineId();
+        const line: SewingLine = { id, ...input };
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            lines: [...(twin.lines ?? []), line],
+          })),
+        );
+        return id;
+      },
+
+      updateLine: (id, patch) =>
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            lines: (twin.lines ?? []).map((l) =>
+              l.id === id ? { ...l, ...patch } : l,
+            ),
+          })),
+        ),
+
+      removeLine: (id) =>
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            lines: (twin.lines ?? []).filter((l) => l.id !== id),
+            // Don't delete the member workstations — just orphan their lineId
+            // so the user keeps the physical layout and can re-assign later.
+            workstations: twin.workstations.map((w) =>
+              w.lineId === id ? { ...w, lineId: undefined } : w,
+            ),
+          })),
+        ),
+
+      setLineForWorkstations: (wsIds, lineId) => {
+        const wanted = new Set(wsIds);
+        const next = lineId ?? undefined;
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            workstations: twin.workstations.map((w) =>
+              wanted.has(w.id) ? { ...w, lineId: next } : w,
+            ),
+          })),
+        );
+      },
 
       // ── Workstations ───────────────────────────────────────────────────────
       addWorkstation: (input) => {
@@ -385,6 +542,64 @@ export const useTwin = create<TwinState>()(
         return newId;
       },
 
+      pasteWorkstations: (input) => {
+        const active = selectActiveTwin(get());
+        const deptIds = new Set(active.departments.map((d) => d.id));
+        const idMap: Record<string, string> = {};
+        const cloned: Workstation[] = [];
+        for (const snap of input.snapshots) {
+          if (!deptIds.has(snap.deptId)) continue;
+          const newId = newWorkstationId();
+          idMap[snap._srcId] = newId;
+          // Strip the transient `_srcId` from the clone before it joins
+          // the twin — it's only here to thread the source→clone mapping
+          // through to connector cloning, never persisted.
+          const { _srcId: _srcId, ...rest } = snap;
+          void _srcId;
+          cloned.push({
+            ...rest,
+            id: newId,
+            position: { ...snap.position },
+            props: { ...snap.props },
+            operation: { ...snap.operation },
+            resources: {
+              ...snap.resources,
+              materialsPerCycle: { ...snap.resources.materialsPerCycle },
+            },
+            kpiTargets: { ...snap.kpiTargets },
+            kpiObserved: undefined,
+            size: snap.size ? { ...snap.size } : undefined,
+            block: snap.block ? { ...snap.block, params: { ...snap.block.params } } : undefined,
+          });
+        }
+        const newConnectors: Connector[] = [];
+        for (const c of input.connectors) {
+          const fromNew = idMap[c.fromWsId];
+          const toNew = idMap[c.toWsId];
+          if (!fromNew || !toNew) continue;
+          newConnectors.push({
+            id: newConnectorId(),
+            kind: c.kind,
+            fromWsId: fromNew,
+            toWsId: toNew,
+            label: c.label,
+            fromPort: c.fromPort,
+            toPort: c.toPort,
+          });
+        }
+        if (cloned.length === 0) {
+          return { idMap, newWsIds: [] };
+        }
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            workstations: [...twin.workstations, ...cloned],
+            connectors: [...(twin.connectors ?? []), ...newConnectors],
+          })),
+        );
+        return { idMap, newWsIds: cloned.map((w) => w.id) };
+      },
+
       // ── Connector CRUD ─────────────────────────────────────────────────────
       addConnector: (input) => {
         if (input.fromWsId === input.toWsId) return null;
@@ -461,8 +676,15 @@ export const useTwin = create<TwinState>()(
         ),
 
       setKpiObserved: (wsId, observed) =>
+        // Sim-side write — bypasses undo history so a run-summary import
+        // doesn't bury the user's last edit behind 100 station updates.
         set((s) =>
-          patchWorkstation(s, wsId, (w) => ({ ...w, kpiObserved: observed })),
+          applyActive(s, (twin) => ({
+            ...twin,
+            workstations: twin.workstations.map((w) =>
+              w.id === wsId ? { ...w, kpiObserved: observed } : w,
+            ),
+          })),
         ),
 
       setBlock: (wsId, block) =>
@@ -481,6 +703,9 @@ export const useTwin = create<TwinState>()(
         ),
 
       // ── Scenarios ──────────────────────────────────────────────────────────
+      // Scenario-tree mutations clear undo/redo: history is a single-twin
+      // concept, and mixing snapshots of different active twins makes
+      // undo behave unpredictably across context switches.
       createScenarioFromCanonical: ({ name, notes, activate }) => {
         const id = newScenarioId();
         const now = new Date().toISOString();
@@ -499,6 +724,8 @@ export const useTwin = create<TwinState>()(
             ...s,
             scenarios: [scenario, ...s.scenarios],
             activeScenarioId: activate ? id : s.activeScenarioId,
+            past: [],
+            future: [],
           };
         });
         return id;
@@ -524,6 +751,8 @@ export const useTwin = create<TwinState>()(
             ...s,
             scenarios: [scenario, ...s.scenarios],
             activeScenarioId: activate ? id : s.activeScenarioId,
+            past: [],
+            future: [],
           };
         });
         return id;
@@ -549,13 +778,15 @@ export const useTwin = create<TwinState>()(
           ...s,
           scenarios: s.scenarios.filter((scn) => scn.id !== id),
           activeScenarioId: s.activeScenarioId === id ? null : s.activeScenarioId,
+          past: [],
+          future: [],
         })),
 
       setActiveScenario: (id) =>
         set((s) => {
-          if (id === null) return { ...s, activeScenarioId: null };
+          if (id === null) return { ...s, activeScenarioId: null, past: [], future: [] };
           if (!s.scenarios.some((scn) => scn.id === id)) return s;
-          return { ...s, activeScenarioId: id };
+          return { ...s, activeScenarioId: id, past: [], future: [] };
         }),
 
       promoteScenarioToCanonical: (id) =>
@@ -575,6 +806,8 @@ export const useTwin = create<TwinState>()(
             // Preserve other scenarios but drop the one we promoted.
             scenarios: s.scenarios.filter((x) => x.id !== id),
             activeScenarioId: null,
+            past: [],
+            future: [],
           };
         }),
 
@@ -615,7 +848,11 @@ export const useTwin = create<TwinState>()(
           canonical: emptyTwin('My factory'),
           scenarios: [],
           activeScenarioId: null,
+          past: [],
+          future: [],
           // Preserve action references so the store's identity holds.
+          undo: get().undo,
+          redo: get().redo,
           renameActive: get().renameActive,
           setActiveNotes: get().setActiveNotes,
           touchActive: get().touchActive,
@@ -623,12 +860,17 @@ export const useTwin = create<TwinState>()(
           updateDepartment: get().updateDepartment,
           removeDepartment: get().removeDepartment,
           moveDepartment: get().moveDepartment,
+          addLine: get().addLine,
+          updateLine: get().updateLine,
+          removeLine: get().removeLine,
+          setLineForWorkstations: get().setLineForWorkstations,
           addWorkstation: get().addWorkstation,
           updateWorkstation: get().updateWorkstation,
           removeWorkstation: get().removeWorkstation,
           moveWorkstation: get().moveWorkstation,
           rotateWorkstation: get().rotateWorkstation,
           duplicateWorkstation: get().duplicateWorkstation,
+          pasteWorkstations: get().pasteWorkstations,
           addConnector: get().addConnector,
           updateConnector: get().updateConnector,
           removeConnector: get().removeConnector,
@@ -660,6 +902,8 @@ export const useTwin = create<TwinState>()(
           canonical: { ...twin, isCanonical: true, parentTwinId: null },
           scenarios: [],
           activeScenarioId: null,
+          past: [],
+          future: [],
         }));
         return { ok: true };
       },
@@ -746,5 +990,23 @@ export function selectWorkstation(
   return selectActiveTwin(s).workstations.find((w) => w.id === wsId);
 }
 
-// Re-export the colour-key type so callers don't have to dig into domain/twin.
-export type { DepartmentColorKey };
+/** All sewing lines inside one department in the active twin. */
+export function selectLinesInDept(s: TwinState, deptId: string): SewingLine[] {
+  return (selectActiveTwin(s).lines ?? []).filter((l) => l.deptId === deptId);
+}
+
+/** All workstations attributed to a specific sewing line. */
+export function selectWorkstationsInLine(
+  s: TwinState,
+  lineId: string,
+): Workstation[] {
+  return selectActiveTwin(s).workstations.filter((w) => w.lineId === lineId);
+}
+
+/** Resolve a sewing line id in the active twin. */
+export function selectLine(s: TwinState, lineId: string): SewingLine | undefined {
+  return (selectActiveTwin(s).lines ?? []).find((l) => l.id === lineId);
+}
+
+// Re-export the colour-key + line types so callers don't have to dig into domain/twin.
+export type { DepartmentColorKey, SewingLine, ProductionSystemKey };

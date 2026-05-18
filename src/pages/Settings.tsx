@@ -1,8 +1,8 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
 import { Card, Button, SectionHeader, ToggleGroup, Slider, HudSelect, Tag, TimeChip } from '../components';
-import { useState } from 'react';
+import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { useProject, downloadProjectJson, pickProjectFile } from '../store';
+import { useProject, downloadProjectJson, pickProjectFile, isFactoryNameTaken } from '../store';
 import { ALL_GARMENT_TEMPLATES } from '../domain';
 import { formatDate } from '../lib/format';
 import type { UnitsPrefs } from '../store/project';
@@ -19,6 +19,28 @@ export function SettingsPage() {
   const [eventRate, setEventRate] = useState(30);
   const [effVariance, setEffVariance] = useState(15);
   const [breakdowns, setBreakdowns] = useState(2);
+
+  // Local pending value for the project-name input. Commits to the store
+  // on blur or Enter when valid; lets the user keep typing through an
+  // invalid intermediate state without snap-back. Re-syncs if the store
+  // name changes from elsewhere (e.g. loading a saved factory).
+  const [pendingName, setPendingName] = useState(project.meta.name);
+  useEffect(() => { setPendingName(project.meta.name); }, [project.meta.name]);
+  const trimmedPending = pendingName.trim();
+  // The active factory's own name should not flag itself as a duplicate,
+  // so we exclude it from the check by short-circuiting when the typed
+  // value equals the currently-committed name (case-insensitive).
+  const nameUnchanged = trimmedPending.toLowerCase() === project.meta.name.trim().toLowerCase();
+  const nameInvalid =
+    trimmedPending.length === 0 ||
+    (!nameUnchanged && isFactoryNameTaken(trimmedPending));
+  const commitName = () => {
+    if (nameInvalid) {
+      setPendingName(project.meta.name); // snap back on blur if invalid
+      return;
+    }
+    if (!nameUnchanged) project.rename(trimmedPending);
+  };
 
   const [gamification, setGamification] = useState([
     { k: 'XP & badges',       desc: 'Earn XP, unlock badges', on: true },
@@ -44,14 +66,32 @@ export function SettingsPage() {
             <div style={{ flex: 1 }}>
               <div style={{ fontSize: 13, fontWeight: 700 }}>Project name</div>
               <input
-                value={project.meta.name}
-                onChange={(e) => project.rename(e.target.value)}
+                value={pendingName}
+                onChange={(e) => setPendingName(e.target.value)}
+                onBlur={commitName}
+                onKeyDown={(e) => { if (e.key === 'Enter') (e.currentTarget as HTMLInputElement).blur(); }}
+                aria-invalid={nameInvalid || undefined}
                 style={{
                   marginTop: 4, width: '100%', padding: '8px 10px',
-                  borderRadius: SW_RADIUS.sm, border: `1px solid ${SW_COLORS.line}`,
+                  borderRadius: SW_RADIUS.sm,
+                  border: `1px solid ${nameInvalid ? SW_COLORS.alarm : SW_COLORS.line}`,
                   fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700,
+                  outline: 'none',
                 }}
               />
+              {nameInvalid && (
+                <div style={{
+                  marginTop: 4,
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 11,
+                  fontWeight: 700,
+                  color: SW_COLORS.alarm,
+                }}>
+                  {trimmedPending.length === 0
+                    ? 'Factory name cannot be empty.'
+                    : `A saved factory named "${trimmedPending}" already exists. Pick a different name.`}
+                </div>
+              )}
             </div>
           </div>
           <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 14, marginTop: 12 }}>

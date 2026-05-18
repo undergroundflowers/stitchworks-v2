@@ -19,6 +19,7 @@ export {
 export {
   useFactoryLibrary,
   archiveAndStartFresh,
+  isFactoryNameTaken,
   FACTORY_LIBRARY_MAX,
   type SavedFactory,
 } from './factoryLibrary';

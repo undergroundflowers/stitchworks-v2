@@ -18,9 +18,15 @@ import { Button, ToggleGroup, HudSelect, TimeDisplay } from '../components';
 import {
   buildSimConfig,
   buildSimConfigFromTwin,
+  buildLinesFromTwin,
   efficiencyFromSkillMatrix,
   useSim,
+  useMultiSim,
+  mergeSimStates,
+  mergeTwinMetas,
   type BuildFromTwinMeta,
+  type SimState,
+  type LineBuild,
   type StationView,
 } from '../simulation';
 import {
@@ -84,6 +90,19 @@ function variantOperatorCount(model: ReferenceModel, key: string): number {
 
 type SimView = 'iso' | 'top' | 'heat' | 'logic' | 'pml';
 
+/** Engine scope — what subset of the twin the run covers. Line is the
+ *  legacy single-engine path; dept and factory both fan the engine out to
+ *  one instance per line under the scope. */
+type SimScope =
+  | { kind: 'factory' }
+  | { kind: 'dept'; id: string }
+  | { kind: 'line'; id: string };
+
+function scopeToParam(s: SimScope): string {
+  if (s.kind === 'factory') return 'factory';
+  return `${s.kind}:${s.id}`;
+}
+
 interface SimHudStatProps {
   label: string;
   value: number | string;
@@ -132,6 +151,50 @@ export function LiveSimPage() {
   const sourceParam = searchParams.get('source');
   const useTwinSource = sourceParam === 'twin' || (!refOverride && sourceParam !== 'reference');
 
+  // Engine scope — three levels: a single sewing line, an entire department
+  // (every wired line whose deptId matches), or the whole factory (every
+  // wired line in the twin). `?scope=<kind[:id]>` is canonical; the legacy
+  // `?line=<id>` URL is honoured as a shortcut for line scope so existing
+  // bookmarks keep resolving.
+  const linesInTwin = activeTwin.lines ?? [];
+  const scope: SimScope = useMemo(() => {
+    const raw = searchParams.get('scope');
+    if (raw?.startsWith('line:')) {
+      const id = raw.slice(5);
+      if (linesInTwin.some((l) => l.id === id)) return { kind: 'line', id };
+    } else if (raw?.startsWith('dept:')) {
+      const id = raw.slice(5);
+      if ((activeTwin.departments ?? []).some((d) => d.id === id)) {
+        return { kind: 'dept', id };
+      }
+    } else if (raw === 'factory') {
+      return { kind: 'factory' };
+    }
+    const legacyLine = searchParams.get('line');
+    if (legacyLine && legacyLine !== 'all' && linesInTwin.some((l) => l.id === legacyLine)) {
+      return { kind: 'line', id: legacyLine };
+    }
+    return { kind: 'factory' };
+  }, [searchParams, linesInTwin, activeTwin.departments]);
+  const selectedLineId = scope.kind === 'line' ? scope.id : null;
+
+  // Per-line builds — drives the "LINES" strip's KPI cards. Computed every
+  // time the twin or garment library changes so the cards stay live with the
+  // Builder. Empty list when the twin has no lines.
+  const lineBuilds: LineBuild[] = useMemo(() => {
+    if (!useTwinSource || linesInTwin.length === 0) return [];
+    return buildLinesFromTwin({
+      twin: activeTwin,
+      garmentsById: garments.byId,
+      defaultGarmentId: garmentId,
+      opEfficiency: efficiencyFromSkillMatrix(
+        project.skillMatrix,
+        (garments.byId[garmentId] ?? garments.all[0]).operations,
+      ),
+      modelTimeUnit: project.time.modelTimeUnit,
+    });
+  }, [useTwinSource, activeTwin, linesInTwin.length, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all]);
+
   // Twin-driven config + meta. Wrapped in a try because the user can land
   // on /sim with an empty twin — we fall back to the reference / garment
   // path in that case instead of blowing up the page.
@@ -147,11 +210,12 @@ export function LiveSimPage() {
           (garments.byId[garmentId] ?? garments.all[0]).operations,
         ),
         modelTimeUnit: project.time.modelTimeUnit,
+        lineId: selectedLineId ?? undefined,
       });
     } catch {
       return null;
     }
-  }, [useTwinSource, activeTwin, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all]);
+  }, [useTwinSource, activeTwin, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all, selectedLineId]);
 
   const garment = twinBuild?.meta.garment
     ?? refOverride?.garment
@@ -214,7 +278,66 @@ export function LiveSimPage() {
     }
   }, [twinBuild]);
 
-  const { state, playing, speed, setPlaying, setSpeed, reset, step } = useSim(config);
+  const baseSim = useSim(config);
+
+  // ── Multi-line scope ────────────────────────────────────────────────────
+  // When no specific line is selected and the twin has more than one wired
+  // line, we cannot honestly use the single-engine `baseSim` — the dominant-
+  // garment filter in buildSimConfigFromTwin drops every line whose garment
+  // template doesn't match the most common one (e.g. Line 2's woven shirt
+  // ops are skipped when Line 1's knit T-shirts win the vote).
+  //
+  // Instead, run one engine per line in parallel, then merge the per-line
+  // states + metas into the same shape the existing views consume.
+  // Lines actually included in this scope's run: factory = all wired,
+  // dept = wired lines whose deptId matches, line = none (single-engine path
+  // handles it).
+  const wiredLineBuilds = useMemo(() => {
+    const ok = lineBuilds.filter((lb) => lb.ok);
+    if (scope.kind === 'dept') return ok.filter((lb) => lb.line.deptId === scope.id);
+    if (scope.kind === 'line') return ok.filter((lb) => lb.line.id === scope.id);
+    return ok; // factory
+  }, [lineBuilds, scope]);
+  const inMultiLineScope =
+    useTwinSource && scope.kind !== 'line' && wiredLineBuilds.length > 1;
+  const multiConfigs = useMemo(
+    () => (inMultiLineScope ? wiredLineBuilds.map((lb) => lb.build.config) : []),
+    [inMultiLineScope, wiredLineBuilds],
+  );
+  const multiSim = useMultiSim(multiConfigs);
+  const multiLineIds = useMemo(
+    () => wiredLineBuilds.map((lb) => lb.line.id),
+    [wiredLineBuilds],
+  );
+  const mergedMultiState = useMemo<SimState>(
+    () => mergeSimStates(multiSim.states, multiLineIds),
+    [multiSim.states, multiLineIds],
+  );
+  const mergedMultiMeta = useMemo<BuildFromTwinMeta | null>(
+    () => mergeTwinMetas(wiredLineBuilds),
+    [wiredLineBuilds],
+  );
+
+  // Single set of {state, transport, meta} the rest of the page reads from.
+  // In single-line scope this is just `baseSim` verbatim. In multi-line scope
+  // every read transparently sees the merged shape.
+  const state: SimState = inMultiLineScope ? mergedMultiState : baseSim.state;
+  const playing = inMultiLineScope ? multiSim.playing : baseSim.playing;
+  const speed = inMultiLineScope ? multiSim.speed : baseSim.speed;
+  const setPlaying = inMultiLineScope ? multiSim.setPlaying : baseSim.setPlaying;
+  const setSpeed = inMultiLineScope ? multiSim.setSpeed : baseSim.setSpeed;
+  const reset = inMultiLineScope ? multiSim.reset : baseSim.reset;
+  const step = inMultiLineScope ? multiSim.step : baseSim.step;
+
+  // Effective twin meta passed to the view components — merged across lines
+  // in multi-line scope so iso/top/heat/logic see every authored Builder
+  // coord, not just the dominant garment's stations.
+  const effectiveTwinMeta: BuildFromTwinMeta | null = inMultiLineScope
+    ? mergedMultiMeta
+    : (twinBuild?.meta ?? null);
+  const effectiveSourceLabel = inMultiLineScope
+    ? 'All lines'
+    : garment.name;
 
   const [refSlug, setRefSlug] = useState<string>(
     refCtx.slug ?? REFERENCE_MODELS[0].slug,
@@ -363,13 +486,29 @@ export function LiveSimPage() {
   // Collapse state for the two floating overlays. Useful in LOGIC view where
   // the operation grid spans the canvas — the user can fold these away to
   // see the cards underneath without losing them entirely.
-  const [hudOpen, setHudOpen] = useState(true);
-  const [inspectorOpen, setInspectorOpen] = useState(true);
+  const [hudOpen, setHudOpen] = useState(false);
+  const [inspectorOpen, setInspectorOpen] = useState(false);
 
-  const throughputPerHr =
-    state.history.length > 0
+  // Throughput in pieces/hour. Single-line scope multiplies the engine's
+  // bundle-throughput by the run's bundle size; multi-line scope sums the
+  // per-line pieces/hour (each line has its own bundle size, so a single
+  // multiplier can't honestly speak for the whole factory).
+  const throughputPerHr = useMemo(() => {
+    if (inMultiLineScope) {
+      let total = 0;
+      for (let i = 0; i < multiSim.states.length; i++) {
+        const h = multiSim.states[i].history;
+        const last = h.length > 0 ? h[h.length - 1] : undefined;
+        if (!last) continue;
+        const lineBundle = wiredLineBuilds[i]?.build.config.bundleSize ?? 1;
+        total += last.throughputPerHr * lineBundle;
+      }
+      return total;
+    }
+    return state.history.length > 0
       ? state.history[state.history.length - 1].throughputPerHr * config.bundleSize
       : 0;
+  }, [inMultiLineScope, multiSim.states, wiredLineBuilds, state.history, config.bundleSize]);
 
   const efficiencyPct = Math.round(state.utilization * 100);
 
@@ -379,7 +518,7 @@ export function LiveSimPage() {
         width: '100%',
         height: '100%',
         display: 'grid',
-        gridTemplateRows: 'auto auto 1fr auto',
+        gridTemplateRows: 'auto auto auto 1fr auto',
         background: SW_COLORS.ink,
         color: SW_COLORS.paper,
       }}
@@ -416,7 +555,7 @@ export function LiveSimPage() {
             Builder-authored twin (the user's factory) or a published
             reference paper, plus the count of workstations being simulated. */}
         <SimSourceChip
-          twinBuild={twinBuild}
+          twinBuild={inMultiLineScope && effectiveTwinMeta ? { meta: effectiveTwinMeta } : twinBuild}
           refOverride={refOverride}
           refLoadedLabel={refLoadedLabel}
           totalWorkstations={activeTwin.workstations.length}
@@ -836,6 +975,28 @@ export function LiveSimPage() {
         )}
       </div>
 
+      {/* SEWING LINES STRIP ────────────────────────────────────────────────
+          One card per sewing line in the active twin. Click a card to scope
+          the engine + visuals to just that line; click ALL LINES to widen the
+          run back to every workstation in the factory. Hidden when the twin
+          has no lines (single-line factories keep the legacy chrome). */}
+      {useTwinSource && lineBuilds.length > 0 ? (
+        <SewingLinesStrip
+          lineBuilds={lineBuilds}
+          scope={scope}
+          activeTwin={activeTwin}
+          onPickScope={(next) => {
+            const params = new URLSearchParams(searchParams);
+            params.delete('line');
+            if (next.kind === 'factory') params.delete('scope');
+            else params.set('scope', scopeToParam(next));
+            setSearchParams(params);
+          }}
+        />
+      ) : (
+        <div />
+      )}
+
       {/* SIMULATION FLOOR */}
       <div
         style={{
@@ -849,10 +1010,10 @@ export function LiveSimPage() {
             <SimIsoView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={garment.name}
+              garmentName={effectiveSourceLabel}
               simTime={state.time}
               system={productionSystemId}
-              twinMeta={twinBuild?.meta}
+              twinMeta={effectiveTwinMeta}
             />
           </PanZoomViewport>
         )}
@@ -861,10 +1022,10 @@ export function LiveSimPage() {
             <SimTopView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={garment.name}
+              garmentName={effectiveSourceLabel}
               simTime={state.time}
               system={productionSystemId}
-              twinMeta={twinBuild?.meta}
+              twinMeta={effectiveTwinMeta}
             />
           </PanZoomViewport>
         )}
@@ -873,10 +1034,10 @@ export function LiveSimPage() {
             <SimHeatView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={garment.name}
+              garmentName={effectiveSourceLabel}
               simTime={state.time}
               system={productionSystemId}
-              twinMeta={twinBuild?.meta}
+              twinMeta={effectiveTwinMeta}
             />
           </PanZoomViewport>
         )}
@@ -885,10 +1046,10 @@ export function LiveSimPage() {
             <SimLogicView
               stations={state.stations}
               bottleneckOpIndex={state.bottleneckOpIndex}
-              garmentName={garment.name}
+              garmentName={effectiveSourceLabel}
               simTime={state.time}
               system={productionSystemId}
-              twinMeta={twinBuild?.meta}
+              twinMeta={effectiveTwinMeta}
             />
           </PanZoomViewport>
         )}
@@ -898,6 +1059,7 @@ export function LiveSimPage() {
               garment={garment}
               operators={effectiveOperators}
               hasReference={!!(refCtx.slug && refCtx.variantKey)}
+              useActiveTwin={inMultiLineScope}
             />
           </PanZoomViewport>
         )}
@@ -947,11 +1109,24 @@ export function LiveSimPage() {
               <span style={{ color: '#ffffff80', fontSize: 11 }}>{hudOpen ? '▾' : '▸'}</span>
             </button>
             {hudOpen && (
-              <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
-                <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
-                <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
-                <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
-                <SimHudStat label="UTIL" value={efficiencyPct} unit="%" color={SW_COLORS.fabric} />
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
+                  <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
+                  <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
+                  <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
+                  <SimHudStat label="UTIL" value={efficiencyPct} unit="%" color={SW_COLORS.fabric} />
+                </div>
+
+                {/* Per-line breakdown — only meaningful in dept/factory scope
+                    where >1 engine is running in parallel. Surfaces which line
+                    is contributing what so the aggregate tiles above don't
+                    hide a quiet line behind a busy one. */}
+                {inMultiLineScope && multiSim.states.length > 0 && (
+                  <PerLineStatsRow
+                    lineBuilds={wiredLineBuilds}
+                    states={multiSim.states}
+                  />
+                )}
               </div>
             )}
           </div>
@@ -1335,6 +1510,114 @@ function SimSourceChip({
   );
 }
 
+/**
+ * Compact per-line breakdown that sits beneath the four aggregate HUD tiles
+ * when the run spans multiple lines (dept / factory scope). Each row gives
+ * the line's OUTPUT (pcs), THROUGHPUT (pcs/hr) and capacity-weighted UTIL,
+ * so the user can see which line is dragging or leading the aggregates.
+ */
+function PerLineStatsRow({
+  lineBuilds,
+  states,
+}: {
+  lineBuilds: LineBuild[];
+  states: SimState[];
+}) {
+  return (
+    <div
+      style={{
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        background: '#0a0d12cc',
+        border: '1px solid #ffffff15',
+        borderRadius: SW_RADIUS.sm,
+        padding: '6px 10px',
+        backdropFilter: 'blur(6px)',
+      }}
+    >
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 9,
+          fontWeight: 800,
+          color: '#ffffff80',
+          letterSpacing: '0.2em',
+        }}
+      >
+        PER LINE
+      </div>
+      {lineBuilds.map((lb, i) => {
+        const s = states[i];
+        if (!s) return null;
+        const accent = DEPT_LINE_COLORS[lb.line.color] ?? SW_COLORS.brand;
+        const bundle = lb.build.config.bundleSize;
+        const last = s.history.length > 0 ? s.history[s.history.length - 1] : undefined;
+        const pcsPerHr = last ? Math.round(last.throughputPerHr * bundle) : 0;
+        const utilPct = Math.round(s.utilization * 100);
+        const wip = s.totalArrivals - s.produced;
+        return (
+          <div
+            key={lb.line.id}
+            style={{
+              display: 'grid',
+              gridTemplateColumns: 'minmax(120px, 1fr) repeat(4, auto)',
+              gap: 10,
+              alignItems: 'baseline',
+              fontFamily: SW_FONTS.mono,
+              fontSize: 10,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6, overflow: 'hidden' }}>
+              <span
+                aria-hidden
+                style={{ width: 6, height: 6, borderRadius: 1, background: accent, flexShrink: 0 }}
+              />
+              <span
+                style={{
+                  color: '#fff',
+                  fontWeight: 700,
+                  whiteSpace: 'nowrap',
+                  overflow: 'hidden',
+                  textOverflow: 'ellipsis',
+                }}
+              >
+                {lb.line.name}
+              </span>
+            </div>
+            <PerLineCell label="OUT" value={s.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
+            <PerLineCell label="TPUT" value={pcsPerHr.toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
+            <PerLineCell label="WIP" value={wip.toLocaleString()} unit="b" color={SW_COLORS.thread} />
+            <PerLineCell label="UTIL" value={`${utilPct}`} unit="%" color={SW_COLORS.fabric} />
+          </div>
+        );
+      })}
+    </div>
+  );
+}
+
+function PerLineCell({
+  label,
+  value,
+  unit,
+  color,
+}: {
+  label: string;
+  value: string;
+  unit: string;
+  color: string;
+}) {
+  return (
+    <div style={{ display: 'flex', alignItems: 'baseline', gap: 4 }}>
+      <span style={{ color: '#ffffff60', fontSize: 9, fontWeight: 800, letterSpacing: '0.1em' }}>
+        {label}
+      </span>
+      <span style={{ color, fontWeight: 800 }}>{value}</span>
+      <span style={{ color: '#ffffff60', fontSize: 9 }}>{unit}</span>
+    </div>
+  );
+}
+
 function SimHudStat({ label, value, unit, color }: SimHudStatProps) {
   return (
     <div
@@ -1699,7 +1982,7 @@ function PzButton({ children, onClick, title }: { children: React.ReactNode; onC
 }
 
 function SimLegend({ view }: { view: SimView }) {
-  const [open, setOpen] = useState(true);
+  const [open, setOpen] = useState(false);
   const entries = legendEntriesForView(view);
   const viewLabel =
     view === 'iso' ? 'ISO 3D'
@@ -3326,17 +3609,25 @@ interface SimPmlViewProps {
    *  the playback-reset effect since we always build from the garment prop
    *  (which already folds in the reference's garmentTemplate when loaded). */
   hasReference: boolean;
+  /** Dept/factory scope — run PML against the actual twin (every block,
+   *  every line, every garment) instead of a single-garment synth. PML is
+   *  twin-native: `runPmlOnTwin` already simulates every block in the twin
+   *  in one pass, so multi-line is just a matter of feeding the real twin
+   *  instead of a synthetic one. Defaults to false (single-line scope keeps
+   *  the synth so swapping garment in the HUD reshapes the grid). */
+  useActiveTwin?: boolean;
 }
 
-// The PML view always synthesises a Source → ops → Sink twin from the
-// garment prop, so picking a different garment in LiveSim's HUD immediately
-// reshapes the block grid. The store's active twin is only used as a safety
-// fallback if the garment carries no operations.
-function SimPmlView({ garment, operators, hasReference }: SimPmlViewProps) {
+// In single-line scope the PML view synthesises a Source → ops → Sink twin
+// from the garment prop so picking a different garment in LiveSim's HUD
+// immediately reshapes the block grid. In dept/factory scope we drive PML
+// from the active twin directly — that's the only honest way to surface
+// every wired line's Petri-net behaviour in one pass.
+function SimPmlView({ garment, operators, hasReference, useActiveTwin = false }: SimPmlViewProps) {
   const activeTwin = useTwin(selectActiveTwin);
   const garmentTwin = useMemo(
-    () => buildGarmentTwin(garment, operators),
-    [garment, operators],
+    () => (useActiveTwin ? null : buildGarmentTwin(garment, operators)),
+    [garment, operators, useActiveTwin],
   );
   const twin = garmentTwin ?? activeTwin;
   /** Last completed run, retained so the timeline can scrub through it. */
@@ -3356,7 +3647,7 @@ function SimPmlView({ garment, operators, hasReference }: SimPmlViewProps) {
     setReport(null);
     setFrame(0);
     setPlaying(false);
-  }, [hasReference, garment.id, operators]);
+  }, [hasReference, garment.id, operators, useActiveTwin]);
 
   const samples = report?.raw.samples ?? [];
   const lastFrame = Math.max(0, samples.length - 1);
@@ -3649,5 +3940,206 @@ function SimPmlCard({ block: b }: { block: PmlCardData }) {
     </div>
   );
 }
+
+// ============================================================================
+// SEWING LINES STRIP — per-line KPI cards above the canvas
+// ============================================================================
+
+/**
+ * Horizontal strip of cards, one per sewing line in the active twin, plus an
+ * "ALL LINES" pill that resets the scope. Selecting a card writes `?line=<id>`
+ * to the URL; LiveSim re-reads that on the next render to rebuild the engine
+ * scope. The card surfaces the line's name, production system, dominant
+ * garment, simulated workstation count and a seed throughput derived from the
+ * line's own bottleneck cycle.
+ */
+function SewingLinesStrip({
+  lineBuilds,
+  scope,
+  activeTwin,
+  onPickScope,
+}: {
+  lineBuilds: LineBuild[];
+  scope: SimScope;
+  activeTwin: ReturnType<typeof selectActiveTwin>;
+  onPickScope: (next: SimScope) => void;
+}) {
+  const factoryActive = scope.kind === 'factory';
+  const selectedLineId = scope.kind === 'line' ? scope.id : null;
+  // Departments that contain at least one wired line. When the twin only has
+  // a single such dept, "DEPT · X" would be a duplicate of "FACTORY" — hide
+  // it to keep the strip clean. The picker grows naturally when the user
+  // adds a second sewing dept (or a finishing line in another dept).
+  const deptsWithLines = useMemo(() => {
+    const seen = new Map<string, { id: string; name: string; count: number }>();
+    for (const lb of lineBuilds) {
+      if (!lb.ok) continue;
+      const dept = (activeTwin.departments ?? []).find((d) => d.id === lb.line.deptId);
+      if (!dept) continue;
+      const entry = seen.get(dept.id);
+      if (entry) entry.count += 1;
+      else seen.set(dept.id, { id: dept.id, name: dept.name, count: 1 });
+    }
+    return [...seen.values()];
+  }, [lineBuilds, activeTwin.departments]);
+  const showDeptPills = deptsWithLines.length > 1;
+  return (
+    <div
+      style={{
+        padding: '8px 24px',
+        borderBottom: '1px solid #ffffff15',
+        background: '#0a0d12',
+        display: 'flex',
+        alignItems: 'stretch',
+        gap: 10,
+        overflowX: 'auto',
+      }}
+    >
+      <span
+        style={{
+          alignSelf: 'center',
+          fontFamily: SW_FONTS.mono,
+          fontSize: 10,
+          fontWeight: 800,
+          letterSpacing: '0.18em',
+          color: SW_COLORS.brand,
+        }}
+      >
+        SEWING LINES
+      </span>
+
+      <button
+        onClick={() => onPickScope({ kind: 'factory' })}
+        title="Simulate every wired sewing line in the twin — one engine per line, transport bar drives them together"
+        style={{
+          display: 'flex',
+          flexDirection: 'column',
+          gap: 2,
+          minWidth: 120,
+          padding: '6px 12px',
+          borderRadius: 6,
+          border: `1px solid ${factoryActive ? SW_COLORS.brand : '#ffffff20'}`,
+          background: factoryActive ? `${SW_COLORS.brand}26` : 'transparent',
+          color: '#fff',
+          cursor: 'pointer',
+          textAlign: 'left',
+        }}
+      >
+        <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em' }}>
+          {showDeptPills ? 'FACTORY' : 'ALL LINES'}
+        </span>
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffffaa' }}>
+          {activeTwin.workstations.length} workstations · whole twin
+        </span>
+      </button>
+
+      {showDeptPills && deptsWithLines.map((d) => {
+        const active = scope.kind === 'dept' && scope.id === d.id;
+        return (
+          <button
+            key={d.id}
+            onClick={() => onPickScope({ kind: 'dept', id: d.id })}
+            title={`Scope the engine to every wired line in ${d.name} (${d.count} line${d.count === 1 ? '' : 's'})`}
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 2,
+              minWidth: 140,
+              padding: '6px 12px',
+              borderRadius: 6,
+              border: `1px solid ${active ? SW_COLORS.fabric : '#ffffff20'}`,
+              background: active ? `${SW_COLORS.fabric}26` : 'transparent',
+              color: '#fff',
+              cursor: 'pointer',
+              textAlign: 'left',
+            }}
+          >
+            <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.08em' }}>
+              DEPT · {d.name.toUpperCase()}
+            </span>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffffaa' }}>
+              {d.count} line{d.count === 1 ? '' : 's'}
+            </span>
+          </button>
+        );
+      })}
+
+      {lineBuilds.map(({ line, build, ok, reason }) => {
+        const active = selectedLineId === line.id;
+        const memberCount = activeTwin.workstations.filter((w) => w.lineId === line.id).length;
+        const ops = build.config.operations.length;
+        // Seed throughput in pieces/hr from the bottleneck cycle — same
+        // formula `buildSimConfigFromTwin` used for arrivalRatePerHour.
+        const seedPiecesPerHr = ok && ops > 0
+          ? Math.round(build.config.arrivalRatePerHour * build.config.bundleSize)
+          : 0;
+        const accent = DEPT_LINE_COLORS[line.color] ?? SW_COLORS.brand;
+        return (
+          <button
+            key={line.id}
+            onClick={() => onPickScope({ kind: 'line', id: line.id })}
+            title={
+              ok
+                ? `Scope the engine to ${line.name} — ${ops} operations on ${memberCount} workstation${memberCount === 1 ? '' : 's'}.`
+                : `Line not runnable yet — ${reason ?? 'no simulatable workstation'}.`
+            }
+            style={{
+              display: 'flex',
+              flexDirection: 'column',
+              gap: 2,
+              minWidth: 200,
+              padding: '6px 12px',
+              borderRadius: 6,
+              border: `1px solid ${active ? accent : '#ffffff20'}`,
+              borderLeft: `4px solid ${accent}`,
+              background: active ? `${accent}26` : 'transparent',
+              color: '#fff',
+              cursor: 'pointer',
+              textAlign: 'left',
+              opacity: ok ? 1 : 0.6,
+            }}
+          >
+            <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+              <span style={{ fontFamily: SW_FONTS.display, fontSize: 11, fontWeight: 800, letterSpacing: '0.06em' }}>
+                {line.name}
+              </span>
+              {!ok && (
+                <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.warn, fontWeight: 800 }}>
+                  · EMPTY
+                </span>
+              )}
+            </div>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#ffffffaa' }}>
+              {line.productionSystem.toUpperCase()}
+              {line.garmentId ? ` · ${line.garmentId}` : ''}
+              {' · '}
+              {memberCount} workstation{memberCount === 1 ? '' : 's'}
+            </span>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: ok ? SW_COLORS.ok : '#ffffff60' }}>
+              {ok
+                ? `${ops} operations · seed ${seedPiecesPerHr.toLocaleString()} pcs/hr`
+                : 'drop machines + assign opIds to wire this line'}
+            </span>
+          </button>
+        );
+      })}
+    </div>
+  );
+}
+
+/** Department-colour palette mirrored from Builder so the line strip's accent
+ *  bar matches the canvas band. Hard-coded here (rather than imported from
+ *  Builder.tsx) to keep this file's import surface narrow. */
+const DEPT_LINE_COLORS: Record<string, string> = {
+  fabric: '#d4a574',
+  thread: '#d97757',
+  brand:  '#bf5d2e',
+  red:    '#c04437',
+  blue:   '#4a73b8',
+  yellow: '#d8b13a',
+  green:  '#6d9658',
+  cream:  '#c2b59b',
+};
+
 
 
