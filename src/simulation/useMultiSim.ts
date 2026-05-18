@@ -223,6 +223,7 @@ export function mergeTwinMetas(lineBuilds: LineBuild[]): BuildFromTwinMeta | nul
   if (ok.length === 0) return null;
 
   const stations: BuildFromTwinMeta['stations'] = [];
+  const workstations: BuildFromTwinMeta['workstations'] = [];
   const simulatedWsIds: string[] = [];
   const skipped: BuildFromTwinMeta['skipped'] = [];
   const infrastructure: BuildFromTwinMeta['infrastructure'] = [];
@@ -231,6 +232,9 @@ export function mergeTwinMetas(lineBuilds: LineBuild[]): BuildFromTwinMeta | nul
     const lineId = lb.line.id;
     for (const ts of lb.build.meta.stations) {
       stations.push({ ...ts, opId: namespacedOpId(lineId, ts.opId) });
+    }
+    for (const wc of lb.build.meta.workstations) {
+      workstations.push({ ...wc, opId: namespacedOpId(lineId, wc.opId), lineId });
     }
     for (const id of lb.build.meta.simulatedWsIds) simulatedWsIds.push(id);
     for (const sk of lb.build.meta.skipped) skipped.push(sk);
@@ -247,6 +251,7 @@ export function mergeTwinMetas(lineBuilds: LineBuild[]): BuildFromTwinMeta | nul
     seedBundleSize: first.seedBundleSize,
     topologySource: first.topologySource,
     stations,
+    workstations,
     // Header label uses .garment.name; the merged view falls back to the
     // first line's garment. The iso view's garment-name caption gets
     // overridden in LiveSimPage to read "All lines" in multi-mode.

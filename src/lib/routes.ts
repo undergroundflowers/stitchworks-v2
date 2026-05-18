@@ -39,7 +39,10 @@ export const ROUTES: RouteDef[] = [
   { path: '/kpi',       id: 'kpi',       label: 'Reports',                                    icon: '⌬', kind: 'special' },
   { path: '/scenarios', id: 'scenarios', label: 'Scenarios',                                  icon: '✦', kind: 'main' },
   { path: '/balance',   id: 'balance',   label: 'Reports',                                    icon: '⌬', kind: 'main' },
-  { path: '/queues',    id: 'queues',    label: 'Queue Analysis',   shortLabel: 'Queues',     icon: 'Σ', kind: 'main' },
+  // Queue Analysis is no longer a top-bar tab — it lives inside the Builder's
+  // Inspector as the per-workstation "Queue analysis" section. The /queues
+  // route still resolves for deep-links and internal navigations.
+  { path: '/queues',    id: 'queues',    label: 'Queue Analysis',   shortLabel: 'Queues',     icon: 'Σ', kind: 'special' },
   { path: '/queues/analytics', id: 'queues-analytics', label: 'Queue Analytics', shortLabel: 'Analytics', icon: '∿', kind: 'special' },
   { path: '/reference', id: 'reference', label: 'Reference Models', shortLabel: 'References', icon: '📖', kind: 'main' },
   // Assets is no longer a top-level nav item — it lives inside Resources as
