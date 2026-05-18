@@ -241,6 +241,29 @@ export interface Scenario {
   kpis: ScenarioKpis;
 }
 
+/**
+ * A production order as committed from the Orders wizard. Persisted so the
+ * Simulation page can offer it as a swappable source alongside the canonical
+ * twin and any loaded reference paper. We keep the input fields (qty, deadline,
+ * client) on the draft so the chip can show meaningful labels and the user can
+ * re-open the order later for tweaks.
+ */
+export interface OrderDraft {
+  id: string;
+  po: string;
+  client: string;
+  style: string;
+  qty: number;
+  deadlineDays: number;
+  garmentTemplateId: string;
+  operators: number;
+  productionSystem: ProductionSystem;
+  createdAt: string;
+}
+
+/** Max recent orders kept in `orders[]`. Older entries are dropped FIFO. */
+export const MAX_RECENT_ORDERS = 20 as const;
+
 export interface ProjectState {
   schemaVersion: typeof PROJECT_SCHEMA_VERSION;
   meta: ProjectMeta;
@@ -250,6 +273,13 @@ export interface ProjectState {
 
   /** Default operator count for new sims and balancing views. */
   defaultOperators: number;
+
+  /**
+   * Orders committed from the Orders wizard, most recent first. Surfaced
+   * in LiveSim's SOURCE dropdown so the user can switch the simulation
+   * between the canonical twin and any of their recent orders.
+   */
+  orders: OrderDraft[];
 
   /** The production system the user picked in the Orders wizard. Drives
    *  bundleSize in the sim and is surfaced in the LiveSim HUD so the user
@@ -314,6 +344,11 @@ export interface ProjectState {
   setSelectedGarment: (id: string) => void;
   setDefaultOperators: (n: number) => void;
   setSelectedProductionSystem: (id: ProductionSystem) => void;
+  /** Push a new order to the front of `orders[]`, capping at MAX_RECENT_ORDERS.
+   *  Returns the persisted draft (with id + createdAt assigned). */
+  addOrder: (input: Omit<OrderDraft, 'id' | 'createdAt'>) => OrderDraft;
+  /** Drop a saved order by id. No-op if the id isn't found. */
+  removeOrder: (id: string) => void;
   /** Patch one unit/format preference. The Settings page calls this from
    *  each toggle's onChange. */
   setUnit: <K extends keyof UnitsPrefs>(key: K, value: UnitsPrefs[K]) => void;
@@ -491,6 +526,8 @@ const defaults: Omit<
   | 'setSelectedGarment'
   | 'setDefaultOperators'
   | 'setSelectedProductionSystem'
+  | 'addOrder'
+  | 'removeOrder'
   | 'setOperatorName'
   | 'setYamazumiOverride'
   | 'clearYamazumiOverride'
@@ -543,6 +580,7 @@ const defaults: Omit<
     selectedGarmentId: 'tshirt',
     defaultOperators: 25,
     selectedProductionSystem: 'PBS',
+    orders: [],
     operatorNames: {},
     yamazumiOverrides: {},
     skillMatrix: {},
@@ -597,6 +635,21 @@ export const useProject = create<ProjectState>()(
 
       setSelectedProductionSystem: (id) =>
         set((s) => touch({ ...s, selectedProductionSystem: id })),
+
+      addOrder: (input) => {
+        const id = `ord-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+        const draft: OrderDraft = { id, createdAt: new Date().toISOString(), ...input };
+        set((s) =>
+          touch({
+            ...s,
+            orders: [draft, ...s.orders].slice(0, MAX_RECENT_ORDERS),
+          }),
+        );
+        return draft;
+      },
+
+      removeOrder: (id) =>
+        set((s) => touch({ ...s, orders: s.orders.filter((o) => o.id !== id) })),
 
       setUnit: (key, value) =>
         set((s) => touch({ ...s, units: { ...s.units, [key]: value } })),
@@ -992,6 +1045,8 @@ export const useProject = create<ProjectState>()(
           setSelectedGarment: get().setSelectedGarment,
           setDefaultOperators: get().setDefaultOperators,
           setSelectedProductionSystem: get().setSelectedProductionSystem,
+          addOrder: get().addOrder,
+          removeOrder: get().removeOrder,
           setUnit: get().setUnit,
           setTime: get().setTime,
           setOperatorName: get().setOperatorName,
@@ -1055,6 +1110,8 @@ export const useProject = create<ProjectState>()(
           meta: { ...defaults.meta, ...s.meta, modifiedAt: new Date().toISOString() },
           selectedGarmentId: s.selectedGarmentId ?? defaults.selectedGarmentId,
           defaultOperators: s.defaultOperators ?? defaults.defaultOperators,
+          selectedProductionSystem: s.selectedProductionSystem ?? defaults.selectedProductionSystem,
+          orders: s.orders ?? [],
           operatorNames: s.operatorNames ?? {},
           yamazumiOverrides: s.yamazumiOverrides ?? {},
           skillMatrix: s.skillMatrix ?? {},
@@ -1085,6 +1142,8 @@ export const useProject = create<ProjectState>()(
           meta: s.meta,
           selectedGarmentId: s.selectedGarmentId,
           defaultOperators: s.defaultOperators,
+          selectedProductionSystem: s.selectedProductionSystem,
+          orders: s.orders,
           operatorNames: s.operatorNames,
           yamazumiOverrides: s.yamazumiOverrides,
           skillMatrix: s.skillMatrix,
@@ -1112,6 +1171,8 @@ export const useProject = create<ProjectState>()(
         meta: state.meta,
         selectedGarmentId: state.selectedGarmentId,
         defaultOperators: state.defaultOperators,
+        selectedProductionSystem: state.selectedProductionSystem,
+        orders: state.orders,
         operatorNames: state.operatorNames,
         yamazumiOverrides: state.yamazumiOverrides,
         skillMatrix: state.skillMatrix,
@@ -1156,6 +1217,7 @@ export const useProject = create<ProjectState>()(
           workerEdits: p.workerEdits ?? {},
           customWorkers: p.customWorkers ?? {},
           customProducts: p.customProducts ?? {},
+          orders: p.orders ?? [],
           time: { ...defaultTimeSettings(p.meta?.createdAt ?? current.meta.createdAt), ...(p.time ?? {}) },
         };
       },

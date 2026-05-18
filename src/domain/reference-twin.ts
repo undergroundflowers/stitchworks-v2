@@ -48,7 +48,7 @@ import {
  * to the single-needle lock so the line still runs — the user can pick a
  * better fixture from the Inspector afterwards.
  */
-function catalogForMachine(code: string): string {
+export function catalogForMachine(code: string): string {
   switch (code.toUpperCase()) {
     case 'DNL':
     case 'DNLS': return 'a_dnls';
