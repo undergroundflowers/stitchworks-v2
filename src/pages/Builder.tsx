@@ -327,7 +327,6 @@ export function BuilderPage() {
   const setBlock = useTwin((s) => s.setBlock);
   const addConnector = useTwin((s) => s.addConnector);
   const removeConnector = useTwin((s) => s.removeConnector);
-  const renameActive = useTwin((s) => s.renameActive);
   const loadCanonical = useTwin((s) => s.loadCanonical);
   const createScenarioFromCanonical = useTwin(
     (s) => s.createScenarioFromCanonical,
@@ -339,7 +338,6 @@ export function BuilderPage() {
   // Project meta name (the authoritative label the TopBar shows) — the
   // Builder's factory picker mirrors this so both surfaces agree.
   const projectName = useProject((s) => s.meta.name);
-  const renameProject = useProject((s) => s.rename);
   // Saved factories from the library so the picker can switch to any
   // archived factory (not just scenarios of the active canonical).
   const savedFactories = useFactoryLibrary((s) => s.savedFactories);
@@ -349,8 +347,6 @@ export function BuilderPage() {
   // toolbar disables the buttons when the relevant stack is empty.
   const undoTwin = useTwin((s) => s.undo);
   const redoTwin = useTwin((s) => s.redo);
-  const canUndo = useTwin((s) => s.past.length > 0);
-  const canRedo = useTwin((s) => s.future.length > 0);
 
   // ── Local UI state ─────────────────────────────────────────────────────────
   const [drop, setDrop] = useState<DropTool>({ kind: 'none' });
