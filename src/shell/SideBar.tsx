@@ -53,15 +53,6 @@ export function SideBar() {
     return () => window.removeEventListener('mousedown', onDown);
   }, [overflowOpen]);
 
-  // Initials shown in the factory pill when there's no room for the full name.
-  const factoryInitials = (factoryName || 'Stitchworks')
-    .split(/\s+/)
-    .map((w) => w[0])
-    .filter(Boolean)
-    .slice(0, 2)
-    .join('')
-    .toUpperCase();
-
   return (
     <div
       style={{
@@ -128,13 +119,17 @@ export function SideBar() {
         <div
           style={{
             fontFamily: SW_FONTS.display,
-            fontSize: 11,
+            fontSize: 9.5,
             fontWeight: 900,
+            lineHeight: 1.1,
             letterSpacing: '0.02em',
             color: SW_COLORS.paper,
+            textAlign: 'center',
+            wordBreak: 'break-word',
+            padding: '0 4px',
           }}
         >
-          {factoryInitials || '—'}
+          {factoryName || 'Stitchworks'}
         </div>
         <div
           style={{
