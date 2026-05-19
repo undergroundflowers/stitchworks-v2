@@ -61,7 +61,7 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
     if (s.config.twin) {
       createScenarioFromTwin({
         name: `Loaded · ${s.name}`,
-        notes: `Restored from saved scenario "${s.name}" (${formatDate(s.createdAt)})`,
+        notes: `Restored from saved scenario "${s.name}" (${formatDate(s.createdAt, project.units.dateFormat)})`,
         twin: s.config.twin,
         activate: true,
       });
