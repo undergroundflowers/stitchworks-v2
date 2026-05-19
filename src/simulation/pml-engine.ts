@@ -31,12 +31,15 @@
  * harness, future export).
  */
 
-import type { Twin, Workstation } from '../domain/twin';
+import type { Twin, Workstation, Order } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
   type PmlBlockKind,
 } from '../domain/pml';
+import { GARMENT_TEMPLATES } from '../domain';
+import { PRODUCTION_SYSTEMS } from '../domain/routings';
+import { changeoverDurationMin } from '../domain/changeover';
 import { MinHeap, mulberry32 } from './priority-queue';
 import { sample as sampleDist, type ServiceDist } from './distributions';
 
@@ -207,6 +210,40 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
   return issues;
 }
 
+/**
+ * Changeover injection — schedules a CHANGEOVER_BEGIN / CHANGEOVER_END
+ * pair on a specific line. In P2 these are passed manually so the IE can
+ * model an interrupted shift; P4 will generate them automatically from
+ * an OrderSequence.
+ */
+export interface ChangeoverSpec {
+  /** When the changeover begins, in sim MINUTES from t=0. */
+  atMin: number;
+  /** SewingLine.id the changeover applies to — all workstations carrying
+   *  this lineId are blocked for the duration. */
+  lineId: string;
+  /** Duration in minutes the line is frozen. The caller is responsible
+   *  for computing this from `changeoverDurationMin({ base, from, to })`
+   *  (or any other rule); the engine treats it as a black-box freeze. */
+  durationMin: number;
+}
+
+/**
+ * Per-machine breakdown sampling. When set on a machine code, every
+ * workstation using that machine samples MTBF / MTTR exponentials and
+ * goes offline for the sampled MTTR period whenever a breakdown lands.
+ *
+ * Both values are in MINUTES. Omitting either disables breakdowns for
+ * that machine. Use this to model "the SNL bench at op 3 fails on
+ * average every 4 hours and takes 12 min to restart."
+ */
+export interface MachineBreakdownSpec {
+  /** Mean time between failures (minutes). */
+  mtbfMin: number;
+  /** Mean time to repair (minutes). */
+  mttrMin: number;
+}
+
 export interface PmlSimOpts {
   twin: Twin;
   /** Simulated duration in MINUTES. Tier-1 default: 480 (= one 8h shift). */
@@ -217,6 +254,19 @@ export interface PmlSimOpts {
    *  per-block running totals into `result.samples`. Default 1 min.
    *  Set to 0 to disable sampling (saves memory / time). */
   samplePeriodMin?: number;
+  /** Manual changeover injections. Each entry freezes the named line for
+   *  the stated duration. Omit / empty array ⇒ no changeovers (today's
+   *  behaviour). */
+  changeovers?: ChangeoverSpec[];
+  /** Optional per-machine MTBF / MTTR — keyed by MachineCode (e.g. 'SNL'
+   *  → { mtbfMin: 240, mttrMin: 12 }). Sampling is exponential. Empty
+   *  / omitted ⇒ no breakdowns. */
+  machineBreakdowns?: Record<string, MachineBreakdownSpec>;
+  /** Per-op skill-efficiency multipliers keyed by Operation.id. Drives
+   *  the cycle-time adjustment: effective cycle = nominal / efficiency.
+   *  Computed by `efficiencyFromSkillMatrix(skillMatrix, ops)` upstream.
+   *  Missing / 1.0 ⇒ engine runs at nominal speed (today's behaviour). */
+  opEfficiency?: Record<string, number>;
 }
 
 /**
@@ -289,8 +339,26 @@ export interface BlockObserved {
 export interface PmlSimResult {
   /** Run duration in minutes (mirrors opts). */
   durationMin: number;
-  /** Total agents that hit any Sink. */
+  /** Total agents (pieces) that hit any Sink — good output. Includes pieces
+   *  that needed rework as long as they ultimately passed. */
   totalProduced: number;
+  /** Of `totalProduced`, the count that exited with reworkCount === 0 —
+   *  i.e. first-pass-right. Drives `firstPassYield`. */
+  piecesProducedFTR: number;
+  /** Pieces scrapped after exceeding maxReworkAttempts. Counted in the
+   *  yield denominator but NOT in `totalProduced`. */
+  piecesScrapped: number;
+  /** Quality fraction for OEE: piecesProducedFTR / (totalProduced + piecesScrapped).
+   *  1.0 when no rework / scrap occurred. */
+  firstPassYield: number;
+  /** Cumulative minutes lost to changeover events during the run. P2 default 0. */
+  changeoverMin: number;
+  /** Cumulative minutes lost to machine downtime (MTBF/MTTR) during the run. P2 default 0. */
+  downtimeMin: number;
+  /** Per-order completion time keyed by Order.id (minutes from the first
+   *  piece emitted by the Source to the last piece reaching the Sink).
+   *  Populated when a Source ran an OrderSequence. Empty otherwise. */
+  perOrderCompletionTime: Record<string, number>;
   /** Mean lead time across sunk agents, in minutes. */
   meanLeadTimeMin: number;
   /** Aggregate throughput across all sinks (agents/hr). */
@@ -324,6 +392,14 @@ interface Agent {
    *  matches the actual scheduled duration. Stays undefined for agents
    *  that never entered a time-based block. */
   cycleMin?: number;
+  /** Number of times this agent has been routed back upstream by a
+   *  reworkRate-driven Service block. 0 = first-pass. Incremented on each
+   *  rework decision; scrapped when it exceeds the op's maxReworkAttempts. */
+  reworkCount?: number;
+  /** Order id this piece belongs to — populated when the Source is
+   *  running an OrderSequence. Lets the Sink credit completion times
+   *  per order. Undefined for legacy single-garment Sources. */
+  orderId?: string;
 }
 
 /** All the precomputed routing for a block — output port → list of next
@@ -351,6 +427,10 @@ interface DeptPool {
 type Event =
   | { time: number; kind: 'sourceTick'; wsId: string }
   | { time: number; kind: 'serviceEnd'; wsId: string; agentId: number }
+  | { time: number; kind: 'changeoverBegin'; lineId: string; durationMin: number }
+  | { time: number; kind: 'changeoverEnd'; lineId: string }
+  | { time: number; kind: 'breakdownBegin'; wsId: string }
+  | { time: number; kind: 'breakdownEnd'; wsId: string; mtbfMin: number; mttrMin: number }
   | { time: number; kind: 'sample' };
 
 /** Per-block runtime state. */
@@ -402,6 +482,18 @@ interface BlockState {
    *  Caps `inService` even when the dept's ResourcePool has spare units;
    *  matches the real-world "one machine = one server" semantics. Default 1. */
   servers: number;
+  /** Source-only: pieces carried by each emitted agent. Cached at build so
+   *  the sourceTick handler doesn't re-read getBlockParams per tick. Falls
+   *  back to the downstream Service's `bundleSize` when the Source itself
+   *  doesn't pin a value — keeps pilot-factory `buf_in` workstations
+   *  emitting full bundles instead of single pieces. */
+  piecesPerAgent: number;
+  /** Source-only: position in the bound line's `orderSequence`. -1 ⇒ no
+   *  sequence (legacy infinite Source). */
+  orderSeqIndex: number;
+  /** Source-only: pieces emitted for the *current* order. Resets to 0
+   *  whenever orderSeqIndex advances. */
+  orderEmittedSoFar: number;
 }
 
 // ============================================================================
@@ -414,10 +506,63 @@ interface BlockState {
 // translate the resolved record into the engine's preferred units
 // (minutes for time, capacity counts).
 
-/** Service cycle time in MINUTES per agent (deterministic fallback). */
-function cycleMinFor(ws: Workstation): number {
+/** Service cycle time in MINUTES per agent (deterministic fallback).
+ *
+ *  Priority order:
+ *    1. Authored override on `ws.block.params.cycleS`.
+ *    2. Op-bulletin SMV × bundleSize — when the workstation is bound to a
+ *       garment operation (typical for pilot-factory lines). Each engine
+ *       "agent" carries one bundle, so the cycle is `smv × bundleSize`
+ *       minutes per agent. Without this lookup, every sewing workstation
+ *       falls back to the catalog's generic `cycle_s` (35s for any sewing
+ *       machine), which makes Line 1 and Line 2 run at identical tempo
+ *       regardless of which garment they're stitching.
+ *    3. Catalog `cycle_s` / `capacity_per_hr` / 30s hard default.
+ */
+function cycleMinFor(
+  ws: Workstation,
+  opEfficiency?: Record<string, number>,
+): number {
+  // P2: skill efficiency applies at every cycle source, not just the
+  // op-derived path. Pilot factories author block.params.cycleS directly
+  // from op.smv × bundleSize, so if skill effi is only applied to the
+  // op-derived branch the multiplier silently no-ops on pilot lines.
+  const opId = ws.operation?.opId;
+  const raw = opId ? opEfficiency?.[opId] : undefined;
+  const eff = clampSkillEfficiency(raw);
+  const overrideCycleS = ws.block?.params?.cycleS;
+  if (overrideCycleS != null && overrideCycleS > 0) {
+    return (overrideCycleS / 60) / eff;
+  }
+  const opCycleMin = opCycleMinFor(ws);
+  if (opCycleMin != null) {
+    return opCycleMin / eff;
+  }
   const r = getBlockParams(ws);
-  return Math.max(0, r.cycleS) / 60;
+  return Math.max(0, r.cycleS) / 60 / eff;
+}
+
+/** Skill efficiency multiplier — clamp to [0.5, 1.5] so a stale or wild
+ *  matrix entry can't drive cycles to absurd values. 1.0 = nominal speed. */
+function clampSkillEfficiency(raw: number | undefined): number {
+  if (raw == null || !Number.isFinite(raw)) return 1;
+  return Math.min(1.5, Math.max(0.5, raw));
+}
+
+/** If the workstation is bound to a garment operation, return the cycle
+ *  time per agent (in MINUTES) derived from the bulletin's SMV times the
+ *  bundle size. Returns null when the binding is incomplete or the op
+ *  lookup misses — caller falls back to the catalog default. */
+function opCycleMinFor(ws: Workstation): number | null {
+  const opId = ws.operation?.opId;
+  const garmentId = ws.operation?.garmentId;
+  if (!opId || !garmentId) return null;
+  const garment = GARMENT_TEMPLATES[garmentId];
+  if (!garment) return null;
+  const op = garment.operations.find((o) => o.id === opId);
+  if (!op || !(op.smv > 0)) return null;
+  const bundleSize = Math.max(1, Math.round(ws.operation?.bundleSize ?? 1));
+  return op.smv * bundleSize;
 }
 
 /** Service / Delay cycle distribution if set; undefined ⇒ engine falls
@@ -492,14 +637,57 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       inflowPieces: 0,
       busyMin: 0,
       inService: 0,
-      cycleMin: cycleMinFor(ws),
+      cycleMin: cycleMinFor(ws, opts.opEfficiency),
       cycleDist: cycleDistFor(ws),
       arrivalIntervalMin: arrivalIntervalFor(ws),
       arrivalDist: arrivalDistFor(ws),
       passProb: passProbFor(ws),
       batchSize: batchSizeFor(ws),
       servers: Math.max(1, Math.round(getBlockParams(ws).servers)),
+      piecesPerAgent: Math.max(1, Math.round(getBlockParams(ws).piecesPerAgent)),
+      // P4 — order sequence tracking is enabled at engine-init time below,
+      // once we know which lines have a non-empty orderSequence.
+      orderSeqIndex: -1,
+      orderEmittedSoFar: 0,
     });
+  }
+
+  // ── Smart Source defaults from downstream bundleSize ─────────────────────
+  // When a Source (typically a `buf_in` workstation) hasn't pinned an
+  // explicit `piecesPerAgent`, look at the first downstream Service block
+  // it feeds. If that block carries a `bundleSize` from the garment bulletin,
+  // emit full bundles instead of single pieces. Without this, every line
+  // bottoms out at the 60 agents/hr × 1 piece default — making the Source
+  // the true bottleneck regardless of which garment is on the line.
+  for (const ws of twin.workstations) {
+    const b = blocks.get(ws.id);
+    if (!b || b.kind !== 'Source') continue;
+    // Skip when the user has explicitly pinned piecesPerAgent on the block.
+    if (ws.block?.params?.piecesPerAgent != null) continue;
+    // Find the first downstream Service with a bundleSize.
+    let bundleSize: number | null = null;
+    for (const c of twin.connectors) {
+      if (c.fromWsId !== ws.id) continue;
+      const down = blocks.get(c.toWsId);
+      if (!down) continue;
+      const bs = down.ws.operation?.bundleSize;
+      if (bs && bs > 0) {
+        bundleSize = bs;
+        break;
+      }
+      // One more hop in case the immediate downstream is a Queue/Buffer.
+      for (const c2 of twin.connectors) {
+        if (c2.fromWsId !== down.ws.id) continue;
+        const down2 = blocks.get(c2.toWsId);
+        const bs2 = down2?.ws.operation?.bundleSize;
+        if (bs2 && bs2 > 0) {
+          bundleSize = bs2;
+          break;
+        }
+      }
+      if (bundleSize) break;
+    }
+    if (bundleSize) b.piecesPerAgent = bundleSize;
   }
 
   // ── Build dept resource pools (implicit binding for v1) ───────────────────
@@ -550,8 +738,57 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
 
   // ── Sink stats ─────────────────────────────────────────────────────────────
   let totalProduced = 0;
+  let piecesProducedFTR = 0;
+  let piecesScrapped = 0;
   let leadTimeAccum = 0;
   let nextAgentId = 1;
+  // P2 — line-blocking accumulators. Updated when CHANGEOVER_BEGIN /
+  // CHANGEOVER_END / BREAKDOWN_BEGIN / BREAKDOWN_END events fire.
+  let changeoverMinAccum = 0;
+  let downtimeMinAccum = 0;
+  /** Lines currently frozen for changeover — tryStartService refuses to
+   *  start new service for workstations whose lineId is in this set. */
+  const frozenLines = new Set<string>();
+  /** Workstations currently down for repair — tryStartService refuses
+   *  service while the ws id is in this set. */
+  const frozenWorkstations = new Set<string>();
+
+  // ── P4 order-sequence state ──────────────────────────────────────────────
+  /** Per-order completion tracking. Populated as agents flow through:
+   *  firstEmittedAt = first sourceTick that emitted a piece for this order;
+   *  lastSunkAt     = last sim time a piece of this order reached a Sink. */
+  const orderStats = new Map<
+    string,
+    { firstEmittedAt: number; lastSunkAt: number; sunkPieces: number }
+  >();
+  /** Order id → Order record, indexed once for hot-path lookup. */
+  const orderById = new Map<string, Order>();
+  for (const o of twin.orders ?? []) orderById.set(o.id, o);
+  /** Line id → orderSequence (ids), copied so we don't read the twin in
+   *  the hot path. */
+  const lineOrderSeq = new Map<string, string[]>();
+  for (const line of twin.lines ?? []) {
+    if (line.orderSequence && line.orderSequence.length > 0) {
+      lineOrderSeq.set(line.id, [...line.orderSequence]);
+    }
+  }
+  /** Line id → production-system base changeoverMin, used for the dynamic
+   *  CHANGEOVER_BEGIN events the Source raises between orders. */
+  const lineChangeoverBase = new Map<string, number>();
+  for (const line of twin.lines ?? []) {
+    const sys = PRODUCTION_SYSTEMS[line.productionSystem];
+    lineChangeoverBase.set(line.id, sys?.changeoverMin ?? 30);
+  }
+  // Tag each Source whose line has a non-empty orderSequence so its
+  // sourceTick handler enters the order-aware path instead of the
+  // legacy infinite-stream path.
+  for (const src of sources) {
+    const lineId = src.ws.lineId;
+    if (lineId && (lineOrderSeq.get(lineId)?.length ?? 0) > 0) {
+      src.orderSeqIndex = 0;
+      src.orderEmittedSoFar = 0;
+    }
+  }
 
   // ── Event queue ────────────────────────────────────────────────────────────
   const pq = new MinHeap<Event>((a, b) => a.time - b.time);
@@ -562,6 +799,53 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // default behaviour for a stochastic Source.
   for (const src of sources) {
     pq.push({ time: drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
+  }
+
+  // P2: enqueue caller-supplied changeover injections. Each one freezes the
+  // named line for `durationMin` starting at `atMin`. Out-of-range / null
+  // entries are dropped silently.
+  for (const co of opts.changeovers ?? []) {
+    if (!(co.durationMin > 0) || !(co.atMin >= 0) || co.atMin > durationMin) continue;
+    pq.push({
+      time: co.atMin,
+      kind: 'changeoverBegin',
+      lineId: co.lineId,
+      durationMin: co.durationMin,
+    });
+  }
+
+  // P2: schedule first breakdown for every workstation that maps to a
+  // machine code with an MTBF/MTTR entry. Exponential sampling matches the
+  // typical OEE assumption (memoryless failures); the BREAKDOWN_END
+  // handler reschedules the next BREAKDOWN_BEGIN, so this only seeds one
+  // event per workstation.
+  const breakdownByMachine = opts.machineBreakdowns ?? {};
+  /** Resolve the apparel `MachineCode` for a workstation by looking up the
+   *  bound op in its garment bulletin. Returns null when the workstation
+   *  isn't bound to an op (e.g. Source / Sink / buffer). */
+  const machineCodeFor = (ws: Workstation): string | null => {
+    const opId = ws.operation?.opId;
+    const garmentId = ws.operation?.garmentId;
+    if (!opId || !garmentId) return null;
+    const garment = GARMENT_TEMPLATES[garmentId];
+    if (!garment) return null;
+    const op = garment.operations.find((o) => o.id === opId);
+    return op?.machineCode ?? null;
+  };
+  if (Object.keys(breakdownByMachine).length > 0) {
+    for (const ws of twin.workstations) {
+      const code = machineCodeFor(ws);
+      if (!code) continue;
+      const spec = breakdownByMachine[code];
+      if (!spec || !(spec.mtbfMin > 0) || !(spec.mttrMin > 0)) continue;
+      // Exponential draw with mean = mtbf, using the engine's RNG so seeds
+      // remain reproducible.
+      const u = Math.max(1e-9, rng());
+      const firstFailAt = -Math.log(u) * spec.mtbfMin;
+      if (firstFailAt < durationMin) {
+        pq.push({ time: firstFailAt, kind: 'breakdownBegin', wsId: ws.id });
+      }
+    }
   }
   // Schedule periodic snapshot events so we can hand LiveSim a timeseries
   // it can play back. Sampling at t=0 is recorded synchronously below.
@@ -658,6 +942,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function tryStartService(b: BlockState, now: number): boolean {
     if (b.kind !== 'Service') return false;
     if (b.queue.length === 0) return false;
+    // P2: don't start service while the workstation is down or its line
+    // is in changeover. Pieces already in service complete normally;
+    // only new starts are blocked, which matches a real floor (operators
+    // finish the current bundle before the changeover begins).
+    if (frozenWorkstations.has(b.ws.id)) return false;
+    if (b.ws.lineId && frozenLines.has(b.ws.lineId)) return false;
     // Per-station server cap: cannot exceed the configured `servers` count
     // even when the dept's pool has spare units. Matches "one machine =
     // one server" semantics — without this, the pool acts as a shared
@@ -704,7 +994,16 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     switch (b.kind) {
       case 'Sink':
         totalProduced += agent.pieces;
+        if ((agent.reworkCount ?? 0) === 0) piecesProducedFTR += agent.pieces;
         leadTimeAccum += (now - agent.bornAt) * agent.pieces;
+        // P4 order tracking: credit the order this piece belongs to.
+        if (agent.orderId) {
+          const stat = orderStats.get(agent.orderId);
+          if (stat) {
+            stat.sunkPieces += agent.pieces;
+            stat.lastSunkAt = now;
+          }
+        }
         return;
       case 'Source':
       case 'ResourcePool':
@@ -899,6 +1198,96 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     emitOnPort(b, portId, agent, now);
   }
 
+  /**
+   * Look up rework parameters for the operation bound to a workstation.
+   * Returns null when the workstation has no op binding, no garment, or
+   * the op carries no reworkRate. Centralises the resolution so the
+   * serviceEnd hot-path stays tight.
+   */
+  function reworkParamsFor(ws: Workstation): {
+    rate: number;
+    routeToOpId: string | undefined;
+    maxAttempts: number;
+  } | null {
+    const opId = ws.operation?.opId;
+    const garmentId = ws.operation?.garmentId;
+    if (!opId || !garmentId) return null;
+    const garment = GARMENT_TEMPLATES[garmentId];
+    if (!garment) return null;
+    const op = garment.operations.find((o) => o.id === opId);
+    if (!op || !(op.reworkRate && op.reworkRate > 0)) return null;
+    return {
+      rate: Math.min(1, Math.max(0, op.reworkRate)),
+      routeToOpId: op.reworkRouteToOpId,
+      maxAttempts: Math.max(1, op.maxReworkAttempts ?? 1),
+    };
+  }
+
+  /**
+   * Find the workstation in the same line as `fromWs` whose bound op id
+   * matches `opId`. Used to resolve a rework loop's re-entry point.
+   * Falls back to any workstation in the twin with that op id if the
+   * line-scoped lookup misses.
+   */
+  function findReworkTarget(fromWs: Workstation, opId: string): Workstation | null {
+    const lineId = fromWs.lineId;
+    let lineMatch: Workstation | null = null;
+    let anyMatch: Workstation | null = null;
+    for (const ws of twin.workstations) {
+      if (ws.operation?.opId === opId) {
+        if (ws.lineId === lineId) lineMatch = ws;
+        else if (!anyMatch) anyMatch = ws;
+      }
+    }
+    return lineMatch ?? anyMatch;
+  }
+
+  /**
+   * Decide whether a service-completed agent should be sent back upstream
+   * for rework. Returns true when the agent was consumed (scrapped or
+   * routed to rework); the caller must NOT forward it to the next op in
+   * that case. Returns false when the agent should follow the normal
+   * forward path.
+   */
+  function maybeRework(b: BlockState, agent: Agent, now: number): boolean {
+    const params = reworkParamsFor(b.ws);
+    if (!params) return false;
+    if (rng() >= params.rate) return false;
+    const attempts = (agent.reworkCount ?? 0) + 1;
+    if (attempts > params.maxAttempts) {
+      // Scrap — the piece is consumed without ever reaching a Sink.
+      piecesScrapped += agent.pieces;
+      return true;
+    }
+    agent.reworkCount = attempts;
+    // Find the rework re-entry point. Default to in-place rework when
+    // the op didn't pin a route — re-queues onto this same Service block.
+    const routeToOpId = params.routeToOpId;
+    if (!routeToOpId) {
+      b.queue.push(agent);
+      tryStartService(b, now);
+      return true;
+    }
+    const target = findReworkTarget(b.ws, routeToOpId);
+    if (!target) {
+      // Configured route missing — fall back to in-place rework rather
+      // than silently scrapping. Warn once so the user can fix the bulletin.
+      if (!warnedReworkMissing.has(routeToOpId)) {
+        warnings.push(
+          `Rework route for op "${routeToOpId}" not found in twin — looping in-place at "${b.ws.name}".`,
+        );
+        warnedReworkMissing.add(routeToOpId);
+      }
+      b.queue.push(agent);
+      tryStartService(b, now);
+      return true;
+    }
+    accept(target.id, '__rework__', agent, now);
+    return true;
+  }
+
+  const warnedReworkMissing = new Set<string>();
+
   function emitOnPort(b: BlockState, portId: string, agent: Agent, now: number): void {
     b.outflowByPort.set(portId, (b.outflowByPort.get(portId) ?? 0) + 1);
     b.outflowPieces += agent.pieces;
@@ -938,13 +1327,89 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (e.kind === 'sourceTick') {
       const src = blocks.get(e.wsId);
       if (!src) continue;
-      const pieces = getBlockParams(src.ws).piecesPerAgent;
+
+      // ── Order-aware path (P4) ──────────────────────────────────────────
+      // When the Source's line carries a non-empty orderSequence we emit
+      // one order at a time, raise CHANGEOVER_BEGIN between orders whose
+      // garment differs, and stop scheduling ticks when the sequence is
+      // exhausted. Legacy infinite-source behaviour is preserved by the
+      // `orderSeqIndex < 0` branch below.
+      if (src.orderSeqIndex >= 0 && src.ws.lineId) {
+        const seq = lineOrderSeq.get(src.ws.lineId) ?? [];
+        if (src.orderSeqIndex >= seq.length) continue; // sequence done
+
+        const orderId = seq[src.orderSeqIndex];
+        const order = orderById.get(orderId);
+        if (!order) {
+          // Stale id — skip and advance, no rescheduling penalty.
+          src.orderSeqIndex += 1;
+          src.orderEmittedSoFar = 0;
+          pq.push({ time: now + 1e-3, kind: 'sourceTick', wsId: src.ws.id });
+          continue;
+        }
+
+        // First-emission timestamp for completion tracking.
+        let stat = orderStats.get(orderId);
+        if (!stat) {
+          stat = { firstEmittedAt: now, lastSunkAt: 0, sunkPieces: 0 };
+          orderStats.set(orderId, stat);
+        }
+
+        // Emit one bundle (or one piece) tagged with the order id.
+        const pieces = Math.min(
+          src.piecesPerAgent,
+          Math.max(1, order.quantity - src.orderEmittedSoFar),
+        );
+        const agent: Agent = {
+          id: nextAgentId++,
+          bornAt: now,
+          pieces,
+          orderId,
+        };
+        emitOnPort(src, 'out', agent, now);
+        src.orderEmittedSoFar += pieces;
+
+        // Order satisfied — advance and possibly fire a changeover.
+        if (src.orderEmittedSoFar >= order.quantity) {
+          src.orderSeqIndex += 1;
+          src.orderEmittedSoFar = 0;
+          const nextOrderId = seq[src.orderSeqIndex];
+          const nextOrder = nextOrderId ? orderById.get(nextOrderId) : undefined;
+          if (
+            nextOrder &&
+            nextOrder.garmentId !== order.garmentId &&
+            src.ws.lineId
+          ) {
+            const base = lineChangeoverBase.get(src.ws.lineId) ?? 30;
+            const dur = changeoverDurationMin({
+              baseChangeoverMin: base,
+              fromGarmentId: order.garmentId,
+              toGarmentId: nextOrder.garmentId,
+            });
+            if (dur > 0) {
+              pq.push({
+                time: now,
+                kind: 'changeoverBegin',
+                lineId: src.ws.lineId,
+                durationMin: dur,
+              });
+              // Resume emissions after the changeover completes — staging
+              // can still hold pieces but the line is paced by OPRs which
+              // are frozen by changeoverBegin.
+              pq.push({ time: now + dur, kind: 'sourceTick', wsId: src.ws.id });
+              continue;
+            }
+          }
+        }
+        // Schedule next tick at the normal arrival cadence.
+        pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
+        continue;
+      }
+
+      // ── Legacy infinite-source path ───────────────────────────────────
+      const pieces = src.piecesPerAgent;
       const agent: Agent = { id: nextAgentId++, bornAt: now, pieces };
-      // Source has no inputs but is the entry point — emit on its sole
-      // output. emitOnPort handles outflow/pieces accounting.
       emitOnPort(src, 'out', agent, now);
-      // Schedule next tick. Stochastic when `arrivalDist` is set, otherwise
-      // a constant interval (the legacy v1 behaviour).
       pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
       continue;
     }
@@ -966,7 +1431,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
           bumpPoolAccum(pool, now);
           pool.busy = Math.max(0, pool.busy - 1);
         }
-        if (a) emitOnFirstOutput(b, a, now);
+        if (a) {
+          // P2 rework: a fraction (op.reworkRate) of completed pieces gets
+          // routed back upstream instead of forwarded. maybeRework consumes
+          // the agent in that case; only forward when it returns false.
+          if (!maybeRework(b, a, now)) emitOnFirstOutput(b, a, now);
+        }
         tryStartService(b, now);
       } else if (b.kind === 'Delay' || b.kind === 'MoveTo' || b.kind === 'Conveyor') {
         // Resource-free time-based blocks. Agent simply leaves on its first
@@ -974,6 +1444,68 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         b.busyMin += elapsed;
         b.inService = Math.max(0, b.inService - 1);
         if (a) emitOnFirstOutput(b, a, now);
+      }
+      continue;
+    }
+
+    // ── P2 changeover events ──────────────────────────────────────────────
+    if (e.kind === 'changeoverBegin') {
+      frozenLines.add(e.lineId);
+      pq.push({
+        time: now + e.durationMin,
+        kind: 'changeoverEnd',
+        lineId: e.lineId,
+      });
+      // Attribute the wall-clock duration to the changeover accumulator.
+      // Multi-line parallel changeovers sum here — call sites can divide
+      // by the active-line count when they need a per-line figure.
+      changeoverMinAccum += e.durationMin;
+      continue;
+    }
+    if (e.kind === 'changeoverEnd') {
+      frozenLines.delete(e.lineId);
+      // Unfreezing might let queued agents resume — try to start service at
+      // every Service block on the line. Cheap loop; lines are small.
+      for (const b of blocks.values()) {
+        if (b.kind === 'Service' && b.ws.lineId === e.lineId) {
+          tryStartService(b, now);
+        }
+      }
+      continue;
+    }
+
+    // ── P2 breakdown events ───────────────────────────────────────────────
+    if (e.kind === 'breakdownBegin') {
+      const ws = twin.workstations.find((w) => w.id === e.wsId);
+      if (!ws) continue;
+      const code = machineCodeFor(ws);
+      const spec = code ? breakdownByMachine[code] : undefined;
+      if (!spec) continue;
+      frozenWorkstations.add(e.wsId);
+      // Sample MTTR (repair time) from an exponential with mean = mttrMin.
+      const u = Math.max(1e-9, rng());
+      const repair = -Math.log(u) * spec.mttrMin;
+      downtimeMinAccum += repair;
+      pq.push({
+        time: now + repair,
+        kind: 'breakdownEnd',
+        wsId: e.wsId,
+        mtbfMin: spec.mtbfMin,
+        mttrMin: spec.mttrMin,
+      });
+      continue;
+    }
+    if (e.kind === 'breakdownEnd') {
+      frozenWorkstations.delete(e.wsId);
+      // Resume any queued service at this workstation.
+      const b = blocks.get(e.wsId);
+      if (b && b.kind === 'Service') tryStartService(b, now);
+      // Sample next time-to-failure for this workstation.
+      const u = Math.max(1e-9, rng());
+      const gap = -Math.log(u) * e.mtbfMin;
+      const nextFail = now + gap;
+      if (nextFail < durationMin) {
+        pq.push({ time: nextFail, kind: 'breakdownBegin', wsId: e.wsId });
       }
       continue;
     }
@@ -1042,9 +1574,34 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (lastT < durationMin) takeSample(durationMin);
   }
 
+  // OEE-quality denominator = pieces that *finished* a path (good + scrap).
+  // FTR-quality = first-pass-good ÷ finished. 1.0 when nothing finished
+  // (avoids divide-by-zero on idle runs).
+  const finishedPieces = totalProduced + piecesScrapped;
+  const firstPassYield = finishedPieces > 0 ? piecesProducedFTR / finishedPieces : 1;
+
+  // P4 — flatten orderStats into a Record. Only orders that emitted AND
+  // had at least one piece reach a Sink land here; orders still in
+  // progress at end-of-run are reported via `sunkPieces < quantity` —
+  // for the result KPI we emit the time-to-last-sink even if partial,
+  // since the IE wants to see "where did this order get to by the
+  // shift bell."
+  const perOrderCompletionTime: Record<string, number> = {};
+  for (const [orderId, stat] of orderStats) {
+    if (stat.firstEmittedAt >= 0 && stat.lastSunkAt > stat.firstEmittedAt) {
+      perOrderCompletionTime[orderId] = stat.lastSunkAt - stat.firstEmittedAt;
+    }
+  }
+
   return {
     durationMin,
     totalProduced,
+    piecesProducedFTR,
+    piecesScrapped,
+    firstPassYield,
+    changeoverMin: changeoverMinAccum,
+    downtimeMin: downtimeMinAccum,
+    perOrderCompletionTime,
     meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
     throughputPerHr: durationMin > 0 ? (totalProduced * 60) / durationMin : 0,
     blocks: blockObs,

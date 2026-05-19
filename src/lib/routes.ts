@@ -33,12 +33,15 @@ export const ROUTES: RouteDef[] = [
   { path: '/floor',     id: 'floor',     label: 'Live Floor',       shortLabel: 'Floor',      icon: '⬢', kind: 'main' },
   { path: '/iso',       id: 'iso',       label: 'Factory Builder',  shortLabel: 'Builder',    icon: '◆', kind: 'main' },
   { path: '/sim',       id: 'sim',       label: 'Simulation',       shortLabel: 'Sim',        icon: '▷', kind: 'main' },
+  { path: '/balance',   id: 'balance',   label: 'Reports',                                    icon: '⌬', kind: 'main' },
   { path: '/resources', id: 'resources', label: 'Resources',                                  icon: '⊟', kind: 'main' },
   // /kpi is the legacy Reports path. App.tsx redirects it to /balance, which
   // is the merged Reports hub (Performance + Line Balance + Validation tabs).
   { path: '/kpi',       id: 'kpi',       label: 'Reports',                                    icon: '⌬', kind: 'special' },
-  { path: '/scenarios', id: 'scenarios', label: 'Scenarios',                                  icon: '✦', kind: 'main' },
-  { path: '/balance',   id: 'balance',   label: 'Reports',                                    icon: '⌬', kind: 'main' },
+  // Scenarios is no longer a top-bar tab — it lives inside Reports as the
+  // "Scenarios" tab. The /scenarios path stays for deep-links; App.tsx
+  // redirects it to /balance?tab=scenarios.
+  { path: '/scenarios', id: 'scenarios', label: 'Scenarios',                                  icon: '✦', kind: 'special' },
   // Queue Analysis is no longer a top-bar tab — it lives inside the Builder's
   // Inspector as the per-workstation "Queue analysis" section. The /queues
   // route still resolves for deep-links and internal navigations.

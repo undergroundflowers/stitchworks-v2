@@ -15,6 +15,7 @@ import type { MachineCode, MachineSpec } from '../domain/machines';
 import type { WorkerArchetype } from '../domain/workers';
 import type { ProductKind } from '../assets';
 import type { ModelTimeUnit } from '../simulation/timeUnit';
+import type { Twin } from '../domain/twin';
 
 /**
  * Garment names that should never survive a session — keyboard mashes and
@@ -213,6 +214,29 @@ export interface ScenarioKpis {
   bottleneckQueue: number;
   /** Number of replications behind these means. 1 = single-seed run. */
   replicationCount?: number;
+  /** OEE three-factor product (Availability × Performance × Quality), 0..1. */
+  oee?: number;
+  oeeAvailability?: number;
+  oeePerformance?: number;
+  oeeQuality?: number;
+  /** On-standard performance % — alias of BSI in lean vocabulary. */
+  onStandardPct?: number;
+  /** Off-standard loss % = (clocked - earned) / clocked × 100. */
+  offStandardLossPct?: number;
+  /** Pieces produced per operator-hour. */
+  labourProductivity?: number;
+  /** Actual pph - demand pph; signed. */
+  demandTaktGap?: number;
+  /** Intrinsic balance ratio ÷ dynamic balance ratio. */
+  intrinsicVsDynamicRatio?: number;
+  /** Minutes lost to changeover; populated in P4. */
+  changeoverMinutes?: number;
+  /** Total changeover minutes summed across every changeover event. */
+  totalChangeoverMinutes?: number;
+  /** Per-order completion time keyed by Order.id (sim minutes). */
+  perOrderCompletionTime?: Record<string, number>;
+  /** Minutes lost to machine downtime; populated in P2. */
+  downtimeMinutes?: number;
   /** Per-KPI standard deviation across replications, when available. */
   std?: {
     producedPieces: number;
@@ -221,6 +245,10 @@ export interface ScenarioKpis {
     meanLeadTime: number;
     utilization: number;
     wipBundles: number;
+    oee?: number;
+    onStandardPct?: number;
+    labourProductivity?: number;
+    demandTaktGap?: number;
   };
 }
 
@@ -236,6 +264,12 @@ export interface Scenario {
     /** Sparse overrides at save time — recreate the run if needed. */
     skillMatrix: SkillMatrix;
     yamazumiOverride?: YamazumiAssignment[];
+    /** Snapshot of the active twin at save time. Lets a scenario carry its
+     *  own factory layout (lines, workstations, connectors) so loading R1
+     *  vs R2 swaps the floor, not just the per-garment config. Optional
+     *  for backward compatibility — older scenarios saved without this
+     *  field still load (they just don't restore a layout). */
+    twin?: Twin;
   };
   /** Results from the run that produced this snapshot. */
   kpis: ScenarioKpis;
@@ -360,8 +394,11 @@ export interface ProjectState {
   setSkill: (operatorId: string, opId: string, efficiency: number) => void;
   resetSkillMatrix: () => void;
 
-  /** Save a scenario from the current state + a freshly-captured KPI run. */
-  saveScenario: (input: { name: string; notes?: string; kpis: ScenarioKpis }) => Scenario;
+  /** Save a scenario from the current state + a freshly-captured KPI run.
+   *  When `twin` is supplied, the scenario stores a deep clone of the
+   *  active factory layout so Load can restore it side-by-side with
+   *  the per-garment config. */
+  saveScenario: (input: { name: string; notes?: string; kpis: ScenarioKpis; twin?: Twin }) => Scenario;
   /** Remove a scenario by id. */
   deleteScenario: (id: string) => void;
   /** Rename a scenario in place. */
@@ -703,6 +740,7 @@ export const useProject = create<ProjectState>()(
             yamazumiOverride: cur.yamazumiOverrides[cur.selectedGarmentId]
               ? JSON.parse(JSON.stringify(cur.yamazumiOverrides[cur.selectedGarmentId])) as YamazumiAssignment[]
               : undefined,
+            twin: input.twin ? (JSON.parse(JSON.stringify(input.twin)) as Twin) : undefined,
           },
           kpis: input.kpis,
         };

@@ -201,3 +201,138 @@ export function floatersRequired(opts: {
 export function firstPassYield(opts: { produced: number; rejected: number }): number {
   return opts.produced > 0 ? (opts.produced - opts.rejected) / opts.produced : 1;
 }
+
+/**
+ * Quality fraction from a good-vs-total split. Synonym of firstPassYield but
+ * with the parameter shape the OEE pipeline uses (good, total) rather than
+ * (produced, rejected). Returns 1 when total = 0 so OEE doesn't divide by 0
+ * on idle shifts.
+ */
+export function qualityFromYield(opts: { goodPieces: number; totalPieces: number }): number {
+  return opts.totalPieces > 0 ? opts.goodPieces / opts.totalPieces : 1;
+}
+
+/**
+ * OEE = Availability × Performance × Quality.
+ * Each input is a 0..1 fraction; the product is also 0..1. Multiply by 100
+ * for the percentage figure the IE typically reports.
+ */
+export function oee(opts: { availability: number; performance: number; quality: number }): number {
+  return opts.availability * opts.performance * opts.quality;
+}
+
+/**
+ * Availability fraction for OEE = runtime / planned production time, where
+ * planned time = runtime + downtime + changeover. Changeover is split out
+ * from generic downtime so the IE can attribute lost minutes to setup vs
+ * mechanical failure separately.
+ */
+export function availabilityFromState(opts: {
+  runtimeMin: number;
+  downtimeMin: number;
+  changeoverMin: number;
+}): number {
+  const planned = opts.runtimeMin + opts.downtimeMin + opts.changeoverMin;
+  return planned > 0 ? opts.runtimeMin / planned : 0;
+}
+
+/**
+ * Performance fraction for OEE = actual / theoretical throughput. The
+ * theoretical throughput is the ideal pace at the bottleneck SMV with no
+ * losses — same number `hourlyTarget(bottleneckSmv)` returns.
+ */
+export function performanceFromThroughput(opts: {
+  actualPph: number;
+  theoreticalPph: number;
+}): number {
+  return opts.theoreticalPph > 0 ? opts.actualPph / opts.theoreticalPph : 0;
+}
+
+/**
+ * On-standard performance % — the apparel-lean synonym for BSI. Earned
+ * minutes (produced × SAM) divided by clocked minutes. 100 = on standard.
+ * Identical formula to `bsiPercent`; named for engineers who reach for the
+ * lean-manufacturing term instead of the IE-textbook one.
+ */
+export function onStandardPerformance(opts: {
+  producedPieces: number;
+  sam: number;
+  clockedMinutes: number;
+}): number {
+  return bsiPercent({
+    producedPieces: opts.producedPieces,
+    sam: opts.sam,
+    workMinutes: opts.clockedMinutes,
+  });
+}
+
+/**
+ * Off-standard loss % — minutes burned without earning SAM, expressed as a
+ * fraction of total clocked minutes. = (clocked - earned) / clocked × 100.
+ * Complements on-standard performance: if BSI = 80, off-standard loss = 20.
+ */
+export function offStandardLossPct(opts: {
+  clockedMinutes: number;
+  earnedMinutes: number;
+}): number {
+  return opts.clockedMinutes > 0
+    ? ((opts.clockedMinutes - opts.earnedMinutes) / opts.clockedMinutes) * 100
+    : 0;
+}
+
+/**
+ * Labour productivity = pieces / operator-hour. Identical to
+ * `outputPerOperatorHour`; kept under the lean-textbook name so the KPI
+ * record reads naturally.
+ */
+export function labourProductivity(opts: {
+  producedPieces: number;
+  operators: number;
+  hours: number;
+}): number {
+  return outputPerOperatorHour(opts);
+}
+
+/**
+ * Demand-takt gap (pieces/hour, signed). Positive = ahead of demand,
+ * negative = behind. Lets the IE see at a glance whether the simulated
+ * line can meet the order book.
+ */
+export function demandTaktGap(opts: { actualPph: number; demandPph: number }): number {
+  return opts.actualPph - opts.demandPph;
+}
+
+/**
+ * Intrinsic vs dynamic balance ratio — measures how much of the achieved
+ * line-balance ratio comes from the bulletin's natural workload distribution
+ * (intrinsic) versus operator skill flex (dynamic).
+ *
+ * intrinsic = balance assuming every operator runs at nominal speed.
+ * dynamic   = balance after applying the skill matrix.
+ *
+ * A ratio close to 1 means the bulletin itself is well-shaped — most of the
+ * balance is intrinsic. A ratio significantly < 1 means the line depends on
+ * skill flex to stay balanced (fragile if a strong operator is absent).
+ */
+export function intrinsicVsDynamicRatio(opts: {
+  nominalStationSmvs: number[];
+  skillAdjustedStationSmvs: number[];
+}): number {
+  const intrinsic = lineBalanceRatio(opts.nominalStationSmvs);
+  const dynamic = lineBalanceRatio(opts.skillAdjustedStationSmvs);
+  return dynamic > 0 ? intrinsic / dynamic : 0;
+}
+
+/**
+ * Cost per piece from cumulative totals (USD spent ÷ pieces produced).
+ * Sibling of `costPerPiece` which sums per-piece inputs already.
+ */
+export function costPerPieceFromTotals(opts: {
+  totalLabourUsd: number;
+  totalMaterialUsd: number;
+  totalOverheadUsd: number;
+  pieces: number;
+}): number {
+  if (opts.pieces <= 0) return 0;
+  return (opts.totalLabourUsd + opts.totalMaterialUsd + opts.totalOverheadUsd) / opts.pieces;
+}

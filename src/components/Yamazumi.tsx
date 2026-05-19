@@ -1,6 +1,7 @@
 import { useState, type DragEvent } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import type { Operation } from '../domain';
+import { balance, DEFAULT_BALANCER } from '../domain/balancers';
 
 export interface OperatorAssignment {
   /** Display id, e.g. "OPR-01". */
@@ -376,28 +377,31 @@ function colorForCategory(cat: Operation['category']): string {
 }
 
 /**
- * Round-robin operation assignment to N operators using LPT (Longest
- * Processing Time): sort ops by SMV descending, then assign each to the
- * operator with the lowest current load. Good baseline that the user can
- * then tune via drag.
+ * Auto-balance operations across N operators using the project's default
+ * heuristic (RPW — Ranked Positional Weight) for precedence-aware
+ * balance. Falls back to greedy LPT if the balancer reports no result.
+ *
+ * Accepts an optional `opEfficiency` map (op-id → 0.5..1.5) derived from
+ * the project's skill matrix; the balancer biases assignments so slower
+ * operators don't sit on long-SMV ops. Without it, balance is computed
+ * at nominal SMV — same numbers a textbook would print.
+ *
+ * The returned shape is identical to the previous LPT implementation so
+ * every existing caller (Reports yamazumi editor, store overrides,
+ * scenario forks) keeps working without UI changes.
  */
 export function autoAssign(
   ops: Operation[],
   operatorCount: number,
+  opEfficiency?: Record<string, number>,
 ): OperatorAssignment[] {
-  const buckets: Operation[][] = Array.from({ length: operatorCount }, () => []);
-  const sorted = [...ops].sort((a, b) => b.smv - a.smv);
-  const loads = new Array(operatorCount).fill(0);
-  for (const op of sorted) {
-    let target = 0;
-    for (let i = 1; i < operatorCount; i++) {
-      if (loads[i] < loads[target]) target = i;
-    }
-    buckets[target].push(op);
-    loads[target] += op.smv;
-  }
-  return buckets.map((operations, i) => ({
-    id: `OPR-${(i + 1).toString().padStart(2, '0')}`,
-    operations,
+  const result = balance(DEFAULT_BALANCER, {
+    ops,
+    operatorCount,
+    opEfficiency,
+  });
+  return result.assignment.map((bucket) => ({
+    id: bucket.id,
+    operations: bucket.operations,
   }));
 }
