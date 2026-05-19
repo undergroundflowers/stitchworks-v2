@@ -3533,7 +3533,7 @@ interface BuilderLogicViewProps {
   /** Twin-store actions surfaced here so the LOGIC view can author. */
   addDepartment: (input: Omit<Department, 'id'>) => string;
   moveDepartment: (id: string, bounds: Department['bounds']) => void;
-  addConnector: (input: Omit<Connector, 'id'>) => string;
+  addConnector: (input: Omit<Connector, 'id'>) => string | null;
   /** Acknowledge drop completion (clear the armed tool). */
   setDrop: React.Dispatch<React.SetStateAction<DropTool>>;
 }
@@ -3681,7 +3681,6 @@ function BuilderLogicView({
   // doesn't change the iso position dramatically — we slot the dragged
   // dept's y between its new neighbours' iso y values.
   const [dragDeptId, setDragDeptId] = useState<string | null>(null);
-  const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
   const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
 
   const svgRef = useRef<SVGSVGElement | null>(null);
@@ -3703,7 +3702,6 @@ function BuilderLogicView({
     e.preventDefault();
     const start = screenToSvg(e.clientX, e.clientY);
     setDragDeptId(d.id);
-    setDragOffset({ x: start.x - p.x, y: start.y - p.y });
     setDragPos({ x: p.x, y: p.y });
     let didMove = false;
     const move = (ev: MouseEvent) => {
