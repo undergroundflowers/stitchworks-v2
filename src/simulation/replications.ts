@@ -13,6 +13,18 @@
 
 import type { Twin } from '../domain/twin';
 import type { GarmentTemplate } from '../domain';
+import {
+  hourlyTarget,
+  oee as oeeKpi,
+  availabilityFromState,
+  performanceFromThroughput,
+  qualityFromYield,
+  onStandardPerformance,
+  offStandardLossPct as offStandardLossKpi,
+  labourProductivity as labourProductivityKpi,
+  demandTaktGap as demandTaktGapKpi,
+  totalSam,
+} from '../domain/kpi';
 import { runPmlSim, type PmlSimResult } from './pml-engine';
 import { buildPmlTwinView, pmlSampleToSimState } from './pml-to-sim-state';
 import type { HistoryPoint, StationView } from './sim-state';
@@ -27,6 +39,20 @@ export interface ReplicationResult {
   wipBundles: number;
   bottleneckOpName: string;
   bottleneckQueue: number;
+  /** OEE = availability × performance × quality, 0..1. P1 = perf only;
+   *  P2 will populate downtime + quality once rework + breakdowns land. */
+  oee: number;
+  oeeAvailability: number;
+  oeePerformance: number;
+  oeeQuality: number;
+  /** Earned-minutes / clocked-minutes × 100. Identical to BSI; named for
+   *  the lean-vocabulary reader. */
+  onStandardPct: number;
+  offStandardLossPct: number;
+  /** Pieces ÷ operator-hours. */
+  labourProductivity: number;
+  /** Actual pph − demand pph; 0 when no demand was supplied. */
+  demandTaktGap: number;
 }
 
 export interface AggregateKpis {
@@ -38,6 +64,14 @@ export interface AggregateKpis {
   meanLeadTime:      { mean: number; std: number };
   utilization:       { mean: number; std: number };
   wipBundles:        { mean: number; std: number };
+  oee:               { mean: number; std: number };
+  oeeAvailability:   { mean: number; std: number };
+  oeePerformance:    { mean: number; std: number };
+  oeeQuality:        { mean: number; std: number };
+  onStandardPct:     { mean: number; std: number };
+  offStandardLossPct:{ mean: number; std: number };
+  labourProductivity:{ mean: number; std: number };
+  demandTaktGap:     { mean: number; std: number };
   /** Bottleneck name + queue from the run that produced the median throughput. */
   bottleneckOpName: string;
   bottleneckQueue: number;
@@ -71,6 +105,12 @@ export interface RunReplicationsOpts {
    *  is used. Set this when running a synthetic garment twin so the
    *  efficiency denominator matches the user's slider. */
   operatorsOverride?: number;
+  /** Demand target (pieces/hour). When set, demandTaktGap is computed as
+   *  actualPph − demandPph per replication. When omitted, gap defaults to 0. */
+  demandPerHr?: number;
+  /** Per-op skill-efficiency multipliers (from `efficiencyFromSkillMatrix`).
+   *  Passed through to the engine — drives per-station cycle scaling. */
+  opEfficiency?: Record<string, number>;
 }
 
 /**
@@ -95,6 +135,7 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
       durationMin: simMinutes,
       seed: seed + i,
       samplePeriodMin: 5,
+      opEfficiency: opts.opEfficiency,
     });
     const lastSample = result.samples[result.samples.length - 1];
     // Map the final sample to a SimState so the page can still read
@@ -122,6 +163,64 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
     const throughputPerHr = simMinutes > 0 ? (result.totalProduced / simMinutes) * 60 : 0;
     const wipBundles = state ? state.totalArrivals - state.produced : 0;
     const bottleneck = state?.stations[state.bottleneckOpIndex];
+
+    // ── New KPI block (P1) ──────────────────────────────────────────────
+    // OEE: Availability × Performance × Quality.
+    // P1 has no downtime + no rework yet, so availability = 1 and
+    // quality = 1; only Performance carries information. P2 will populate
+    // downtime / rework and these defaults will become meaningful.
+    const clockedMin = operators * simMinutes;
+    const sam = garment ? totalSam(garment.operations) : 0;
+    const bottleneckSmv = bottleneck?.smv ?? 0;
+    const theoreticalPph = bottleneckSmv > 0 ? hourlyTarget(bottleneckSmv) : 0;
+
+    // Runtime = shift - (changeover + downtime). Caps at 0 so a
+    // pathological config (more changeover than shift) doesn't go negative.
+    const lostMin = Math.max(0, result.changeoverMin + result.downtimeMin);
+    const runtimeMin = Math.max(0, simMinutes - lostMin);
+    const oeeAvailability = availabilityFromState({
+      runtimeMin,
+      downtimeMin: result.downtimeMin,
+      changeoverMin: result.changeoverMin,
+    });
+    const oeePerformance = performanceFromThroughput({
+      actualPph: throughputPerHr,
+      theoreticalPph,
+    });
+    // OEE-quality uses the engine's first-pass yield: pieces that completed
+    // every op without ever entering rework, divided by pieces that finished
+    // a full path (sunk or scrapped). 1.0 when no rework / scrap occurred.
+    const oeeQuality = qualityFromYield({
+      goodPieces: result.piecesProducedFTR,
+      totalPieces: result.totalProduced + result.piecesScrapped,
+    });
+    const oee = oeeKpi({
+      availability: oeeAvailability,
+      performance: oeePerformance,
+      quality: oeeQuality,
+    });
+
+    const onStandardPct = sam > 0
+      ? onStandardPerformance({
+          producedPieces: result.totalProduced,
+          sam,
+          clockedMinutes: clockedMin,
+        })
+      : 0;
+    const earnedMin = result.totalProduced * sam;
+    const offStdLoss = offStandardLossKpi({
+      clockedMinutes: clockedMin,
+      earnedMinutes: earnedMin,
+    });
+    const labourProd = labourProductivityKpi({
+      producedPieces: result.totalProduced,
+      operators,
+      hours: simMinutes / 60,
+    });
+    const taktGap = opts.demandPerHr !== undefined
+      ? demandTaktGapKpi({ actualPph: throughputPerHr, demandPph: opts.demandPerHr })
+      : 0;
+
     samples.push({
       seed: seed + i,
       producedPieces: result.totalProduced,
@@ -132,6 +231,14 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
       wipBundles,
       bottleneckOpName: bottleneck?.opName ?? '—',
       bottleneckQueue: bottleneck?.queueLen ?? 0,
+      oee,
+      oeeAvailability,
+      oeePerformance,
+      oeeQuality,
+      onStandardPct,
+      offStandardLossPct: offStdLoss,
+      labourProductivity: labourProd,
+      demandTaktGap: taktGap,
     });
   }
 
@@ -142,12 +249,20 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
 
   return {
     n,
-    producedPieces:  meanStd(samples.map((s) => s.producedPieces)),
-    throughputPerHr: meanStd(samples.map((s) => s.throughputPerHr)),
-    efficiencyPct:   meanStd(samples.map((s) => s.efficiencyPct)),
-    meanLeadTime:    meanStd(samples.map((s) => s.meanLeadTime)),
-    utilization:     meanStd(samples.map((s) => s.utilization)),
-    wipBundles:      meanStd(samples.map((s) => s.wipBundles)),
+    producedPieces:     meanStd(samples.map((s) => s.producedPieces)),
+    throughputPerHr:    meanStd(samples.map((s) => s.throughputPerHr)),
+    efficiencyPct:      meanStd(samples.map((s) => s.efficiencyPct)),
+    meanLeadTime:       meanStd(samples.map((s) => s.meanLeadTime)),
+    utilization:        meanStd(samples.map((s) => s.utilization)),
+    wipBundles:         meanStd(samples.map((s) => s.wipBundles)),
+    oee:                meanStd(samples.map((s) => s.oee)),
+    oeeAvailability:    meanStd(samples.map((s) => s.oeeAvailability)),
+    oeePerformance:     meanStd(samples.map((s) => s.oeePerformance)),
+    oeeQuality:         meanStd(samples.map((s) => s.oeeQuality)),
+    onStandardPct:      meanStd(samples.map((s) => s.onStandardPct)),
+    offStandardLossPct: meanStd(samples.map((s) => s.offStandardLossPct)),
+    labourProductivity: meanStd(samples.map((s) => s.labourProductivity)),
+    demandTaktGap:      meanStd(samples.map((s) => s.demandTaktGap)),
     bottleneckOpName: median?.bottleneckOpName ?? '—',
     bottleneckQueue:  median?.bottleneckQueue ?? 0,
     replications: samples,

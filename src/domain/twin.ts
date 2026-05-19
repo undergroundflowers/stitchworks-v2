@@ -320,6 +320,28 @@ export interface ScenarioKpis {
   bottleneckQueue: number;
   /** Number of replications behind these means. 1 = single-seed. */
   replicationCount?: number;
+  /** OEE three-factor product (Availability × Performance × Quality), 0..1.
+   *  Until P2 lands rework + downtime + changeover, Quality defaults to 1.0
+   *  and Availability defaults to 1.0; only Performance carries information. */
+  oee?: number;
+  oeeAvailability?: number;
+  oeePerformance?: number;
+  oeeQuality?: number;
+  /** On-standard performance % — alias of BSI for the lean-vocabulary reader. */
+  onStandardPct?: number;
+  /** Off-standard loss % = (clocked - earned) / clocked × 100. */
+  offStandardLossPct?: number;
+  /** Pieces produced per operator-hour. */
+  labourProductivity?: number;
+  /** Actual pph - demand pph; signed. */
+  demandTaktGap?: number;
+  /** Intrinsic balance ratio ÷ dynamic balance ratio. Near 1 = bulletin is
+   *  inherently balanced; < 1 = balance depends on skill flex. */
+  intrinsicVsDynamicRatio?: number;
+  /** Minutes lost to changeover during the run; populated in P4. */
+  changeoverMinutes?: number;
+  /** Minutes lost to machine downtime during the run; populated in P2. */
+  downtimeMinutes?: number;
   std?: {
     producedPieces: number;
     throughputPerHr: number;
@@ -327,6 +349,10 @@ export interface ScenarioKpis {
     meanLeadTime: number;
     utilization: number;
     wipBundles: number;
+    oee?: number;
+    onStandardPct?: number;
+    labourProductivity?: number;
+    demandTaktGap?: number;
   };
 }
 
