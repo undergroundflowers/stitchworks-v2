@@ -231,6 +231,10 @@ export interface ScenarioKpis {
   intrinsicVsDynamicRatio?: number;
   /** Minutes lost to changeover; populated in P4. */
   changeoverMinutes?: number;
+  /** Total changeover minutes summed across every changeover event. */
+  totalChangeoverMinutes?: number;
+  /** Per-order completion time keyed by Order.id (sim minutes). */
+  perOrderCompletionTime?: Record<string, number>;
   /** Minutes lost to machine downtime; populated in P2. */
   downtimeMinutes?: number;
   /** Per-KPI standard deviation across replications, when available. */

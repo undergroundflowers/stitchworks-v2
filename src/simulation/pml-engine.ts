@@ -31,13 +31,15 @@
  * harness, future export).
  */
 
-import type { Twin, Workstation } from '../domain/twin';
+import type { Twin, Workstation, Order } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
   type PmlBlockKind,
 } from '../domain/pml';
 import { GARMENT_TEMPLATES } from '../domain';
+import { PRODUCTION_SYSTEMS } from '../domain/routings';
+import { changeoverDurationMin } from '../domain/changeover';
 import { MinHeap, mulberry32 } from './priority-queue';
 import { sample as sampleDist, type ServiceDist } from './distributions';
 
@@ -353,6 +355,10 @@ export interface PmlSimResult {
   changeoverMin: number;
   /** Cumulative minutes lost to machine downtime (MTBF/MTTR) during the run. P2 default 0. */
   downtimeMin: number;
+  /** Per-order completion time keyed by Order.id (minutes from the first
+   *  piece emitted by the Source to the last piece reaching the Sink).
+   *  Populated when a Source ran an OrderSequence. Empty otherwise. */
+  perOrderCompletionTime: Record<string, number>;
   /** Mean lead time across sunk agents, in minutes. */
   meanLeadTimeMin: number;
   /** Aggregate throughput across all sinks (agents/hr). */
@@ -390,6 +396,10 @@ interface Agent {
    *  reworkRate-driven Service block. 0 = first-pass. Incremented on each
    *  rework decision; scrapped when it exceeds the op's maxReworkAttempts. */
   reworkCount?: number;
+  /** Order id this piece belongs to — populated when the Source is
+   *  running an OrderSequence. Lets the Sink credit completion times
+   *  per order. Undefined for legacy single-garment Sources. */
+  orderId?: string;
 }
 
 /** All the precomputed routing for a block — output port → list of next
@@ -478,6 +488,12 @@ interface BlockState {
    *  doesn't pin a value — keeps pilot-factory `buf_in` workstations
    *  emitting full bundles instead of single pieces. */
   piecesPerAgent: number;
+  /** Source-only: position in the bound line's `orderSequence`. -1 ⇒ no
+   *  sequence (legacy infinite Source). */
+  orderSeqIndex: number;
+  /** Source-only: pieces emitted for the *current* order. Resets to 0
+   *  whenever orderSeqIndex advances. */
+  orderEmittedSoFar: number;
 }
 
 // ============================================================================
@@ -629,6 +645,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       batchSize: batchSizeFor(ws),
       servers: Math.max(1, Math.round(getBlockParams(ws).servers)),
       piecesPerAgent: Math.max(1, Math.round(getBlockParams(ws).piecesPerAgent)),
+      // P4 — order sequence tracking is enabled at engine-init time below,
+      // once we know which lines have a non-empty orderSequence.
+      orderSeqIndex: -1,
+      orderEmittedSoFar: 0,
     });
   }
 
@@ -732,6 +752,43 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   /** Workstations currently down for repair — tryStartService refuses
    *  service while the ws id is in this set. */
   const frozenWorkstations = new Set<string>();
+
+  // ── P4 order-sequence state ──────────────────────────────────────────────
+  /** Per-order completion tracking. Populated as agents flow through:
+   *  firstEmittedAt = first sourceTick that emitted a piece for this order;
+   *  lastSunkAt     = last sim time a piece of this order reached a Sink. */
+  const orderStats = new Map<
+    string,
+    { firstEmittedAt: number; lastSunkAt: number; sunkPieces: number }
+  >();
+  /** Order id → Order record, indexed once for hot-path lookup. */
+  const orderById = new Map<string, Order>();
+  for (const o of twin.orders ?? []) orderById.set(o.id, o);
+  /** Line id → orderSequence (ids), copied so we don't read the twin in
+   *  the hot path. */
+  const lineOrderSeq = new Map<string, string[]>();
+  for (const line of twin.lines ?? []) {
+    if (line.orderSequence && line.orderSequence.length > 0) {
+      lineOrderSeq.set(line.id, [...line.orderSequence]);
+    }
+  }
+  /** Line id → production-system base changeoverMin, used for the dynamic
+   *  CHANGEOVER_BEGIN events the Source raises between orders. */
+  const lineChangeoverBase = new Map<string, number>();
+  for (const line of twin.lines ?? []) {
+    const sys = PRODUCTION_SYSTEMS[line.productionSystem];
+    lineChangeoverBase.set(line.id, sys?.changeoverMin ?? 30);
+  }
+  // Tag each Source whose line has a non-empty orderSequence so its
+  // sourceTick handler enters the order-aware path instead of the
+  // legacy infinite-stream path.
+  for (const src of sources) {
+    const lineId = src.ws.lineId;
+    if (lineId && (lineOrderSeq.get(lineId)?.length ?? 0) > 0) {
+      src.orderSeqIndex = 0;
+      src.orderEmittedSoFar = 0;
+    }
+  }
 
   // ── Event queue ────────────────────────────────────────────────────────────
   const pq = new MinHeap<Event>((a, b) => a.time - b.time);
@@ -939,6 +996,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         totalProduced += agent.pieces;
         if ((agent.reworkCount ?? 0) === 0) piecesProducedFTR += agent.pieces;
         leadTimeAccum += (now - agent.bornAt) * agent.pieces;
+        // P4 order tracking: credit the order this piece belongs to.
+        if (agent.orderId) {
+          const stat = orderStats.get(agent.orderId);
+          if (stat) {
+            stat.sunkPieces += agent.pieces;
+            stat.lastSunkAt = now;
+          }
+        }
         return;
       case 'Source':
       case 'ResourcePool':
@@ -1262,13 +1327,89 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (e.kind === 'sourceTick') {
       const src = blocks.get(e.wsId);
       if (!src) continue;
+
+      // ── Order-aware path (P4) ──────────────────────────────────────────
+      // When the Source's line carries a non-empty orderSequence we emit
+      // one order at a time, raise CHANGEOVER_BEGIN between orders whose
+      // garment differs, and stop scheduling ticks when the sequence is
+      // exhausted. Legacy infinite-source behaviour is preserved by the
+      // `orderSeqIndex < 0` branch below.
+      if (src.orderSeqIndex >= 0 && src.ws.lineId) {
+        const seq = lineOrderSeq.get(src.ws.lineId) ?? [];
+        if (src.orderSeqIndex >= seq.length) continue; // sequence done
+
+        const orderId = seq[src.orderSeqIndex];
+        const order = orderById.get(orderId);
+        if (!order) {
+          // Stale id — skip and advance, no rescheduling penalty.
+          src.orderSeqIndex += 1;
+          src.orderEmittedSoFar = 0;
+          pq.push({ time: now + 1e-3, kind: 'sourceTick', wsId: src.ws.id });
+          continue;
+        }
+
+        // First-emission timestamp for completion tracking.
+        let stat = orderStats.get(orderId);
+        if (!stat) {
+          stat = { firstEmittedAt: now, lastSunkAt: 0, sunkPieces: 0 };
+          orderStats.set(orderId, stat);
+        }
+
+        // Emit one bundle (or one piece) tagged with the order id.
+        const pieces = Math.min(
+          src.piecesPerAgent,
+          Math.max(1, order.quantity - src.orderEmittedSoFar),
+        );
+        const agent: Agent = {
+          id: nextAgentId++,
+          bornAt: now,
+          pieces,
+          orderId,
+        };
+        emitOnPort(src, 'out', agent, now);
+        src.orderEmittedSoFar += pieces;
+
+        // Order satisfied — advance and possibly fire a changeover.
+        if (src.orderEmittedSoFar >= order.quantity) {
+          src.orderSeqIndex += 1;
+          src.orderEmittedSoFar = 0;
+          const nextOrderId = seq[src.orderSeqIndex];
+          const nextOrder = nextOrderId ? orderById.get(nextOrderId) : undefined;
+          if (
+            nextOrder &&
+            nextOrder.garmentId !== order.garmentId &&
+            src.ws.lineId
+          ) {
+            const base = lineChangeoverBase.get(src.ws.lineId) ?? 30;
+            const dur = changeoverDurationMin({
+              baseChangeoverMin: base,
+              fromGarmentId: order.garmentId,
+              toGarmentId: nextOrder.garmentId,
+            });
+            if (dur > 0) {
+              pq.push({
+                time: now,
+                kind: 'changeoverBegin',
+                lineId: src.ws.lineId,
+                durationMin: dur,
+              });
+              // Resume emissions after the changeover completes — staging
+              // can still hold pieces but the line is paced by OPRs which
+              // are frozen by changeoverBegin.
+              pq.push({ time: now + dur, kind: 'sourceTick', wsId: src.ws.id });
+              continue;
+            }
+          }
+        }
+        // Schedule next tick at the normal arrival cadence.
+        pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
+        continue;
+      }
+
+      // ── Legacy infinite-source path ───────────────────────────────────
       const pieces = src.piecesPerAgent;
       const agent: Agent = { id: nextAgentId++, bornAt: now, pieces };
-      // Source has no inputs but is the entry point — emit on its sole
-      // output. emitOnPort handles outflow/pieces accounting.
       emitOnPort(src, 'out', agent, now);
-      // Schedule next tick. Stochastic when `arrivalDist` is set, otherwise
-      // a constant interval (the legacy v1 behaviour).
       pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
       continue;
     }
@@ -1439,6 +1580,19 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   const finishedPieces = totalProduced + piecesScrapped;
   const firstPassYield = finishedPieces > 0 ? piecesProducedFTR / finishedPieces : 1;
 
+  // P4 — flatten orderStats into a Record. Only orders that emitted AND
+  // had at least one piece reach a Sink land here; orders still in
+  // progress at end-of-run are reported via `sunkPieces < quantity` —
+  // for the result KPI we emit the time-to-last-sink even if partial,
+  // since the IE wants to see "where did this order get to by the
+  // shift bell."
+  const perOrderCompletionTime: Record<string, number> = {};
+  for (const [orderId, stat] of orderStats) {
+    if (stat.firstEmittedAt >= 0 && stat.lastSunkAt > stat.firstEmittedAt) {
+      perOrderCompletionTime[orderId] = stat.lastSunkAt - stat.firstEmittedAt;
+    }
+  }
+
   return {
     durationMin,
     totalProduced,
@@ -1447,6 +1601,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     firstPassYield,
     changeoverMin: changeoverMinAccum,
     downtimeMin: downtimeMinAccum,
+    perOrderCompletionTime,
     meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
     throughputPerHr: durationMin > 0 ? (totalProduced * 60) / durationMin : 0,
     blocks: blockObs,

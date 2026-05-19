@@ -22,7 +22,7 @@
  */
 
 import type { GarmentTemplate, Operation } from '../domain';
-import type { Twin, Workstation } from '../domain/twin';
+import { TWIN_SCHEMA_VERSION, type Twin, type Workstation } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
@@ -200,7 +200,7 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
  * so this never actually runs the engine.
  */
 export const EMPTY_TWIN: Twin = {
-  schemaVersion: 7,
+  schemaVersion: TWIN_SCHEMA_VERSION,
   id: 'empty',
   name: 'empty',
   parentTwinId: null,

@@ -53,6 +53,13 @@ export interface ReplicationResult {
   labourProductivity: number;
   /** Actual pph − demand pph; 0 when no demand was supplied. */
   demandTaktGap: number;
+  /** Cumulative changeover minutes during this replication. */
+  changeoverMin: number;
+  /** Cumulative breakdown / downtime minutes during this replication. */
+  downtimeMin: number;
+  /** Per-order completion time (minutes), keyed by Order.id. Empty when
+   *  no OrderSequence was active during this replication. */
+  perOrderCompletionTime: Record<string, number>;
 }
 
 export interface AggregateKpis {
@@ -72,6 +79,14 @@ export interface AggregateKpis {
   offStandardLossPct:{ mean: number; std: number };
   labourProductivity:{ mean: number; std: number };
   demandTaktGap:     { mean: number; std: number };
+  /** Total changeover minutes (mean ± std across replications). */
+  totalChangeoverMin: { mean: number; std: number };
+  /** Total downtime minutes (mean ± std across replications). */
+  totalDowntimeMin:   { mean: number; std: number };
+  /** Per-order completion time (mean ± std across replications). Keyed
+   *  by Order.id; only orders that completed (or partially completed) in
+   *  every replication are reported. */
+  perOrderCompletionTime: Record<string, { mean: number; std: number }>;
   /** Bottleneck name + queue from the run that produced the median throughput. */
   bottleneckOpName: string;
   bottleneckQueue: number;
@@ -239,6 +254,9 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
       offStandardLossPct: offStdLoss,
       labourProductivity: labourProd,
       demandTaktGap: taktGap,
+      changeoverMin: result.changeoverMin,
+      downtimeMin: result.downtimeMin,
+      perOrderCompletionTime: result.perOrderCompletionTime,
     });
   }
 
@@ -263,6 +281,9 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
     offStandardLossPct: meanStd(samples.map((s) => s.offStandardLossPct)),
     labourProductivity: meanStd(samples.map((s) => s.labourProductivity)),
     demandTaktGap:      meanStd(samples.map((s) => s.demandTaktGap)),
+    totalChangeoverMin: meanStd(samples.map((s) => s.changeoverMin)),
+    totalDowntimeMin:   meanStd(samples.map((s) => s.downtimeMin)),
+    perOrderCompletionTime: aggregatePerOrderTimes(samples.map((s) => s.perOrderCompletionTime)),
     bottleneckOpName: median?.bottleneckOpName ?? '—',
     bottleneckQueue:  median?.bottleneckQueue ?? 0,
     replications: samples,
@@ -270,6 +291,25 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
     averagedHistory: averageHistories(allHistories),
     firstStations,
   };
+}
+
+/** Union the per-replication order tables and compute mean ± std per
+ *  order. Orders that didn't complete in every replication still get a
+ *  mean — populated only from the replications where they did finish. */
+function aggregatePerOrderTimes(
+  perRep: Array<Record<string, number>>,
+): Record<string, { mean: number; std: number }> {
+  const collected = new Map<string, number[]>();
+  for (const rec of perRep) {
+    for (const [orderId, t] of Object.entries(rec)) {
+      const list = collected.get(orderId) ?? [];
+      list.push(t);
+      collected.set(orderId, list);
+    }
+  }
+  const out: Record<string, { mean: number; std: number }> = {};
+  for (const [orderId, list] of collected) out[orderId] = meanStd(list);
+  return out;
 }
 
 /**

@@ -14,7 +14,7 @@ import type { Operation, OperationCategory } from '../domain/operations';
 import type { MachineCode } from '../domain/machines';
 import type { SkillId } from '../domain/workers';
 import { useProject, useGarments } from '../store';
-import { useTwin } from '../store/twin';
+import { useTwin, selectActiveTwin } from '../store/twin';
 import type { ProductionSystemKey } from '../domain/twin';
 import { buildSeededDraftTwin } from '../lib/build-draft-twin';
 
@@ -161,7 +161,7 @@ export function OrdersPage() {
     project.setSelectedGarment(order.garmentTemplateId);
     project.setDefaultOperators(crewSize);
     project.setSelectedProductionSystem(system);
-    return project.addOrder({
+    const draft = project.addOrder({
       po: order.po,
       client: order.client,
       style: order.style,
@@ -171,6 +171,35 @@ export function OrdersPage() {
       operators: crewSize,
       productionSystem: system,
     });
+    // P4: also push a twin-level Order so the engine can see this order
+    // when running the active twin. Auto-pick the first line whose
+    // garment matches; lines added to this twin without a matching
+    // garmentId leave the order unassigned (lands in twin.orders[] but
+    // not in any orderSequence). Wrap in try/catch so an empty twin
+    // (no lines yet) doesn't break the project-store-only flow.
+    try {
+      const twinState = useTwin.getState();
+      const activeTwin = selectActiveTwin(twinState);
+      const matchedLine = activeTwin?.lines.find(
+        (l) => l.garmentId === order.garmentTemplateId,
+      );
+      twinState.addOrderToActiveTwin(
+        {
+          po: order.po,
+          client: order.client,
+          garmentId: order.garmentTemplateId,
+          quantity: order.qty,
+          priority: 1,
+          dueDate: order.deadlineDays
+            ? new Date(Date.now() + order.deadlineDays * 86_400_000).toISOString()
+            : undefined,
+        },
+        matchedLine?.id,
+      );
+    } catch {
+      // Best-effort — the project-store draft is the authoritative copy.
+    }
+    return draft;
   }
 
   const template = garments.byId[order.garmentTemplateId];
