@@ -15,6 +15,7 @@ import { useState } from 'react';
 import { Card } from './Card';
 import { ToggleGroup } from './ToggleGroup';
 import { HudSelect } from './HudSelect';
+import { QueueDisciplineGraphic } from './QueueDisciplineGraphic';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import type { StationView } from '../simulation';
 import { describeDist, meanOf, type ServiceDist, type QueueDiscipline } from '../simulation';
@@ -142,10 +143,7 @@ export function QueueAnalysisPanel({ station, onChange }: QueueAnalysisPanelProp
             value={station.serversTotal}
             min={1}
             step={1}
-            // Server count is derived from the line's operator budget via the
-            // LPT allocation in buildSimConfig — set it on the line config,
-            // not per-operation.
-            editable={false}
+            editable={editable}
             onChange={changeServers}
           />
           <CapacityField
@@ -161,6 +159,7 @@ export function QueueAnalysisPanel({ station, onChange }: QueueAnalysisPanelProp
             onChange={changeDiscipline}
           />
         </div>
+        <QueueDisciplineGraphic discipline={notation.discipline} />
       </section>
 
       {/* KPI comparison */}

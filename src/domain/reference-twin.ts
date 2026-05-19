@@ -532,7 +532,7 @@ export function buildGarmentTwin(
       kind: 'Service',
       params: {
         cycleS: Math.max(1, Math.round(op.smv * 60)),
-        servers: 1,
+        servers: Math.max(1, Math.round(op.servers ?? 1)),
       },
     };
     ws.operation = {
@@ -550,7 +550,7 @@ export function buildGarmentTwin(
       ...defaultPropsFor(catalogId),
       ...ws.props,
       cycle_s: Math.round(op.smv * 60),
-      servers: 1,
+      servers: Math.max(1, Math.round(op.servers ?? 1)),
     };
     workstations.push(ws);
     opStations.push(ws);

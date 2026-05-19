@@ -410,9 +410,14 @@ export function blocksInCategory(cat: PmlCategory): PmlBlockSpec[] {
 // not listed defaults via `inferBlockKindFromCategory`.
 
 const CATALOG_TO_BLOCK: Record<string, PmlBlockKind> = {
-  // Buffers / racks / queues
-  buf_in:           'Queue',
-  buf_out:          'Queue',
+  // Line heads / tails — `buf_in` always sits at the start of a flow and
+  // `buf_out` always at the end (intermediate buffers use `buf_wip` or
+  // `a_wip_rack`). Mapping them to Queue would leave the PML engine with
+  // no Source → no arrivals → all-zero KPIs in Reports/LiveSim. Treat the
+  // catalog ids as the lifecycle blocks they actually represent. Users can
+  // still override per-workstation via `block.kind` from the inspector.
+  buf_in:           'Source',
+  buf_out:          'Sink',
   buf_wip:          'Queue',
   a_wip_rack:       'Queue',
   a_fabric_rack:    'Queue',
