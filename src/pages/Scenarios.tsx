@@ -3,27 +3,34 @@ import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat } from '../componen
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, useGarments, type Scenario, type ScenarioKpis, type EffectiveGarments } from '../store';
+import { useTwin } from '../store/twin';
 import { formatDate } from '../lib/format';
 
 type Mode = 'list' | 'compare';
 
 /**
- * Scenarios page — saved factory configurations + their post-shift KPIs.
+ * Scenarios panel — saved factory configurations + their post-shift KPIs.
+ * Lives inside the Reports page as the fourth in-page tab. Stays exported as
+ * its own component so the deep-link `/scenarios` redirect doesn't have to
+ * wait for Reports to mount.
  *
  * - List mode: each scenario is a card. Load restores its config into the
- *   live project; Rename / Delete edit the row; Open opens it in Reports
- *   for a re-run.
+ *   live project; Rename / Delete edit the row.
  * - Compare mode: pick 2–4 scenarios; their KPIs land side-by-side as a
  *   bar table with the leader on each metric highlighted.
  *
  * Saving a scenario lives on the Reports page ("Save scenario" button) so
  * the captured KPIs come from a deterministic full-shift run.
+ *
+ * `embedded` mode drops the outer scroll wrapper + page-level SectionHeader
+ * so the panel mounts cleanly under the Reports tab bar.
  */
-export function ScenariosPage() {
+export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}) {
   const navigate = useNavigate();
   const project = useProject();
   const garments = useGarments();
   const scenarios = project.scenarios;
+  const createScenarioFromTwin = useTwin((s) => s.createScenarioFromTwin);
 
   const [mode, setMode] = useState<Mode>('list');
   const [selectedIds, setSelectedIds] = useState<string[]>([]);
@@ -40,8 +47,25 @@ export function ScenariosPage() {
   }
 
   function handleLoad(s: Scenario) {
-    if (!confirm(`Load "${s.name}"? This replaces the current factory's garment, operators, skill matrix and Yamazumi assignment.`)) return;
+    const hasTwin = !!s.config.twin;
+    const prompt = hasTwin
+      ? `Load "${s.name}"? This swaps in the saved factory layout and restores the garment, operators, skill matrix and Yamazumi assignment captured at save time.`
+      : `Load "${s.name}"? This replaces the current factory's garment, operators, skill matrix and Yamazumi assignment. (This scenario was saved before factory snapshots were supported — the floor layout won't change.)`;
+    if (!confirm(prompt)) return;
     project.loadScenario(s.id);
+    // Project scenarios saved after the twin-snapshot upgrade carry their
+    // own factory layout. Forge a fresh twin-store scenario from it and
+    // activate it so the simulator runs against the saved floor, not the
+    // current canonical. The original canonical stays put; users can flip
+    // back via the scenario picker in Builder.
+    if (s.config.twin) {
+      createScenarioFromTwin({
+        name: `Loaded · ${s.name}`,
+        notes: `Restored from saved scenario "${s.name}" (${formatDate(s.createdAt)})`,
+        twin: s.config.twin,
+        activate: true,
+      });
+    }
     navigate('/sim');
   }
 
@@ -64,25 +88,44 @@ export function ScenariosPage() {
     setRenameDraft('');
   }
 
-  return (
-    <div style={{ width: '100%', height: '100%', overflow: 'auto', background: SW_COLORS.paperDeep, padding: 32 }}>
-      <div style={{ maxWidth: 1240, margin: '0 auto' }}>
-        <SectionHeader
-          kicker="Scenarios"
-          title={scenarios.length === 0 ? 'No saved scenarios yet' : `${scenarios.length} saved scenario${scenarios.length === 1 ? '' : 's'}`}
-          sub="Save a sim run from Simulation as a named scenario, then compare scenarios side-by-side to find the layout / staffing / system that wins on the KPIs you care about."
-          right={
-            <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
-              <ToggleGroup value={mode} onChange={setMode} options={[
-                { value: 'list',    label: '◰ List' },
-                { value: 'compare', label: `◇ Compare${selected.length > 0 ? ` (${selected.length})` : ''}` },
-              ]}/>
-              <Button variant="primary" size="sm" icon="✦" onClick={() => navigate('/sim')}>
-                Run shift to save
-              </Button>
+  const body = (
+    <>
+        {embedded ? (
+          <div style={{ display: 'flex', alignItems: 'center', gap: 12, flexWrap: 'wrap', marginBottom: 14, paddingBottom: 12, borderBottom: `1px solid ${SW_COLORS.line}` }}>
+            <div style={{ flex: 1, minWidth: 220 }}>
+              <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, color: SW_COLORS.ink }}>
+                {scenarios.length === 0 ? 'No saved scenarios yet' : `${scenarios.length} saved scenario${scenarios.length === 1 ? '' : 's'}`}
+              </div>
+              <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 2 }}>
+                Save a sim run as a named scenario, then compare side-by-side to find the layout / staffing / system that wins on the KPIs you care about.
+              </div>
             </div>
-          }
-        />
+            <ToggleGroup value={mode} onChange={setMode} options={[
+              { value: 'list',    label: '◰ List' },
+              { value: 'compare', label: `◇ Compare${selected.length > 0 ? ` (${selected.length})` : ''}` },
+            ]}/>
+            <Button variant="primary" size="sm" icon="✦" onClick={() => navigate('/sim')}>
+              Run shift to save
+            </Button>
+          </div>
+        ) : (
+          <SectionHeader
+            kicker="Scenarios"
+            title={scenarios.length === 0 ? 'No saved scenarios yet' : `${scenarios.length} saved scenario${scenarios.length === 1 ? '' : 's'}`}
+            sub="Save a sim run from Simulation as a named scenario, then compare scenarios side-by-side to find the layout / staffing / system that wins on the KPIs you care about."
+            right={
+              <div style={{ display: 'flex', gap: 8, alignItems: 'center' }}>
+                <ToggleGroup value={mode} onChange={setMode} options={[
+                  { value: 'list',    label: '◰ List' },
+                  { value: 'compare', label: `◇ Compare${selected.length > 0 ? ` (${selected.length})` : ''}` },
+                ]}/>
+                <Button variant="primary" size="sm" icon="✦" onClick={() => navigate('/sim')}>
+                  Run shift to save
+                </Button>
+              </div>
+            }
+          />
+        )}
 
         {scenarios.length === 0 && (
           <Card padding={32} style={{ textAlign: 'center', marginTop: 24 }}>
@@ -201,10 +244,20 @@ export function ScenariosPage() {
             onPickMore={() => setMode('list')}
           />
         )}
-      </div>
+    </>
+  );
+
+  if (embedded) return <div>{body}</div>;
+  return (
+    <div style={{ width: '100%', height: '100%', overflow: 'auto', background: SW_COLORS.paperDeep, padding: 32 }}>
+      <div style={{ maxWidth: 1240, margin: '0 auto' }}>{body}</div>
     </div>
   );
 }
+
+/** Backwards-compatible alias — the old standalone /scenarios route still
+ *  resolves to this until the redirect in App.tsx fires. */
+export const ScenariosPage = ScenariosPanel;
 
 interface CompareViewProps {
   scenarios: Scenario[];
