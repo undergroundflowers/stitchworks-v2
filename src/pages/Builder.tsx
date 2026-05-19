@@ -1719,25 +1719,31 @@ export function BuilderPage() {
           touchAction: 'none',
         }}
       >
-        {/* Hint chip when a tool is armed */}
+        {/* Hint chip when a tool is armed. Sits below the top-left toolbar
+            row (Connect · canvas-mode · Controls) so the banner doesn't get
+            hidden behind those overlays. Subtle paper-on-ink styling so it
+            reads as guidance, not as the loud orange accent. */}
         {drop.kind !== 'none' && (
           <div
             style={{
               position: 'absolute',
-              top: 12,
+              top: 56,
               left: 12,
               zIndex: 5,
-              padding: '8px 12px',
-              background: SW_COLORS.brand,
-              color: '#fff',
-              fontFamily: SW_FONTS.display,
+              padding: '7px 11px',
+              background: SW_COLORS.paper + 'ee',
+              color: SW_COLORS.steel,
+              border: `1px solid ${SW_COLORS.line}`,
+              backdropFilter: 'blur(8px)',
+              WebkitBackdropFilter: 'blur(8px)',
+              fontFamily: SW_FONTS.body,
               fontSize: 11,
-              fontWeight: 900,
-              letterSpacing: '0.06em',
+              fontWeight: 600,
+              letterSpacing: '0.02em',
               borderRadius: 6,
             }}
           >
-            ✚{' '}
+            <span style={{ color: SW_COLORS.brand, fontWeight: 900, marginRight: 6 }}>✚</span>
             {drop.kind === 'dept'
               ? `Click canvas to place ${drop.preset.label}`
               : 'Click inside a department to place workstation'}
@@ -1748,20 +1754,24 @@ export function BuilderPage() {
           <div
             style={{
               position: 'absolute',
-              top: 12,
+              top: 56,
               left: 12,
               zIndex: 5,
-              padding: '8px 12px',
-              background: SW_COLORS.brand,
-              color: '#fff',
-              fontFamily: SW_FONTS.display,
+              padding: '7px 11px',
+              background: SW_COLORS.paper + 'ee',
+              color: SW_COLORS.steel,
+              border: `1px solid ${SW_COLORS.line}`,
+              backdropFilter: 'blur(8px)',
+              WebkitBackdropFilter: 'blur(8px)',
+              fontFamily: SW_FONTS.body,
               fontSize: 11,
-              fontWeight: 900,
-              letterSpacing: '0.06em',
+              fontWeight: 600,
+              letterSpacing: '0.02em',
               borderRadius: 6,
             }}
           >
-            ▭ Drag to select · ⇧+drag adds to selection · ⇧+click toggles a station · Esc or V to exit
+            <span style={{ color: SW_COLORS.brand, fontWeight: 900, marginRight: 6 }}>▭</span>
+            Drag to select · ⇧+drag adds to selection · ⇧+click toggles a station · Esc or V to exit
           </div>
         )}
 
@@ -1769,7 +1779,7 @@ export function BuilderPage() {
           <div
             style={{
               position: 'absolute',
-              top: 12,
+              top: 56,
               left: 12,
               zIndex: 5,
               padding: '8px 12px',
@@ -2026,7 +2036,7 @@ export function BuilderPage() {
             style={{ ...btnSec, padding: '4px 8px' }}
             title="Reset zoom & pan"
           >
-            ⤒
+            ⛶
           </button>
         </StageOverlay>
 
