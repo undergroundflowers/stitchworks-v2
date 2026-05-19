@@ -5,6 +5,7 @@ import { ROUTES, type RouteDef } from '../lib/routes';
 import type { GameState } from '../lib/game';
 import { useTabPrefs, type TabPref } from '../lib/tabPrefs';
 import { useProject } from '../store';
+import { useTwin } from '../store/twin';
 
 interface TopBarProps {
   game: GameState;
@@ -31,6 +32,12 @@ export function TopBar({ game }: TopBarProps) {
   const navigate = useNavigate();
   const location = useLocation();
   const factoryName = useProject((s) => s.meta.name) || game.factoryName;
+  const activeScenarioId = useTwin((s) => s.activeScenarioId);
+  const scenarioName = useTwin((s) =>
+    s.activeScenarioId === null
+      ? null
+      : s.scenarios.find((sc) => sc.id === s.activeScenarioId)?.name ?? null,
+  );
   const { get, toggleHidden, toggleLocked } = useTabPrefs();
 
   // Find the current route by matching the pathname; default to 'menu'.
@@ -132,38 +139,29 @@ export function TopBar({ game }: TopBarProps) {
 
       {!compact && <div style={{ width: 1, height: 24, background: '#ffffff20' }} />}
 
-      {/* Factory + settings icon */}
-      <div style={{ fontFamily: SW_FONTS.body, fontSize: 12, display: 'flex', alignItems: 'center', gap: narrow ? 6 : 8 }}>
-        {!narrow && <div style={{ fontWeight: 700, fontSize: 12 }}>{factoryName}</div>}
-        <button
-          onClick={() => navigate('/settings')}
-          aria-label="Settings"
-          title="Settings"
-          onMouseEnter={(e) => {
-            if (currentRoute !== 'settings') e.currentTarget.style.background = '#ffffff0a';
-          }}
-          onMouseLeave={(e) => {
-            if (currentRoute !== 'settings') e.currentTarget.style.background = 'transparent';
-          }}
-          style={{
-            background: currentRoute === 'settings' ? '#ffffff15' : 'transparent',
-            border: 'none',
-            cursor: 'pointer',
-            padding: 4,
-            width: 26,
-            height: 26,
-            display: 'inline-flex',
-            alignItems: 'center',
-            justifyContent: 'center',
-            color: currentRoute === 'settings' ? SW_COLORS.brand : '#ffffffcc',
-            fontSize: 14,
-            borderRadius: SW_RADIUS.sm,
-            transition: 'background 100ms',
-          }}
-        >
-          ⚙
-        </button>
-      </div>
+      {/* Factory + scenario */}
+      {!narrow && (
+        <div style={{ fontFamily: SW_FONTS.body, fontSize: 12, display: 'flex', flexDirection: 'column', gap: 1, minWidth: 0, maxWidth: 220 }}>
+          <div style={{ fontWeight: 700, fontSize: 12, whiteSpace: 'nowrap', overflow: 'hidden', textOverflow: 'ellipsis' }}>{factoryName}</div>
+          <div
+            style={{
+              fontSize: 10,
+              fontWeight: 600,
+              color: activeScenarioId === null ? '#ffffff55' : SW_COLORS.brand,
+              letterSpacing: '0.02em',
+              whiteSpace: 'nowrap',
+              overflow: 'hidden',
+              textOverflow: 'ellipsis',
+              lineHeight: 1.2,
+            }}
+            title={scenarioName ?? 'Canonical twin'}
+          >
+            {activeScenarioId === null
+              ? 'Canonical'
+              : scenarioName ?? 'Unnamed scenario'}
+          </div>
+        </div>
+      )}
 
       {/* Nav */}
       <div style={{ flex: 1, display: 'flex', justifyContent: 'center', alignItems: 'center', gap: narrow ? 0 : 2, minWidth: 0 }}>
@@ -298,6 +296,37 @@ export function TopBar({ game }: TopBarProps) {
         )}
       </div>
 
+      {/* Settings — pinned to the far right */}
+      <button
+        onClick={() => navigate('/settings')}
+        aria-label="Settings"
+        title="Settings"
+        onMouseEnter={(e) => {
+          if (currentRoute !== 'settings') e.currentTarget.style.background = '#ffffff10';
+        }}
+        onMouseLeave={(e) => {
+          if (currentRoute !== 'settings') e.currentTarget.style.background = 'transparent';
+        }}
+        style={{
+          background: currentRoute === 'settings' ? '#ffffff18' : 'transparent',
+          border: 'none',
+          cursor: 'pointer',
+          padding: 0,
+          width: 38,
+          height: 38,
+          display: 'inline-flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          color: currentRoute === 'settings' ? SW_COLORS.brand : '#ffffffcc',
+          fontSize: 22,
+          lineHeight: 1,
+          borderRadius: SW_RADIUS.sm,
+          transition: 'background 100ms',
+          flexShrink: 0,
+        }}
+      >
+        ⚙
+      </button>
     </div>
   );
 }

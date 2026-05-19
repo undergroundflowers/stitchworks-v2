@@ -16,18 +16,20 @@ import { useNavigate, useSearchParams } from 'react-router-dom';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Button, ToggleGroup, HudSelect, TimeDisplay, type HudSelectOption } from '../components';
 import {
-  buildSimConfig,
   buildSimConfigFromTwin,
   buildLinesFromTwin,
   efficiencyFromSkillMatrix,
-  useSim,
-  useMultiSim,
-  mergeSimStates,
-  mergeTwinMetas,
+  usePmlSim,
+  useMultiPmlSim,
+  mergePmlSimStates,
+  mergePmlTwinMetas,
+  scopedTwinForLine,
+  EMPTY_TWIN,
   type BuildFromTwinMeta,
   type SimState,
   type LineBuild,
   type StationView,
+  type PmlLineInput,
 } from '../simulation';
 import {
   fmtModelTime,
@@ -47,6 +49,7 @@ import { getBlockSpec, apparelRoleFor } from '../domain/pml';
 import {
   type DepartmentColorKey,
   type ProductionSystemKey,
+  type Twin,
   type Workstation,
 } from '../domain/twin';
 import { buildSeededDraftTwin } from '../lib/build-draft-twin';
@@ -106,6 +109,42 @@ type SimScope =
 function scopeToParam(s: SimScope): string {
   if (s.kind === 'factory') return 'factory';
   return `${s.kind}:${s.id}`;
+}
+
+/**
+ * Mutate every Source block in a twin to use `bundleSize` as its
+ * `piecesPerAgent`, rescaling `sourceRatePerHr` so the *piece* throughput
+ * stays constant — what the legacy engine did when the user picked a
+ * non-default BUNDLE in the HUD.
+ *
+ * Returns a shallow-cloned Twin (and shallow-cloned Source workstations)
+ * so we don't mutate the store's authoritative twin. Non-Source blocks
+ * are reused by reference.
+ */
+function overrideBundleSize(twin: import('./../domain/twin').Twin, bundleSize: number): import('./../domain/twin').Twin {
+  if (bundleSize <= 0) return twin;
+  let touched = false;
+  const workstations = twin.workstations.map((ws) => {
+    if (ws.block?.kind !== 'Source') return ws;
+    const existingPieces = (ws.block.params?.piecesPerAgent as number | undefined) ?? 1;
+    const existingRate = (ws.block.params?.sourceRatePerHr as number | undefined) ?? 60;
+    if (existingPieces === bundleSize) return ws;
+    touched = true;
+    // Keep pieces/hour constant: rate' = rate · (oldPieces / newPieces).
+    const newRate = (existingRate * existingPieces) / bundleSize;
+    return {
+      ...ws,
+      block: {
+        ...ws.block,
+        params: {
+          ...(ws.block.params ?? {}),
+          piecesPerAgent: bundleSize,
+          sourceRatePerHr: newRate,
+        },
+      },
+    };
+  });
+  return touched ? { ...twin, workstations } : twin;
 }
 
 interface SimHudStatProps {
@@ -272,30 +311,40 @@ export function LiveSimPage() {
     [project.skillMatrix, garment],
   );
 
-  const config = useMemo(() => {
-    if (twinBuild) {
-      // Honour the user's operator override by re-running the LPT
-      // distribution: scale the twin-seeded servers proportionally so the
-      // engine respects the slider without losing the twin's topology.
-      // Cheap approximation — keep stationServers as-is, just adjust
-      // arrivalRatePerHour by the worker ratio. The engine treats parallel
-      // servers as the binding constraint, so this is the honest knob.
-      const cfg = { ...twinBuild.config };
-      if (bundleOverride && bundleOverride > 0) {
-        cfg.bundleSize = bundleOverride;
-        const piecesPerHour = cfg.arrivalRatePerHour * twinBuild.config.bundleSize;
-        cfg.arrivalRatePerHour = piecesPerHour / bundleOverride;
-      }
-      return cfg;
+  // Resolve the sim-source twin. PML drives off a Twin (not a SimConfig),
+  // so each source (twin / reference / order / garment) materialises into
+  // one.
+  //   • Twin / reference path → the active twin (loadCanonical writes the
+  //     reference twin in-place, so by the time refOverride is set the
+  //     active twin is already the reference graph).
+  //   • Order / garment fallback → synthesise a single-line twin from the
+  //     chosen bulletin so PML has a Source → ops → Sink to run.
+  //
+  // When the user picks a non-default bundle size in the HUD, mutate every
+  // Source block's `piecesPerAgent` to match and rescale `sourceRatePerHr`
+  // so the *piece* throughput stays constant — same semantics the legacy
+  // engine had when bundleSize × arrivalRate stayed pinned.
+  //
+  // Empty-twin fallback keeps the hook call unconditional when no garment
+  // is available either.
+  const simSourceTwin = useMemo(() => {
+    let base: Twin;
+    if (useTwinSource || refOverride) {
+      base = selectedLineId
+        ? scopedTwinForLine(activeTwin, selectedLineId)
+        : activeTwin;
+    } else {
+      base = buildGarmentTwin(garment, effectiveOperators) ?? EMPTY_TWIN;
     }
-    return buildSimConfig({
-      garment,
-      operators: effectiveOperators,
-      opEfficiency,
-      bundleSize: systemBundleSize,
-      modelTimeUnit: project.time.modelTimeUnit,
-    });
-  }, [twinBuild, bundleOverride, garment, effectiveOperators, opEfficiency, systemBundleSize, project.time.modelTimeUnit]);
+    if (!bundleOverride || bundleOverride <= 0) return base;
+    return overrideBundleSize(base, bundleOverride);
+  }, [useTwinSource, refOverride, selectedLineId, activeTwin, garment, effectiveOperators, bundleOverride]);
+  // Captured for future PML wiring — neither flows into the engine today
+  // because the twin already encodes both. `systemBundleSize` is read by the
+  // HUD's BUNDLE chip; opEfficiency is mirrored back into the skill matrix
+  // store by the operator slider effect above.
+  void opEfficiency;
+  void systemBundleSize;
 
   // Re-seed the operator slider whenever the twin meta says the default has
   // changed (e.g. user edits Builder, returns to /sim). Skip when the user
@@ -328,19 +377,17 @@ export function LiveSimPage() {
     }
   }, [activeOrder]);
 
-  const baseSim = useSim(config);
+  const baseSim = usePmlSim(simSourceTwin, { garment });
 
   // ── Multi-line scope ────────────────────────────────────────────────────
   // When no specific line is selected and the twin has more than one wired
-  // line, we cannot honestly use the single-engine `baseSim` — the dominant-
-  // garment filter in buildSimConfigFromTwin drops every line whose garment
-  // template doesn't match the most common one (e.g. Line 2's woven shirt
-  // ops are skipped when Line 1's knit T-shirts win the vote).
+  // line, drive one PML run per line and merge the resulting states + metas
+  // into the same shape the existing views consume. Each per-line twin is
+  // scoped to that line's workstations so different garments / bundle sizes
+  // don't compose into one homogeneous simulation.
   //
-  // Instead, run one engine per line in parallel, then merge the per-line
-  // states + metas into the same shape the existing views consume.
-  // Lines actually included in this scope's run: factory = all wired,
-  // dept = wired lines whose deptId matches, line = none (single-engine path
+  // Lines actually included in this scope's run: factory = all wired, dept
+  // = wired lines whose deptId matches, line = none (single-engine path
   // handles it).
   const wiredLineBuilds = useMemo(() => {
     const ok = lineBuilds.filter((lb) => lb.ok);
@@ -350,22 +397,33 @@ export function LiveSimPage() {
   }, [lineBuilds, scope]);
   const inMultiLineScope =
     useTwinSource && scope.kind !== 'line' && wiredLineBuilds.length > 1;
-  const multiConfigs = useMemo(
-    () => (inMultiLineScope ? wiredLineBuilds.map((lb) => lb.build.config) : []),
-    [inMultiLineScope, wiredLineBuilds],
+  const multiInputs = useMemo<PmlLineInput[]>(
+    () =>
+      inMultiLineScope
+        ? wiredLineBuilds.map((lb) => ({
+            lineId: lb.line.id,
+            twin: scopedTwinForLine(activeTwin, lb.line.id),
+            garment: lb.build.meta.garment,
+          }))
+        : [],
+    [inMultiLineScope, wiredLineBuilds, activeTwin],
   );
-  const multiSim = useMultiSim(multiConfigs);
+  const multiSim = useMultiPmlSim(multiInputs);
   const multiLineIds = useMemo(
     () => wiredLineBuilds.map((lb) => lb.line.id),
     [wiredLineBuilds],
   );
+  const multiLineNames = useMemo(
+    () => wiredLineBuilds.map((lb) => lb.line.name),
+    [wiredLineBuilds],
+  );
   const mergedMultiState = useMemo<SimState>(
-    () => mergeSimStates(multiSim.states, multiLineIds),
+    () => mergePmlSimStates(multiSim.states, multiLineIds),
     [multiSim.states, multiLineIds],
   );
   const mergedMultiMeta = useMemo<BuildFromTwinMeta | null>(
-    () => mergeTwinMetas(wiredLineBuilds),
-    [wiredLineBuilds],
+    () => mergePmlTwinMetas(multiSim.views, multiLineIds, multiLineNames),
+    [multiSim.views, multiLineIds, multiLineNames],
   );
 
   // Single set of {state, transport, meta} the rest of the page reads from.
@@ -555,10 +613,13 @@ export function LiveSimPage() {
       }
       return total;
     }
+    // Single-line scope: scale the engine's bundle-throughput by the active
+    // bundle size (twin-derived seed for twin source, system default otherwise).
+    const singleBundle = twinBuild?.meta.seedBundleSize ?? systemBundleSize ?? 1;
     return state.history.length > 0
-      ? state.history[state.history.length - 1].throughputPerHr * config.bundleSize
+      ? state.history[state.history.length - 1].throughputPerHr * singleBundle
       : 0;
-  }, [inMultiLineScope, multiSim.states, wiredLineBuilds, state.history, config.bundleSize]);
+  }, [inMultiLineScope, multiSim.states, wiredLineBuilds, state.history, twinBuild, systemBundleSize]);
 
   const efficiencyPct = Math.round(state.utilization * 100);
 

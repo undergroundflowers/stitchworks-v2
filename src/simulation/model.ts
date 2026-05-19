@@ -7,7 +7,7 @@
  */
 
 import type { GarmentTemplate } from '../domain';
-import type { SimConfig } from './engine';
+import type { SimConfig } from './sim-state';
 import type { ServiceDist, QueueDiscipline } from './index';
 import type { ModelTimeUnit } from './timeUnit';
 

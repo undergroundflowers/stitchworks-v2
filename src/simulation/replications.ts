@@ -1,16 +1,21 @@
 /**
- * Replication runner — runs the same SimConfig N times with different
- * seeds and returns mean + standard deviation for each KPI. Lets the UI
- * report point estimates *and* uncertainty ranges (Sommerfeld 1990
- * baseline says ~15 % per-op stochasticism, so single-seed runs can be
- * 10–20 % off the long-run mean).
+ * Replication runner — runs the PML engine N times on the same twin with
+ * different RNG seeds and returns mean + standard deviation for each KPI.
  *
- * Each replication is a deterministic full-shift run, executed
- * synchronously. With N = 10 and a 480-min shift, total wall-clock is
- * usually well under a second on the kind of bulletins we ship.
+ * Each replication is a deterministic full-shift run, executed synchronously.
+ * With N = 10 and a 480-min shift, total wall-clock is usually well under
+ * a second on the bulletins this app ships.
+ *
+ * History timeseries in the result are downsampled to 5-minute bins so the
+ * existing charts (which were originally driven by the legacy engine's
+ * fixed 5-min cadence) keep their visual shape.
  */
 
-import { Sim, type SimConfig, type HistoryPoint, type StationView } from './engine';
+import type { Twin } from '../domain/twin';
+import type { GarmentTemplate } from '../domain';
+import { runPmlSim, type PmlSimResult } from './pml-engine';
+import { buildPmlTwinView, pmlSampleToSimState } from './pml-to-sim-state';
+import type { HistoryPoint, StationView } from './sim-state';
 
 export interface ReplicationResult {
   seed: number;
@@ -41,73 +46,95 @@ export interface AggregateKpis {
   /** History from the first replication so the page can still chart output-over-time. */
   firstHistory: HistoryPoint[];
   /** Replication-averaged history — same length as firstHistory, with each
-   *  field (produced, wip, throughputPerHr) averaged across all N runs at
-   *  the matching sample index. With N=1 this is identical to firstHistory.
-   *  Lets charts surface an expected-shape curve instead of a single
-   *  potentially-noisy trace. */
+   *  field averaged across all N runs at the matching sample index. */
   averagedHistory: HistoryPoint[];
   /** Stations from the first replication. */
   firstStations: StationView[];
 }
 
-/**
- * Run `replications` independent shifts of `config` for `simMinutes`
- * sim-minutes each. Each replication uses `config.randomSeed + i`.
- */
-export function runReplications(opts: {
-  config: SimConfig;
+export interface RunReplicationsOpts {
+  /** Twin to simulate. Each replication runs the PML engine on this twin
+   *  with `seed + i`. Use `scopedTwinForLine(activeTwin, lineId)` to run
+   *  one sewing line at a time when comparing per-line KPIs. */
+  twin: Twin;
+  /** Number of independent replications. Clamped to >= 1. */
   replications: number;
+  /** Sim duration per replication in MINUTES. Default 480 (one 8h shift). */
   simMinutes: number;
-}): AggregateKpis {
-  const { config, replications, simMinutes } = opts;
+  /** Base RNG seed; replication i uses `seed + i`. Default 42. */
+  seed?: number;
+  /** Optional bulletin — passed through to the adapter so per-station
+   *  labels (opName, opCode, machineCode) survive into the result. */
+  garment?: GarmentTemplate;
+  /** Operators across the line. Used only for the efficiency calc; if
+   *  omitted, the sum of `serversTotal` across the first run's stations
+   *  is used. Set this when running a synthetic garment twin so the
+   *  efficiency denominator matches the user's slider. */
+  operatorsOverride?: number;
+}
+
+/**
+ * Run `replications` independent shifts of `twin` for `simMinutes` minutes
+ * each. Wraps `runPmlSim` per replication and aggregates KPIs.
+ */
+export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
+  const { twin, replications, simMinutes, seed = 42, garment } = opts;
   const n = Math.max(1, Math.floor(replications));
   const samples: ReplicationResult[] = [];
   let firstHistory: HistoryPoint[] = [];
   let firstStations: StationView[] = [];
   const allHistories: HistoryPoint[][] = [];
 
+  // Static twin view memoised across replications — block metadata is
+  // identical across seeds, only the sample timeseries varies.
+  const view = buildPmlTwinView(twin, garment);
+
   for (let i = 0; i < n; i++) {
-    const sim = new Sim({ ...config, randomSeed: config.randomSeed + i });
-    sim.runUntil(simMinutes);
-    const snap = sim.snapshot();
-    if (i === 0) {
-      firstHistory = snap.history;
-      firstStations = snap.stations;
+    const result: PmlSimResult = runPmlSim({
+      twin,
+      durationMin: simMinutes,
+      seed: seed + i,
+      samplePeriodMin: 5,
+    });
+    const lastSample = result.samples[result.samples.length - 1];
+    // Map the final sample to a SimState so the page can still read
+    // history[], stations[], bottleneckOpIndex without per-engine branches.
+    const state = lastSample
+      ? pmlSampleToSimState(view, lastSample, result, result.samples)
+      : null;
+    if (state) {
+      if (i === 0) {
+        firstHistory = state.history;
+        firstStations = state.stations;
+      }
+      allHistories.push(state.history);
     }
-    allHistories.push(snap.history);
-    // Efficiency = SAM consumed / available operator minutes.
-    // ASSUMES: (a) SMV is per-piece (engine now enforces this in
-    // beginService, where bundle.pieces × per-piece SMV gives bundle
-    // service time), and (b) every piece traverses every operation
-    // exactly once — i.e. linear bulletin, no parallel paths or skips.
-    // If routing branches are added later, switch to a per-station sum:
-    //   samConsumed = Σ_station (produced_station × station.smv)
-    const samConsumed = snap.producedPieces *
-      config.operations.reduce((s, o) => s + o.smv, 0);
-    const operators = config.stationServers.reduce((s, c) => s + c, 0);
-    const efficiencyPct = operators > 0
-      ? (samConsumed / (operators * simMinutes)) * 100
+    const operators =
+      opts.operatorsOverride
+      ?? (state?.stations.reduce((s, st) => s + st.serversTotal, 0) ?? 1);
+    // Efficiency = SAM consumed / available operator minutes. SAM consumed
+    // is approximated by Σ(producedPieces · smv) across stations — accurate
+    // for linear bulletins where every piece traverses every op once.
+    const samConsumed = state
+      ? state.stations.reduce((s, st) => s + st.produced * st.smv, 0)
       : 0;
-    const throughputPerHr = simMinutes > 0
-      ? (snap.producedPieces / simMinutes) * 60
-      : 0;
-    const wipBundles = snap.totalArrivals - snap.produced;
-    const bottleneck = snap.stations[snap.bottleneckOpIndex];
+    const efficiencyPct = operators > 0 ? (samConsumed / (operators * simMinutes)) * 100 : 0;
+    const throughputPerHr = simMinutes > 0 ? (result.totalProduced / simMinutes) * 60 : 0;
+    const wipBundles = state ? state.totalArrivals - state.produced : 0;
+    const bottleneck = state?.stations[state.bottleneckOpIndex];
     samples.push({
-      seed: config.randomSeed + i,
-      producedPieces:   snap.producedPieces,
+      seed: seed + i,
+      producedPieces: result.totalProduced,
       throughputPerHr,
       efficiencyPct,
-      meanLeadTime:     snap.meanLeadTime,
-      utilization:      snap.utilization,
+      meanLeadTime: result.meanLeadTimeMin,
+      utilization: state?.utilization ?? 0,
       wipBundles,
       bottleneckOpName: bottleneck?.opName ?? '—',
-      bottleneckQueue:  bottleneck?.queueLen ?? 0,
+      bottleneckQueue: bottleneck?.queueLen ?? 0,
     });
   }
 
-  // Pick the bottleneck label from the median-throughput replication —
-  // this is more representative than min or max.
   const sortedByThroughput = [...samples].sort(
     (a, b) => a.throughputPerHr - b.throughputPerHr,
   );
@@ -121,8 +148,8 @@ export function runReplications(opts: {
     meanLeadTime:    meanStd(samples.map((s) => s.meanLeadTime)),
     utilization:     meanStd(samples.map((s) => s.utilization)),
     wipBundles:      meanStd(samples.map((s) => s.wipBundles)),
-    bottleneckOpName: median.bottleneckOpName,
-    bottleneckQueue:  median.bottleneckQueue,
+    bottleneckOpName: median?.bottleneckOpName ?? '—',
+    bottleneckQueue:  median?.bottleneckQueue ?? 0,
     replications: samples,
     firstHistory,
     averagedHistory: averageHistories(allHistories),
@@ -132,9 +159,8 @@ export function runReplications(opts: {
 
 /**
  * Pointwise average across N replication history series. All replications
- * sample at the same cadence (engine fixed at every 5 sim-minutes), so we
- * align by index up to the shortest series' length. With N=1 this returns
- * the single series unchanged.
+ * sample at the same cadence (5 sim-min), so we align by index up to the
+ * shortest series' length.
  */
 function averageHistories(histories: HistoryPoint[][]): HistoryPoint[] {
   if (histories.length === 0) return [];

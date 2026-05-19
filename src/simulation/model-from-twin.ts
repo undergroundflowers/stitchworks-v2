@@ -18,7 +18,7 @@
 
 import type { GarmentTemplate, Operation } from '../domain';
 import type { Twin, Workstation, SewingLine } from '../domain/twin';
-import type { SimConfig } from './engine';
+import type { SimConfig } from './sim-state';
 import type { ServiceDist, QueueDiscipline } from './index';
 import type { ModelTimeUnit } from './timeUnit';
 
