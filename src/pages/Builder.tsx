@@ -1942,12 +1942,25 @@ export function BuilderPage() {
             twin={twin}
             selected={selected}
             onSelect={setSelected}
+            drop={drop}
+            setDrop={setDrop}
+            connect={connect}
+            setConnect={setConnect}
+            addDepartment={addDepartment}
+            moveDepartment={moveDepartment}
+            addConnector={addConnector}
           />
         ) : (
           <BuilderProcessView
             twin={twin}
             selected={selected}
             onSelect={setSelected}
+            drop={drop}
+            setDrop={setDrop}
+            addDepartment={addDepartment}
+            addWorkstation={addWorkstation}
+            moveWorkstation={moveWorkstation}
+            updateWorkstation={updateWorkstation}
             connect={connect}
             zoom={zoom}
             pan={pan}
@@ -3507,9 +3520,36 @@ interface BuilderLogicViewProps {
   twin: ReturnType<typeof selectActiveTwin>;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
   onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
+  /** Active drop tool. When `kind === 'dept'`, clicking the LOGIC canvas
+   *  drops a new department into iso space; the LOGIC view then re-renders
+   *  it as a flow card. `kind === 'ws'` falls through (workstations are
+   *  authored from PROCESS / ISO since LOGIC is dept-level). */
+  drop: DropTool;
+  /** Connect-tool state — wired to the same store the ISO and PROCESS
+   *  views use. In LOGIC, clicking dept A then dept B with this on
+   *  synthesises a connector between their representative workstations. */
+  connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null; fromPort: string | null };
+  setConnect: React.Dispatch<React.SetStateAction<{ on: boolean; kind: ConnectorKind; fromWsId: string | null; fromPort: string | null }>>;
+  /** Twin-store actions surfaced here so the LOGIC view can author. */
+  addDepartment: (input: Omit<Department, 'id'>) => string;
+  moveDepartment: (id: string, bounds: Department['bounds']) => void;
+  addConnector: (input: Omit<Connector, 'id'>) => string;
+  /** Acknowledge drop completion (clear the armed tool). */
+  setDrop: React.Dispatch<React.SetStateAction<DropTool>>;
 }
 
-function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
+function BuilderLogicView({
+  twin,
+  selected,
+  onSelect,
+  drop,
+  connect,
+  setConnect,
+  addDepartment,
+  moveDepartment,
+  addConnector,
+  setDrop,
+}: BuilderLogicViewProps) {
   const ordered = [...twin.departments].sort((a, b) => {
     if (a.bounds.y !== b.bounds.y) return a.bounds.y - b.bounds.y;
     return a.bounds.x - b.bounds.x;
@@ -3565,6 +3605,148 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
     return { x: 40 + col * colStep, y: 70 + row * rowStep, col, row };
   });
 
+  // ── Drop-to-place ───────────────────────────────────────────────────────
+  // When `drop.kind === 'dept'`, clicking the LOGIC canvas drops a new
+  // department at the end of the iso reading order. We don't need a hover
+  // cell here because the LOGIC layout is order-based, not position-based —
+  // the new card just appears after the existing ones. Iso bounds are
+  // placed in the next free row/column on the floor so the ISO view also
+  // renders the new dept somewhere sensible.
+  const isoNextSlot = useMemo(() => {
+    if (twin.departments.length === 0) return { x: 1, y: 1 };
+    const maxRight = Math.max(
+      ...twin.departments.map((d) => d.bounds.x + d.bounds.w),
+    );
+    const minY = Math.min(...twin.departments.map((d) => d.bounds.y));
+    return { x: maxRight + 2, y: minY };
+  }, [twin.departments]);
+
+  const handleDropDept = () => {
+    if (drop.kind !== 'dept') return;
+    const id = addDepartment({
+      name:
+        drop.preset.label +
+        ' ' +
+        (twin.departments.filter((d) => d.kind === drop.preset.kind).length + 1),
+      kind: drop.preset.kind,
+      color: drop.preset.color,
+      bounds: {
+        x: isoNextSlot.x,
+        y: isoNextSlot.y,
+        w: drop.preset.defaultSize.w,
+        h: drop.preset.defaultSize.h,
+      },
+    });
+    onSelect({ kind: 'dept', id });
+    setDrop({ kind: 'none' });
+  };
+
+  // ── Connect mode (dept → dept) ──────────────────────────────────────────
+  // LOGIC connect represents flow between departments by adding a
+  // connector between a representative workstation in each (first WS by
+  // iso reading order). If either dept has no stations, the click is a
+  // no-op with a hint shown via the connect-mode banner.
+  const repWs = (deptId: string): Workstation | undefined => {
+    const inDept = twin.workstations
+      .filter((w) => w.deptId === deptId)
+      .sort((a, b) => a.position.y - b.position.y || a.position.x - b.position.x);
+    return inDept[0];
+  };
+  const handleConnectDept = (deptId: string) => {
+    if (!connect.on) return false;
+    const rep = repWs(deptId);
+    if (!rep) return true;
+    if (connect.fromWsId === null) {
+      const fromPort = getBlockSpec(rep).outputs[0]?.id ?? null;
+      setConnect((c) => ({ ...c, fromWsId: rep.id, fromPort }));
+      return true;
+    }
+    if (connect.fromWsId === rep.id) return true;
+    const tgtSpec = getBlockSpec(rep);
+    addConnector({
+      kind: connect.kind,
+      fromWsId: connect.fromWsId,
+      toWsId: rep.id,
+      fromPort: connect.fromPort ?? undefined,
+      toPort: tgtSpec.inputs[0]?.id,
+    });
+    const nextFromPort = tgtSpec.outputs[0]?.id ?? null;
+    setConnect((c) => ({ ...c, fromWsId: rep.id, fromPort: nextFromPort }));
+    return true;
+  };
+
+  // ── Card drag (LOGIC reorder) ──────────────────────────────────────────
+  // Dragging a card in LOGIC re-targets the dept's iso `bounds.y` so the
+  // reading-order sort (by y then x) reflects the dropped slot. This
+  // doesn't change the iso position dramatically — we slot the dragged
+  // dept's y between its new neighbours' iso y values.
+  const [dragDeptId, setDragDeptId] = useState<string | null>(null);
+  const [dragOffset, setDragOffset] = useState<{ x: number; y: number }>({ x: 0, y: 0 });
+  const [dragPos, setDragPos] = useState<{ x: number; y: number } | null>(null);
+
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const screenToSvg = (clientX: number, clientY: number) => {
+    const el = svgRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const ctm = el.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    const inv = ctm.inverse();
+    const pt = el.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    const t = pt.matrixTransform(inv);
+    return { x: (t.x - pan.x) / zoom, y: (t.y - pan.y) / zoom };
+  };
+
+  const beginCardDrag = (d: Department, p: { x: number; y: number }, e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const start = screenToSvg(e.clientX, e.clientY);
+    setDragDeptId(d.id);
+    setDragOffset({ x: start.x - p.x, y: start.y - p.y });
+    setDragPos({ x: p.x, y: p.y });
+    let didMove = false;
+    const move = (ev: MouseEvent) => {
+      const w = screenToSvg(ev.clientX, ev.clientY);
+      didMove = true;
+      setDragPos({ x: w.x - (start.x - p.x), y: w.y - (start.y - p.y) });
+    };
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      const endPos = (() => {
+        const w = screenToSvg(ev.clientX, ev.clientY);
+        return { x: w.x - (start.x - p.x), y: w.y - (start.y - p.y) };
+      })();
+      setDragDeptId(null);
+      setDragPos(null);
+      if (!didMove) {
+        onSelect({ kind: 'dept', id: d.id });
+        return;
+      }
+      // Compute which slot the drop landed in and reorder iso y to match.
+      const centerX = endPos.x + CARD_W / 2;
+      const centerY = endPos.y + CARD_H / 2;
+      const col = Math.max(0, Math.min(cols - 1, Math.round((centerX - 40) / colStep)));
+      const row = Math.max(0, Math.round((centerY - 70) / rowStep));
+      const targetIdx = Math.min(ordered.length - 1, row * cols + col);
+      const currentIdx = ordered.findIndex((x) => x.id === d.id);
+      if (targetIdx === currentIdx) return;
+      // Build a new ordering with the dragged dept moved into the target slot.
+      const reordered = ordered.filter((x) => x.id !== d.id);
+      reordered.splice(targetIdx, 0, d);
+      // Re-stripe iso bounds.y in ascending order; preserves bounds.x of each.
+      const baseY = Math.min(...twin.departments.map((dd) => dd.bounds.y));
+      let y = baseY;
+      reordered.forEach((dd) => {
+        moveDepartment(dd.id, { ...dd.bounds, y, x: dd.bounds.x });
+        y += dd.bounds.h + 2;
+      });
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
   return (
     <div
       ref={containerRef}
@@ -3578,17 +3760,38 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
           'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px)',
         backgroundSize: '24px 24px',
         touchAction: 'none',
+        cursor:
+          drop.kind === 'dept'
+            ? 'crosshair'
+            : connect.on
+              ? 'crosshair'
+              : dragDeptId
+                ? 'grabbing'
+                : 'default',
       }}
       onClick={(e) => {
-        // Click on background clears selection
-        if (e.target === e.currentTarget) onSelect(null);
+        if (e.target !== e.currentTarget) return;
+        if (drop.kind === 'dept') {
+          handleDropDept();
+          return;
+        }
+        onSelect(null);
       }}
     >
       <svg
+        ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="xMidYMid meet"
         style={{ width: '100%', height: '100%', display: 'block' }}
-        onClick={() => onSelect(null)}
+        onClick={(e) => {
+          // Distinguish background SVG clicks from clicks on children.
+          if (e.target !== e.currentTarget) return;
+          if (drop.kind === 'dept') {
+            handleDropDept();
+            return;
+          }
+          onSelect(null);
+        }}
       >
         <defs>
           <marker
@@ -3658,6 +3861,12 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
           const stations = twin.workstations.filter((w) => w.deptId === d.id);
           const accent = DEPT_COLOR_HEX[d.color];
           const isSelected = selected?.kind === 'dept' && selected.id === d.id;
+          const isDragging = dragDeptId === d.id;
+          const isConnectFrom =
+            connect.on &&
+            connect.fromWsId !== null &&
+            twin.workstations.find((w) => w.id === connect.fromWsId)?.deptId === d.id;
+          const renderPos = isDragging && dragPos ? dragPos : p;
 
           // Group stations by catalog id for a "what's in this dept" summary.
           const byCatalog: Record<string, number> = {};
@@ -3669,13 +3878,35 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
           return (
             <g
               key={d.id}
-              transform={`translate(${p.x}, ${p.y})`}
+              transform={`translate(${renderPos.x}, ${renderPos.y})`}
+              onMouseDown={(e) => {
+                if (drop.kind !== 'none') return;
+                if (connect.on) return;
+                beginCardDrag(d, p, e);
+              }}
               onClick={(e) => {
                 e.stopPropagation();
+                if (handleConnectDept(d.id)) return;
                 onSelect({ kind: 'dept', id: d.id });
               }}
-              style={{ cursor: 'pointer' }}
+              style={{
+                cursor: connect.on ? 'crosshair' : isDragging ? 'grabbing' : 'grab',
+                opacity: isDragging ? 0.7 : 1,
+              }}
             >
+              {isConnectFrom && (
+                <rect
+                  x={-6}
+                  y={-6}
+                  width={CARD_W + 12}
+                  height={CARD_H + 12}
+                  rx={10}
+                  fill="none"
+                  stroke={SW_COLORS.brand}
+                  strokeWidth={2}
+                  strokeDasharray="4 4"
+                />
+              )}
               <rect
                 x={0}
                 y={0}
@@ -3802,7 +4033,7 @@ function BuilderLogicView({ twin, selected, onSelect }: BuilderLogicViewProps) {
             fontSize={14}
             fill={SW_COLORS.muted}
           >
-            No departments authored yet — switch to ISO mode to drop one in.
+            No departments authored yet — pick a department from the palette and click anywhere.
           </text>
         )}
 
@@ -3856,6 +4087,23 @@ interface BuilderProcessViewProps {
   twin: ReturnType<typeof selectActiveTwin>;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
   onSelect: (s: { kind: 'dept' | 'ws'; id: string } | null) => void;
+  /** Active drop tool. `kind === 'ws'` makes a click in any dept lane
+   *  drop a new workstation in that dept. `kind === 'dept'` makes a
+   *  click anywhere create a new department (so authoring parity with
+   *  ISO / LOGIC is possible from PROCESS too). */
+  drop: DropTool;
+  setDrop: React.Dispatch<React.SetStateAction<DropTool>>;
+  /** Twin-store mutators surfaced for authoring from this view. */
+  addDepartment: (input: Omit<Department, 'id'>) => string;
+  addWorkstation: (input: {
+    deptId: string;
+    catalogId: string;
+    position: { x: number; y: number };
+    presetLabel?: string;
+    blockParams?: Record<string, unknown>;
+  }) => string;
+  moveWorkstation: (id: string, position: { x: number; y: number }) => void;
+  updateWorkstation: (id: string, patch: Partial<Workstation>) => void;
   /** Active CONNECT-tool state. When `on` is true, port dots become
    *  clickable and the cursor switches to crosshair. */
   connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null; fromPort: string | null };
@@ -3916,6 +4164,12 @@ function BuilderProcessView({
   twin,
   selected,
   onSelect,
+  drop,
+  setDrop,
+  addDepartment,
+  addWorkstation,
+  moveWorkstation,
+  updateWorkstation,
   connect,
   onPickFromPort,
   onPickToPort,
@@ -4080,6 +4334,178 @@ function BuilderProcessView({
     onZoom((z) => clampZoom(z * factor));
   };
 
+  // ── Drop-to-place (PROCESS) ─────────────────────────────────────────────
+  // Clicking inside a department lane while a ws drop tool is armed adds a
+  // new workstation to that dept. Iso position is placed inside the dept's
+  // iso bounds so the ISO view also reflects the new station. The PROCESS
+  // lane re-sorts by ws.position.x, so we push the new station to the
+  // right end by using `bounds.x + bounds.w - 1` (clamped to >= bounds.x).
+  const handleDropWsInDept = (deptId: string) => {
+    if (drop.kind !== 'ws') return false;
+    const dept = twin.departments.find((d) => d.id === deptId);
+    if (!dept) return false;
+    const occupied = twin.workstations.filter((w) => w.deptId === deptId);
+    const nextX = Math.max(
+      dept.bounds.x,
+      Math.min(
+        dept.bounds.x + dept.bounds.w - 1,
+        occupied.length > 0
+          ? Math.max(...occupied.map((w) => w.position.x)) + 1
+          : dept.bounds.x,
+      ),
+    );
+    const nextY = Math.max(
+      dept.bounds.y,
+      Math.min(dept.bounds.y + dept.bounds.h - 1, dept.bounds.y),
+    );
+    const preset = drop.presetId ? findApparelPreset(drop.presetId) : null;
+    const id = addWorkstation({
+      deptId,
+      catalogId: drop.catalogId,
+      position: { x: nextX, y: nextY },
+      presetLabel: preset?.label,
+      blockParams: preset?.defaultParams,
+    });
+    onSelect({ kind: 'ws', id });
+    setDrop({ kind: 'none' });
+    return true;
+  };
+
+  // Drop a department from the PROCESS canvas — used when the user has the
+  // dept tool armed but the cursor isn't over a dept lane. Mirrors the
+  // LOGIC drop: places the new dept at the next iso slot.
+  const handleDropDept = () => {
+    if (drop.kind !== 'dept') return false;
+    const maxRight =
+      twin.departments.length === 0
+        ? 0
+        : Math.max(...twin.departments.map((d) => d.bounds.x + d.bounds.w));
+    const minY =
+      twin.departments.length === 0
+        ? 1
+        : Math.min(...twin.departments.map((d) => d.bounds.y));
+    const id = addDepartment({
+      name:
+        drop.preset.label +
+        ' ' +
+        (twin.departments.filter((d) => d.kind === drop.preset.kind).length + 1),
+      kind: drop.preset.kind,
+      color: drop.preset.color,
+      bounds: {
+        x: maxRight + 2,
+        y: minY,
+        w: drop.preset.defaultSize.w,
+        h: drop.preset.defaultSize.h,
+      },
+    });
+    onSelect({ kind: 'dept', id });
+    setDrop({ kind: 'none' });
+    return true;
+  };
+
+  // ── Block drag (PROCESS reorder / re-assign) ───────────────────────────
+  // Dragging a block sideways within a lane reorders it (by writing a new
+  // position.x that interlieves between neighbours). Dragging it into a
+  // different lane reassigns its deptId. Position values are sub-cell so
+  // the ISO layout doesn't visibly jump — the lane resort picks them up.
+  const [dragWsId, setDragWsId] = useState<string | null>(null);
+  const [dragNodePos, setDragNodePos] = useState<{ x: number; y: number } | null>(null);
+
+  const svgRef = useRef<SVGSVGElement | null>(null);
+  const screenToSvg = (clientX: number, clientY: number) => {
+    const el = svgRef.current;
+    if (!el) return { x: 0, y: 0 };
+    const ctm = el.getScreenCTM();
+    if (!ctm) return { x: 0, y: 0 };
+    const inv = ctm.inverse();
+    const pt = el.createSVGPoint();
+    pt.x = clientX;
+    pt.y = clientY;
+    return pt.matrixTransform(inv);
+  };
+
+  // Compute the dept whose lane vertically contains `svgY` — used to
+  // decide which lane a dropped block lands in.
+  const laneOfY = (svgY: number): string | null => {
+    let y = PAD_TOP;
+    for (const d of ordered) {
+      const laneH = BLOCK_H + LANE_PAD_TOP + LANE_GAP;
+      if (svgY >= y && svgY < y + laneH) return d.id;
+      y += laneH;
+    }
+    return null;
+  };
+
+  const beginBlockDrag = (node: ProcessNode, e: React.MouseEvent) => {
+    e.stopPropagation();
+    e.preventDefault();
+    const start = screenToSvg(e.clientX, e.clientY);
+    const offX = start.x - node.x;
+    const offY = start.y - node.y;
+    setDragWsId(node.ws.id);
+    setDragNodePos({ x: node.x, y: node.y });
+    let didMove = false;
+    const move = (ev: MouseEvent) => {
+      const w = screenToSvg(ev.clientX, ev.clientY);
+      didMove = true;
+      setDragNodePos({ x: w.x - offX, y: w.y - offY });
+    };
+    const up = (ev: MouseEvent) => {
+      window.removeEventListener('mousemove', move);
+      window.removeEventListener('mouseup', up);
+      setDragWsId(null);
+      const w = screenToSvg(ev.clientX, ev.clientY);
+      const endY = w.y - offY + BLOCK_H / 2;
+      const endX = w.x - offX + BLOCK_W / 2;
+      setDragNodePos(null);
+      if (!didMove) {
+        onSelect({ kind: 'ws', id: node.ws.id });
+        return;
+      }
+      const tgtDeptId = laneOfY(endY);
+      if (!tgtDeptId) return;
+      const tgtDept = twin.departments.find((dd) => dd.id === tgtDeptId);
+      if (!tgtDept) return;
+      // Map svg-x to a slot among tgt-lane blocks; use slot to derive a
+      // new iso position.x interlieved between neighbours so the lane
+      // re-sort lands the block where the user dropped it.
+      const tgtBlocks = flowNodes
+        .filter((n) => n.ws.deptId === tgtDeptId && n.ws.id !== node.ws.id)
+        .sort((a, b) => a.ws.position.x - b.ws.position.x);
+      let slot = tgtBlocks.findIndex(
+        (n) => endX < PAD_X + (tgtBlocks.indexOf(n) + 0.5) * (BLOCK_W + GAP_X),
+      );
+      if (slot < 0) slot = tgtBlocks.length;
+      let newPosX: number;
+      if (tgtBlocks.length === 0) {
+        newPosX = tgtDept.bounds.x;
+      } else if (slot === 0) {
+        newPosX = tgtBlocks[0].ws.position.x - 1;
+      } else if (slot >= tgtBlocks.length) {
+        newPosX = tgtBlocks[tgtBlocks.length - 1].ws.position.x + 1;
+      } else {
+        const a = tgtBlocks[slot - 1].ws.position.x;
+        const b = tgtBlocks[slot].ws.position.x;
+        newPosX = (a + b) / 2;
+      }
+      const newPosY = Math.max(
+        tgtDept.bounds.y,
+        Math.min(tgtDept.bounds.y + tgtDept.bounds.h - 1, node.ws.position.y),
+      );
+      // If lane changed, reassign deptId atomically with position update.
+      if (tgtDeptId !== node.ws.deptId) {
+        updateWorkstation(node.ws.id, {
+          deptId: tgtDeptId,
+          position: { x: newPosX, y: newPosY },
+        });
+      } else {
+        moveWorkstation(node.ws.id, { x: newPosX, y: newPosY });
+      }
+    };
+    window.addEventListener('mousemove', move);
+    window.addEventListener('mouseup', up);
+  };
+
   return (
     <>
     <div
@@ -4091,15 +4517,28 @@ function BuilderProcessView({
         backgroundImage:
           'linear-gradient(' + SW_COLORS.paperEdge + '20 1px, transparent 1px), linear-gradient(90deg, ' + SW_COLORS.paperEdge + '20 1px, transparent 1px)',
         backgroundSize: '24px 24px',
-        cursor: 'grab',
+        cursor:
+          drop.kind !== 'none'
+            ? 'crosshair'
+            : connect.on
+              ? 'crosshair'
+              : dragWsId
+                ? 'grabbing'
+                : 'grab',
       }}
       onClick={(e) => {
-        if (e.target === e.currentTarget) onSelect(null);
+        if (e.target !== e.currentTarget) return;
+        if (drop.kind === 'dept') {
+          handleDropDept();
+          return;
+        }
+        onSelect(null);
       }}
       onMouseDown={onBackgroundMouseDown}
       onWheel={onWheel}
     >
       <svg
+        ref={svgRef}
         viewBox={`0 0 ${W} ${H}`}
         preserveAspectRatio="xMinYMin meet"
         width={W}
@@ -4109,7 +4548,14 @@ function BuilderProcessView({
           transform: `translate(${pan.x}px, ${pan.y}px) scale(${zoom})`,
           transformOrigin: '0 0',
         }}
-        onClick={() => onSelect(null)}
+        onClick={(e) => {
+          if (e.target !== e.currentTarget) return;
+          if (drop.kind === 'dept') {
+            handleDropDept();
+            return;
+          }
+          onSelect(null);
+        }}
       >
         <defs>
           <marker
@@ -4147,6 +4593,7 @@ function BuilderProcessView({
             const blocksInLane = flowNodes.filter((n) => n.ws.deptId === d.id);
             const laneH = BLOCK_H + LANE_PAD_TOP + LANE_GAP;
             const accent = DEPT_COLOR_HEX[d.color];
+            const laneArmed = drop.kind === 'ws';
             lanes.push(
               <g key={`lane-${d.id}`} transform={`translate(0, ${y})`}>
                 <rect
@@ -4154,11 +4601,26 @@ function BuilderProcessView({
                   y={4}
                   width={W - LANE_LABEL_W - 16}
                   height={laneH - 12}
-                  fill={accent + '0a'}
-                  stroke={accent + '40'}
-                  strokeDasharray="2 4"
-                  strokeWidth={1}
+                  fill={laneArmed ? accent + '20' : accent + '0a'}
+                  stroke={laneArmed ? accent : accent + '40'}
+                  strokeDasharray={laneArmed ? '6 4' : '2 4'}
+                  strokeWidth={laneArmed ? 2 : 1}
                   rx={4}
+                  style={{ cursor: laneArmed ? 'crosshair' : 'default' }}
+                  onClick={(e) => {
+                    if (drop.kind === 'ws') {
+                      e.stopPropagation();
+                      handleDropWsInDept(d.id);
+                    } else if (drop.kind === 'dept') {
+                      e.stopPropagation();
+                      handleDropDept();
+                    } else {
+                      // Click on lane background selects the dept so the
+                      // inspector can be used to edit it from PROCESS view.
+                      e.stopPropagation();
+                      onSelect({ kind: 'dept', id: d.id });
+                    }
+                  }}
                 />
                 <rect x={12} y={LANE_PAD_TOP} width={6} height={BLOCK_H} fill={accent} rx={2} />
                 <text
@@ -4272,6 +4734,9 @@ function BuilderProcessView({
         {/* Block cards */}
         {Array.from(positions.values()).map((n) => {
           const isSelected = selected?.kind === 'ws' && selected.id === n.ws.id;
+          const isDragging = dragWsId === n.ws.id;
+          const renderX = isDragging && dragNodePos ? dragNodePos.x : n.x;
+          const renderY = isDragging && dragNodePos ? dragNodePos.y : n.y;
           const tint = PML_CATEGORY_TINT[n.block.spec.category] ?? {
             fill: SW_COLORS.paper,
             stroke: SW_COLORS.line,
@@ -4280,8 +4745,23 @@ function BuilderProcessView({
           return (
             <g
               key={n.ws.id}
-              transform={`translate(${n.x}, ${n.y})`}
-              style={{ cursor: 'pointer' }}
+              transform={`translate(${renderX}, ${renderY})`}
+              style={{
+                cursor: connect.on
+                  ? 'crosshair'
+                  : isDragging
+                    ? 'grabbing'
+                    : 'grab',
+                opacity: isDragging ? 0.75 : 1,
+              }}
+              onMouseDown={(e) => {
+                // Skip when port-connect is the user's intent: ports have
+                // their own handlers and we don't want to start a drag from
+                // a clicked port.
+                if (connect.on) return;
+                if (drop.kind !== 'none') return;
+                beginBlockDrag(n, e);
+              }}
               onClick={(e) => {
                 e.stopPropagation();
                 onSelect({ kind: 'ws', id: n.ws.id });
@@ -4512,7 +4992,7 @@ function BuilderProcessView({
             fontSize={14}
             fill={SW_COLORS.muted}
           >
-            No workstations yet — switch to ISO mode to drop one in. Each fixture you place becomes a PML block.
+            No workstations yet — pick a workstation from the palette and click a department lane.
           </text>
         )}
 
