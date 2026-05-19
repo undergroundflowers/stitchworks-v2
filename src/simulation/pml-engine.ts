@@ -208,6 +208,40 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
   return issues;
 }
 
+/**
+ * Changeover injection — schedules a CHANGEOVER_BEGIN / CHANGEOVER_END
+ * pair on a specific line. In P2 these are passed manually so the IE can
+ * model an interrupted shift; P4 will generate them automatically from
+ * an OrderSequence.
+ */
+export interface ChangeoverSpec {
+  /** When the changeover begins, in sim MINUTES from t=0. */
+  atMin: number;
+  /** SewingLine.id the changeover applies to — all workstations carrying
+   *  this lineId are blocked for the duration. */
+  lineId: string;
+  /** Duration in minutes the line is frozen. The caller is responsible
+   *  for computing this from `changeoverDurationMin({ base, from, to })`
+   *  (or any other rule); the engine treats it as a black-box freeze. */
+  durationMin: number;
+}
+
+/**
+ * Per-machine breakdown sampling. When set on a machine code, every
+ * workstation using that machine samples MTBF / MTTR exponentials and
+ * goes offline for the sampled MTTR period whenever a breakdown lands.
+ *
+ * Both values are in MINUTES. Omitting either disables breakdowns for
+ * that machine. Use this to model "the SNL bench at op 3 fails on
+ * average every 4 hours and takes 12 min to restart."
+ */
+export interface MachineBreakdownSpec {
+  /** Mean time between failures (minutes). */
+  mtbfMin: number;
+  /** Mean time to repair (minutes). */
+  mttrMin: number;
+}
+
 export interface PmlSimOpts {
   twin: Twin;
   /** Simulated duration in MINUTES. Tier-1 default: 480 (= one 8h shift). */
@@ -218,6 +252,19 @@ export interface PmlSimOpts {
    *  per-block running totals into `result.samples`. Default 1 min.
    *  Set to 0 to disable sampling (saves memory / time). */
   samplePeriodMin?: number;
+  /** Manual changeover injections. Each entry freezes the named line for
+   *  the stated duration. Omit / empty array ⇒ no changeovers (today's
+   *  behaviour). */
+  changeovers?: ChangeoverSpec[];
+  /** Optional per-machine MTBF / MTTR — keyed by MachineCode (e.g. 'SNL'
+   *  → { mtbfMin: 240, mttrMin: 12 }). Sampling is exponential. Empty
+   *  / omitted ⇒ no breakdowns. */
+  machineBreakdowns?: Record<string, MachineBreakdownSpec>;
+  /** Per-op skill-efficiency multipliers keyed by Operation.id. Drives
+   *  the cycle-time adjustment: effective cycle = nominal / efficiency.
+   *  Computed by `efficiencyFromSkillMatrix(skillMatrix, ops)` upstream.
+   *  Missing / 1.0 ⇒ engine runs at nominal speed (today's behaviour). */
+  opEfficiency?: Record<string, number>;
 }
 
 /**
@@ -290,8 +337,22 @@ export interface BlockObserved {
 export interface PmlSimResult {
   /** Run duration in minutes (mirrors opts). */
   durationMin: number;
-  /** Total agents that hit any Sink. */
+  /** Total agents (pieces) that hit any Sink — good output. Includes pieces
+   *  that needed rework as long as they ultimately passed. */
   totalProduced: number;
+  /** Of `totalProduced`, the count that exited with reworkCount === 0 —
+   *  i.e. first-pass-right. Drives `firstPassYield`. */
+  piecesProducedFTR: number;
+  /** Pieces scrapped after exceeding maxReworkAttempts. Counted in the
+   *  yield denominator but NOT in `totalProduced`. */
+  piecesScrapped: number;
+  /** Quality fraction for OEE: piecesProducedFTR / (totalProduced + piecesScrapped).
+   *  1.0 when no rework / scrap occurred. */
+  firstPassYield: number;
+  /** Cumulative minutes lost to changeover events during the run. P2 default 0. */
+  changeoverMin: number;
+  /** Cumulative minutes lost to machine downtime (MTBF/MTTR) during the run. P2 default 0. */
+  downtimeMin: number;
   /** Mean lead time across sunk agents, in minutes. */
   meanLeadTimeMin: number;
   /** Aggregate throughput across all sinks (agents/hr). */
@@ -325,6 +386,10 @@ interface Agent {
    *  matches the actual scheduled duration. Stays undefined for agents
    *  that never entered a time-based block. */
   cycleMin?: number;
+  /** Number of times this agent has been routed back upstream by a
+   *  reworkRate-driven Service block. 0 = first-pass. Incremented on each
+   *  rework decision; scrapped when it exceeds the op's maxReworkAttempts. */
+  reworkCount?: number;
 }
 
 /** All the precomputed routing for a block — output port → list of next
@@ -352,6 +417,10 @@ interface DeptPool {
 type Event =
   | { time: number; kind: 'sourceTick'; wsId: string }
   | { time: number; kind: 'serviceEnd'; wsId: string; agentId: number }
+  | { time: number; kind: 'changeoverBegin'; lineId: string; durationMin: number }
+  | { time: number; kind: 'changeoverEnd'; lineId: string }
+  | { time: number; kind: 'breakdownBegin'; wsId: string }
+  | { time: number; kind: 'breakdownEnd'; wsId: string; mtbfMin: number; mttrMin: number }
   | { time: number; kind: 'sample' };
 
 /** Per-block runtime state. */
@@ -434,15 +503,33 @@ interface BlockState {
  *       regardless of which garment they're stitching.
  *    3. Catalog `cycle_s` / `capacity_per_hr` / 30s hard default.
  */
-function cycleMinFor(ws: Workstation): number {
+function cycleMinFor(
+  ws: Workstation,
+  opEfficiency?: Record<string, number>,
+): number {
   const overrideCycleS = ws.block?.params?.cycleS;
   if (overrideCycleS != null && overrideCycleS > 0) {
     return overrideCycleS / 60;
   }
   const opCycleMin = opCycleMinFor(ws);
-  if (opCycleMin != null) return opCycleMin;
+  if (opCycleMin != null) {
+    // P2: apply per-op skill efficiency when the caller supplied one.
+    // Efficiency > 1 ⇒ faster than nominal; < 1 ⇒ slower. Clamped to a
+    // safe band so a stale matrix can't drive cycle to 0 or infinity.
+    const opId = ws.operation?.opId;
+    const raw = opId ? opEfficiency?.[opId] : undefined;
+    const eff = clampSkillEfficiency(raw);
+    return opCycleMin / eff;
+  }
   const r = getBlockParams(ws);
   return Math.max(0, r.cycleS) / 60;
+}
+
+/** Skill efficiency multiplier — clamp to [0.5, 1.5] so a stale or wild
+ *  matrix entry can't drive cycles to absurd values. 1.0 = nominal speed. */
+function clampSkillEfficiency(raw: number | undefined): number {
+  if (raw == null || !Number.isFinite(raw)) return 1;
+  return Math.min(1.5, Math.max(0.5, raw));
 }
 
 /** If the workstation is bound to a garment operation, return the cycle
@@ -533,7 +620,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       inflowPieces: 0,
       busyMin: 0,
       inService: 0,
-      cycleMin: cycleMinFor(ws),
+      cycleMin: cycleMinFor(ws, opts.opEfficiency),
       cycleDist: cycleDistFor(ws),
       arrivalIntervalMin: arrivalIntervalFor(ws),
       arrivalDist: arrivalDistFor(ws),
@@ -630,8 +717,20 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
 
   // ── Sink stats ─────────────────────────────────────────────────────────────
   let totalProduced = 0;
+  let piecesProducedFTR = 0;
+  let piecesScrapped = 0;
   let leadTimeAccum = 0;
   let nextAgentId = 1;
+  // P2 — line-blocking accumulators. Updated when CHANGEOVER_BEGIN /
+  // CHANGEOVER_END / BREAKDOWN_BEGIN / BREAKDOWN_END events fire.
+  let changeoverMinAccum = 0;
+  let downtimeMinAccum = 0;
+  /** Lines currently frozen for changeover — tryStartService refuses to
+   *  start new service for workstations whose lineId is in this set. */
+  const frozenLines = new Set<string>();
+  /** Workstations currently down for repair — tryStartService refuses
+   *  service while the ws id is in this set. */
+  const frozenWorkstations = new Set<string>();
 
   // ── Event queue ────────────────────────────────────────────────────────────
   const pq = new MinHeap<Event>((a, b) => a.time - b.time);
@@ -642,6 +741,41 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // default behaviour for a stochastic Source.
   for (const src of sources) {
     pq.push({ time: drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
+  }
+
+  // P2: enqueue caller-supplied changeover injections. Each one freezes the
+  // named line for `durationMin` starting at `atMin`. Out-of-range / null
+  // entries are dropped silently.
+  for (const co of opts.changeovers ?? []) {
+    if (!(co.durationMin > 0) || !(co.atMin >= 0) || co.atMin > durationMin) continue;
+    pq.push({
+      time: co.atMin,
+      kind: 'changeoverBegin',
+      lineId: co.lineId,
+      durationMin: co.durationMin,
+    });
+  }
+
+  // P2: schedule first breakdown for every workstation that maps to a
+  // machine code with an MTBF/MTTR entry. Exponential sampling matches the
+  // typical OEE assumption (memoryless failures); the BREAKDOWN_END
+  // handler reschedules the next BREAKDOWN_BEGIN, so this only seeds one
+  // event per workstation.
+  const breakdownByMachine = opts.machineBreakdowns ?? {};
+  if (Object.keys(breakdownByMachine).length > 0) {
+    for (const ws of twin.workstations) {
+      const code = ws.resources?.machineId;
+      if (!code) continue;
+      const spec = breakdownByMachine[code];
+      if (!spec || !(spec.mtbfMin > 0) || !(spec.mttrMin > 0)) continue;
+      // Exponential draw with mean = mtbf, using the engine's RNG so seeds
+      // remain reproducible.
+      const u = Math.max(1e-9, rng());
+      const firstFailAt = -Math.log(u) * spec.mtbfMin;
+      if (firstFailAt < durationMin) {
+        pq.push({ time: firstFailAt, kind: 'breakdownBegin', wsId: ws.id });
+      }
+    }
   }
   // Schedule periodic snapshot events so we can hand LiveSim a timeseries
   // it can play back. Sampling at t=0 is recorded synchronously below.
@@ -738,6 +872,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function tryStartService(b: BlockState, now: number): boolean {
     if (b.kind !== 'Service') return false;
     if (b.queue.length === 0) return false;
+    // P2: don't start service while the workstation is down or its line
+    // is in changeover. Pieces already in service complete normally;
+    // only new starts are blocked, which matches a real floor (operators
+    // finish the current bundle before the changeover begins).
+    if (frozenWorkstations.has(b.ws.id)) return false;
+    if (b.ws.lineId && frozenLines.has(b.ws.lineId)) return false;
     // Per-station server cap: cannot exceed the configured `servers` count
     // even when the dept's pool has spare units. Matches "one machine =
     // one server" semantics — without this, the pool acts as a shared
@@ -784,6 +924,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     switch (b.kind) {
       case 'Sink':
         totalProduced += agent.pieces;
+        if ((agent.reworkCount ?? 0) === 0) piecesProducedFTR += agent.pieces;
         leadTimeAccum += (now - agent.bornAt) * agent.pieces;
         return;
       case 'Source':
@@ -979,6 +1120,96 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     emitOnPort(b, portId, agent, now);
   }
 
+  /**
+   * Look up rework parameters for the operation bound to a workstation.
+   * Returns null when the workstation has no op binding, no garment, or
+   * the op carries no reworkRate. Centralises the resolution so the
+   * serviceEnd hot-path stays tight.
+   */
+  function reworkParamsFor(ws: Workstation): {
+    rate: number;
+    routeToOpId: string | undefined;
+    maxAttempts: number;
+  } | null {
+    const opId = ws.operation?.opId;
+    const garmentId = ws.operation?.garmentId;
+    if (!opId || !garmentId) return null;
+    const garment = GARMENT_TEMPLATES[garmentId];
+    if (!garment) return null;
+    const op = garment.operations.find((o) => o.id === opId);
+    if (!op || !(op.reworkRate && op.reworkRate > 0)) return null;
+    return {
+      rate: Math.min(1, Math.max(0, op.reworkRate)),
+      routeToOpId: op.reworkRouteToOpId,
+      maxAttempts: Math.max(1, op.maxReworkAttempts ?? 1),
+    };
+  }
+
+  /**
+   * Find the workstation in the same line as `fromWs` whose bound op id
+   * matches `opId`. Used to resolve a rework loop's re-entry point.
+   * Falls back to any workstation in the twin with that op id if the
+   * line-scoped lookup misses.
+   */
+  function findReworkTarget(fromWs: Workstation, opId: string): Workstation | null {
+    const lineId = fromWs.lineId;
+    let lineMatch: Workstation | null = null;
+    let anyMatch: Workstation | null = null;
+    for (const ws of twin.workstations) {
+      if (ws.operation?.opId === opId) {
+        if (ws.lineId === lineId) lineMatch = ws;
+        else if (!anyMatch) anyMatch = ws;
+      }
+    }
+    return lineMatch ?? anyMatch;
+  }
+
+  /**
+   * Decide whether a service-completed agent should be sent back upstream
+   * for rework. Returns true when the agent was consumed (scrapped or
+   * routed to rework); the caller must NOT forward it to the next op in
+   * that case. Returns false when the agent should follow the normal
+   * forward path.
+   */
+  function maybeRework(b: BlockState, agent: Agent, now: number): boolean {
+    const params = reworkParamsFor(b.ws);
+    if (!params) return false;
+    if (rng() >= params.rate) return false;
+    const attempts = (agent.reworkCount ?? 0) + 1;
+    if (attempts > params.maxAttempts) {
+      // Scrap — the piece is consumed without ever reaching a Sink.
+      piecesScrapped += agent.pieces;
+      return true;
+    }
+    agent.reworkCount = attempts;
+    // Find the rework re-entry point. Default to in-place rework when
+    // the op didn't pin a route — re-queues onto this same Service block.
+    const routeToOpId = params.routeToOpId;
+    if (!routeToOpId) {
+      b.queue.push(agent);
+      tryStartService(b, now);
+      return true;
+    }
+    const target = findReworkTarget(b.ws, routeToOpId);
+    if (!target) {
+      // Configured route missing — fall back to in-place rework rather
+      // than silently scrapping. Warn once so the user can fix the bulletin.
+      if (!warnedReworkMissing.has(routeToOpId)) {
+        warnings.push(
+          `Rework route for op "${routeToOpId}" not found in twin — looping in-place at "${b.ws.name}".`,
+        );
+        warnedReworkMissing.add(routeToOpId);
+      }
+      b.queue.push(agent);
+      tryStartService(b, now);
+      return true;
+    }
+    accept(target.id, '__rework__', agent, now);
+    return true;
+  }
+
+  const warnedReworkMissing = new Set<string>();
+
   function emitOnPort(b: BlockState, portId: string, agent: Agent, now: number): void {
     b.outflowByPort.set(portId, (b.outflowByPort.get(portId) ?? 0) + 1);
     b.outflowPieces += agent.pieces;
@@ -1046,7 +1277,12 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
           bumpPoolAccum(pool, now);
           pool.busy = Math.max(0, pool.busy - 1);
         }
-        if (a) emitOnFirstOutput(b, a, now);
+        if (a) {
+          // P2 rework: a fraction (op.reworkRate) of completed pieces gets
+          // routed back upstream instead of forwarded. maybeRework consumes
+          // the agent in that case; only forward when it returns false.
+          if (!maybeRework(b, a, now)) emitOnFirstOutput(b, a, now);
+        }
         tryStartService(b, now);
       } else if (b.kind === 'Delay' || b.kind === 'MoveTo' || b.kind === 'Conveyor') {
         // Resource-free time-based blocks. Agent simply leaves on its first
@@ -1054,6 +1290,68 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         b.busyMin += elapsed;
         b.inService = Math.max(0, b.inService - 1);
         if (a) emitOnFirstOutput(b, a, now);
+      }
+      continue;
+    }
+
+    // ── P2 changeover events ──────────────────────────────────────────────
+    if (e.kind === 'changeoverBegin') {
+      frozenLines.add(e.lineId);
+      pq.push({
+        time: now + e.durationMin,
+        kind: 'changeoverEnd',
+        lineId: e.lineId,
+      });
+      // Attribute the wall-clock duration to the changeover accumulator.
+      // Multi-line parallel changeovers sum here — call sites can divide
+      // by the active-line count when they need a per-line figure.
+      changeoverMinAccum += e.durationMin;
+      continue;
+    }
+    if (e.kind === 'changeoverEnd') {
+      frozenLines.delete(e.lineId);
+      // Unfreezing might let queued agents resume — try to start service at
+      // every Service block on the line. Cheap loop; lines are small.
+      for (const b of blocks.values()) {
+        if (b.kind === 'Service' && b.ws.lineId === e.lineId) {
+          tryStartService(b, now);
+        }
+      }
+      continue;
+    }
+
+    // ── P2 breakdown events ───────────────────────────────────────────────
+    if (e.kind === 'breakdownBegin') {
+      const ws = twin.workstations.find((w) => w.id === e.wsId);
+      if (!ws) continue;
+      const code = ws.resources?.machineId;
+      const spec = code ? breakdownByMachine[code] : undefined;
+      if (!spec) continue;
+      frozenWorkstations.add(e.wsId);
+      // Sample MTTR (repair time) from an exponential with mean = mttrMin.
+      const u = Math.max(1e-9, rng());
+      const repair = -Math.log(u) * spec.mttrMin;
+      downtimeMinAccum += repair;
+      pq.push({
+        time: now + repair,
+        kind: 'breakdownEnd',
+        wsId: e.wsId,
+        mtbfMin: spec.mtbfMin,
+        mttrMin: spec.mttrMin,
+      });
+      continue;
+    }
+    if (e.kind === 'breakdownEnd') {
+      frozenWorkstations.delete(e.wsId);
+      // Resume any queued service at this workstation.
+      const b = blocks.get(e.wsId);
+      if (b && b.kind === 'Service') tryStartService(b, now);
+      // Sample next time-to-failure for this workstation.
+      const u = Math.max(1e-9, rng());
+      const gap = -Math.log(u) * e.mtbfMin;
+      const nextFail = now + gap;
+      if (nextFail < durationMin) {
+        pq.push({ time: nextFail, kind: 'breakdownBegin', wsId: e.wsId });
       }
       continue;
     }
@@ -1122,9 +1420,20 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (lastT < durationMin) takeSample(durationMin);
   }
 
+  // OEE-quality denominator = pieces that *finished* a path (good + scrap).
+  // FTR-quality = first-pass-good ÷ finished. 1.0 when nothing finished
+  // (avoids divide-by-zero on idle runs).
+  const finishedPieces = totalProduced + piecesScrapped;
+  const firstPassYield = finishedPieces > 0 ? piecesProducedFTR / finishedPieces : 1;
+
   return {
     durationMin,
     totalProduced,
+    piecesProducedFTR,
+    piecesScrapped,
+    firstPassYield,
+    changeoverMin: changeoverMinAccum,
+    downtimeMin: downtimeMinAccum,
     meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
     throughputPerHr: durationMin > 0 ? (totalProduced * 60) / durationMin : 0,
     blocks: blockObs,

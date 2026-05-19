@@ -1,7 +1,6 @@
 import { useEffect, useReducer, useState } from 'react';
 import { Navigate, Route, Routes, useLocation, useNavigate } from 'react-router-dom';
-import { TopBar } from './shell/TopBar';
-import { INITIAL_GAME } from './lib/game';
+import { SideBar } from './shell/SideBar';
 import { SW_COLORS } from './design/tokens';
 import { SW_TWEAK_DEFAULTS, applyVibe } from './lib/vibe';
 import { TweaksPanel, TweakSection, TweakSlider, TweakRadio, useTweaks } from './tweaks';
@@ -13,7 +12,6 @@ import { useProject } from './store/project';
 import { MenuPage } from './pages/Menu';
 import { OrdersPage } from './pages/Orders';
 import { LiveSimPage } from './pages/LiveSim';
-import { ScenariosPage } from './pages/Scenarios';
 import { ResourcesPage } from './pages/Resources';
 import { ReportsPage } from './pages/Reports';
 import { SettingsPage } from './pages/Settings';
@@ -104,7 +102,7 @@ export default function App() {
     }
   };
 
-  const showTopBar = location.pathname !== '/';
+  const showSideBar = location.pathname !== '/';
   const intensityFilter = `saturate(${0.7 + ((t.intensity as number) / 100) * 0.9}) contrast(${0.95 + ((t.intensity as number) / 100) * 0.15})`;
 
   return (
@@ -112,15 +110,15 @@ export default function App() {
       style={{
         height: '100vh',
         display: 'flex',
-        flexDirection: 'column',
+        flexDirection: 'row',
         background: SW_COLORS.paperDeep,
         filter: intensityFilter,
         transition: 'filter 240ms',
       }}
     >
       {showOnboarding && <Onboarding onFinish={finishOnboarding} />}
-      {showTopBar && <TopBar game={INITIAL_GAME} />}
-      <div style={{ flex: 1, minHeight: 0, overflow: 'hidden' }}>
+      {showSideBar && <SideBar />}
+      <div style={{ flex: 1, minWidth: 0, overflow: 'hidden' }}>
         <Routes>
           <Route path="/" element={<MenuPage />} />
           <Route path="/orders" element={<OrdersPage />} />
@@ -129,7 +127,9 @@ export default function App() {
               validation tabs). The legacy /kpi path redirects here so existing
               links still resolve. */}
           <Route path="/balance" element={<ReportsPage />} />
-          <Route path="/scenarios" element={<ScenariosPage />} />
+          {/* Scenarios is now a tab inside Reports. The standalone /scenarios
+              URL redirects there so old links and deep-links still resolve. */}
+          <Route path="/scenarios" element={<Navigate to="/balance?tab=scenarios" replace />} />
           <Route path="/resources" element={<ResourcesPage />} />
           <Route path="/kpi" element={<Navigate to="/balance" replace />} />
           <Route path="/settings" element={<SettingsPage />} />
