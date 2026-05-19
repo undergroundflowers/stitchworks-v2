@@ -78,8 +78,8 @@ import {
   type ApparelPresetId,
 } from '../domain/apparelPresets';
 import { buildReferenceFactoryTwin } from '../domain/reference-twin';
-import { runPmlOnTwin } from '../simulation/pml-runner';
 import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
+import { runPmlOnTwin } from '../simulation/pml-runner';
 
 // ============================================================================
 // CONSTANTS
@@ -443,25 +443,13 @@ export function BuilderPage() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [searchParams]);
 
-  /** Which simulation engine the ▶ RUN SIM button uses.
-   *  • pml    — graph-driven DES over the twin's PML blocks + connectors
-   *  • legacy — opens the operation-list LiveSim page (current behaviour) */
-  const [engineMode, setEngineMode] = useState<'pml' | 'legacy'>('pml');
-  /** Last PML run summary, shown as a small toast under the toolbar. */
-  const [lastRun, setLastRun] = useState<{
-    text: string;
-    warnings: string[];
-    at: number;
-  } | null>(null);
   /** When true the pre-flight validation list is expanded under the chip. */
   const [issuesOpen, setIssuesOpen] = useState(false);
 
   // Live graph validation — recomputed on every twin change. Cheap, runs
-  // the same pure validator the engine uses post-run for consistency.
-  const pmlIssues = useMemo<PmlIssue[]>(
-    () => (engineMode === 'pml' ? validatePmlGraph(twin) : []),
-    [engineMode, twin],
-  );
+  // the same pure validator the engine uses post-run for consistency. PML
+  // is the only engine now, so the chip is always live.
+  const pmlIssues = useMemo<PmlIssue[]>(() => validatePmlGraph(twin), [twin]);
 
   /** Effective selected-workstation id set: the primary `selected` anchor
    *  (when it's a ws) plus every id in `extraSelectedWs`. This is what the
@@ -1256,18 +1244,120 @@ export function BuilderPage() {
           minWidth: 0,
         }}
       >
-        <button onClick={() => navigate('/')} style={btnSec}>
-          ← MENU
+        <button onClick={() => navigate('/')} style={btnSec} title="Back to menu" aria-label="Back to menu">
+          ←
         </button>
-        {/* Title + active-factory picker, stacked. The picker sits directly
-            under the FACTORY BUILDER title so the page label and the thing
-            being labelled share a vertical axis; action buttons (SAVE,
-            DELETE, SIMULATE, SAVE AS…) follow in the row beside this
-            column. */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 6, alignItems: 'flex-start' }}>
-          <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing: '-0.01em' }}>
-            FACTORY BUILDER
+        {/* Title sits on its own line; the FACTORY picker and the action
+            buttons (SAVE, SAVE AS, DELETE, SIMULATE) form a second row
+            beneath, sharing one horizontal axis so the picker and the
+            verbs that act on it live on the same baseline. */}
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start' }}>
+          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12 }}>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing: '-0.01em' }}>
+              FACTORY BUILDER
+            </div>
+            {/* Pre-flight graph health chip — moved here so the issue count
+                sits next to the page label it describes, instead of floating
+                at the far right of the toolbar. */}
+            <div style={{ position: 'relative' }}>
+              <button
+                onClick={() => setIssuesOpen((v) => !v)}
+                title={
+                  pmlIssues.length === 0
+                    ? 'Graph passes pre-flight checks — ready to run.'
+                    : 'Click to expand the pre-flight issue list.'
+                }
+                style={{
+                  ...btnSec,
+                  background:
+                    errorCount > 0
+                      ? '#FFE5E5'
+                      : warnCount > 0
+                        ? '#FFF6E0'
+                        : pmlIssues.length === 0
+                          ? '#E7F7EE'
+                          : SW_COLORS.paperDeep,
+                  borderColor:
+                    errorCount > 0
+                      ? SW_COLORS.alarm
+                      : warnCount > 0
+                        ? SW_COLORS.thread
+                        : SW_COLORS.line,
+                  color:
+                    errorCount > 0 ? SW_COLORS.alarm : warnCount > 0 ? SW_COLORS.steel : SW_COLORS.steel,
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 10,
+                  fontWeight: 800,
+                }}
+              >
+                {errorCount > 0
+                  ? `⨯ ${errorCount} ERR${warnCount + infoCount > 0 ? ` · ${warnCount + infoCount} HINT` : ''}`
+                  : warnCount > 0
+                    ? `⚠ ${warnCount} WARN${infoCount > 0 ? ` · ${infoCount}` : ''}`
+                    : infoCount > 0
+                      ? `✓ READY · ${infoCount} HINT`
+                      : '✓ READY'}
+              </button>
+              {issuesOpen && pmlIssues.length > 0 && (
+                <div
+                  style={{
+                    position: 'absolute',
+                    top: 'calc(100% + 4px)',
+                    left: 0,
+                    zIndex: 10,
+                    width: 360,
+                    maxHeight: 320,
+                    overflowY: 'auto',
+                    background: SW_COLORS.paper,
+                    border: `1px solid ${SW_COLORS.line}`,
+                    borderRadius: 6,
+                    boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
+                    padding: 8,
+                  }}
+                >
+                  <div style={{ ...sectionLabel, marginBottom: 6 }}>
+                    Pre-flight · {pmlIssues.length} issue{pmlIssues.length === 1 ? '' : 's'}
+                  </div>
+                  {pmlIssues.map((iss, i) => {
+                    const tone =
+                      iss.level === 'error'
+                        ? SW_COLORS.alarm
+                        : iss.level === 'warn'
+                          ? SW_COLORS.thread
+                          : SW_COLORS.muted;
+                    const glyph =
+                      iss.level === 'error' ? '⨯' : iss.level === 'warn' ? '⚠' : '·';
+                    return (
+                      <div
+                        key={i}
+                        onClick={() => {
+                          if (iss.wsId) setSelected({ kind: 'ws', id: iss.wsId });
+                        }}
+                        style={{
+                          padding: '6px 8px',
+                          borderLeft: `3px solid ${tone}`,
+                          background: SW_COLORS.paperDeep,
+                          borderRadius: 3,
+                          marginBottom: 4,
+                          fontSize: 11,
+                          lineHeight: 1.4,
+                          color: SW_COLORS.steel,
+                          cursor: iss.wsId ? 'pointer' : 'default',
+                        }}
+                        title={iss.wsId ? 'Click to select this block in the inspector' : undefined}
+                      >
+                        <strong style={{ color: tone, fontFamily: SW_FONTS.mono, marginRight: 6 }}>
+                          {glyph} {iss.level.toUpperCase()}
+                        </strong>
+                        {iss.message}
+                      </div>
+                    );
+                  })}
+                </div>
+              )}
+            </div>
           </div>
+          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
             <HudSelect
@@ -1312,11 +1402,7 @@ export function BuilderPage() {
               ]}
             />
           </div>
-        </div>
-
-        {/* Action buttons — promoted out of the picker row so the FACTORY
-            BUILDER / factory-picker pair can stack cleanly. */}
-        <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <button
             onClick={onSave}
             style={{
@@ -1378,6 +1464,17 @@ export function BuilderPage() {
                 onClick={() => {
                   if (!canSimulate) return;
                   touchActive();
+                  // Run PML once synchronously and write per-block observed
+                  // KPIs back to the twin store so the Inspector's KPI lens
+                  // surfaces fresh numbers immediately (no manual re-run
+                  // required). The legacy ▶ RUN SIM button did this too.
+                  // Wrapped in try/catch — engine throws only on truly
+                  // broken graphs, and the pre-flight chip already warns.
+                  try {
+                    runPmlOnTwin(twin, { writeKpiObserved: setKpiObserved });
+                  } catch {
+                    /* pre-flight chip already surfaces the cause */
+                  }
                   navigate('/sim?source=twin');
                 }}
                 disabled={!canSimulate}
@@ -1394,7 +1491,7 @@ export function BuilderPage() {
                     : 'Assign an operation to at least one workstation before simulating.'
                 }
               >
-                ▶ SIMULATE THIS FACTORY
+                ▶ SIMULATE
               </button>
             );
           })()}
@@ -1430,6 +1527,8 @@ export function BuilderPage() {
               </span>
             </button>
           )}
+          </div>
+          </div>
         </div>
 
         <div style={{ flex: 1 }} />
@@ -1520,215 +1619,12 @@ export function BuilderPage() {
           📚 LOAD REF FACTORY
         </button>
 
-        {/* Engine toggle — PML graph-driven DES vs. legacy operation-list sim.
-            PML is opt-in for v1 so legacy runs keep working unchanged. */}
-        <div
-          style={{ display: 'flex', gap: 4, background: SW_COLORS.paperDeep, padding: 3, borderRadius: 6, border: `1px solid ${SW_COLORS.line}` }}
-          title="Pick which simulation engine ▶ RUN SIM uses. PML runs the wired block-graph in-place; LEGACY opens the operation-list LiveSim page."
-        >
-          {(['pml', 'legacy'] as const).map((m) => (
-            <button
-              key={m}
-              onClick={() => setEngineMode(m)}
-              style={{
-                background: engineMode === m ? SW_COLORS.ink : 'transparent',
-                color: engineMode === m ? '#fff' : SW_COLORS.steel,
-                border: 'none',
-                padding: '6px 10px',
-                fontFamily: SW_FONTS.display,
-                fontSize: 10,
-                fontWeight: 900,
-                letterSpacing: '0.06em',
-                cursor: 'pointer',
-                borderRadius: 4,
-              }}
-            >
-              {m === 'pml' ? '⚙ PML' : '▤ LEGACY'}
-            </button>
-          ))}
-        </div>
-
-        {/* Pre-flight graph health chip — only shown in PML mode. Click to
-            expand the issue list. Errors block a useful run; warns / infos
-            are hints. */}
-        {engineMode === 'pml' && (
-          <div style={{ position: 'relative' }}>
-            <button
-              onClick={() => setIssuesOpen((v) => !v)}
-              title={
-                pmlIssues.length === 0
-                  ? 'Graph passes pre-flight checks — ready to run.'
-                  : 'Click to expand the pre-flight issue list.'
-              }
-              style={{
-                ...btnSec,
-                background:
-                  errorCount > 0
-                    ? '#FFE5E5'
-                    : warnCount > 0
-                      ? '#FFF6E0'
-                      : pmlIssues.length === 0
-                        ? '#E7F7EE'
-                        : SW_COLORS.paperDeep,
-                borderColor:
-                  errorCount > 0
-                    ? SW_COLORS.alarm
-                    : warnCount > 0
-                      ? SW_COLORS.thread
-                      : SW_COLORS.line,
-                color:
-                  errorCount > 0 ? SW_COLORS.alarm : warnCount > 0 ? SW_COLORS.steel : SW_COLORS.steel,
-                fontFamily: SW_FONTS.mono,
-                fontSize: 10,
-                fontWeight: 800,
-              }}
-            >
-              {errorCount > 0
-                ? `⨯ ${errorCount} ERR${warnCount + infoCount > 0 ? ` · ${warnCount + infoCount} HINT` : ''}`
-                : warnCount > 0
-                  ? `⚠ ${warnCount} WARN${infoCount > 0 ? ` · ${infoCount}` : ''}`
-                  : infoCount > 0
-                    ? `✓ READY · ${infoCount} HINT`
-                    : '✓ READY'}
-            </button>
-            {issuesOpen && pmlIssues.length > 0 && (
-              <div
-                style={{
-                  position: 'absolute',
-                  top: 'calc(100% + 4px)',
-                  right: 0,
-                  zIndex: 10,
-                  width: 360,
-                  maxHeight: 320,
-                  overflowY: 'auto',
-                  background: SW_COLORS.paper,
-                  border: `1px solid ${SW_COLORS.line}`,
-                  borderRadius: 6,
-                  boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
-                  padding: 8,
-                }}
-              >
-                <div style={{ ...sectionLabel, marginBottom: 6 }}>
-                  Pre-flight · {pmlIssues.length} issue{pmlIssues.length === 1 ? '' : 's'}
-                </div>
-                {pmlIssues.map((iss, i) => {
-                  const tone =
-                    iss.level === 'error'
-                      ? SW_COLORS.alarm
-                      : iss.level === 'warn'
-                        ? SW_COLORS.thread
-                        : SW_COLORS.muted;
-                  const glyph =
-                    iss.level === 'error' ? '⨯' : iss.level === 'warn' ? '⚠' : '·';
-                  return (
-                    <div
-                      key={i}
-                      onClick={() => {
-                        if (iss.wsId) setSelected({ kind: 'ws', id: iss.wsId });
-                      }}
-                      style={{
-                        padding: '6px 8px',
-                        borderLeft: `3px solid ${tone}`,
-                        background: SW_COLORS.paperDeep,
-                        borderRadius: 3,
-                        marginBottom: 4,
-                        fontSize: 11,
-                        lineHeight: 1.4,
-                        color: SW_COLORS.steel,
-                        cursor: iss.wsId ? 'pointer' : 'default',
-                      }}
-                      title={iss.wsId ? 'Click to select this block in the inspector' : undefined}
-                    >
-                      <strong style={{ color: tone, fontFamily: SW_FONTS.mono, marginRight: 6 }}>
-                        {glyph} {iss.level.toUpperCase()}
-                      </strong>
-                      {iss.message}
-                    </div>
-                  );
-                })}
-              </div>
-            )}
-          </div>
-        )}
-
-        <button
-          onClick={() => {
-            if (engineMode === 'legacy') {
-              navigate('/sim');
-              return;
-            }
-            const r = runPmlOnTwin(twin, { writeKpiObserved: setKpiObserved });
-            // Two different time kinds appear here: `wallMs` is real
-            // compute time (how long the engine took on this device);
-            // `meanLeadTimeMin` is model time (how long a bundle takes
-            // through the line). Labels disambiguate so the user doesn't
-            // conflate them.
-            setLastRun({
-              text:
-                `Ran in ${r.wallMs.toFixed(0)} ms (wall) · ` +
-                `${r.totalProduced} produced · ` +
-                `${r.throughputPerHr}/hr · ` +
-                `lead ${r.meanLeadTimeMin.toFixed(1)} min (model)` +
-                (r.bottleneckName ? ` · ⚠ ${r.bottleneckName}` : ''),
-              warnings: r.warnings,
-              at: Date.now(),
-            });
-          }}
-          style={btnPrim}
-          title={
-            engineMode === 'pml'
-              ? 'Run the PML block-graph sim against the active twin and write per-block KPIs.'
-              : 'Open the legacy operation-list LiveSim page.'
-          }
-        >
-          ▶ RUN SIM
-        </button>
+        {/* RUN SIM button + its inline toast were removed when the legacy
+            engine was retired. ▶ SIMULATE (above) is the single entry point
+            into /sim, which auto-runs PML on mount and shows the same
+            throughput / lead-time numbers in the playback chrome. */}
       </div>
 
-      {/* PML run toast — appears under the toolbar after a run completes.
-          Click to dismiss. Auto-dismisses are deliberately omitted so
-          warnings stay visible. */}
-      {lastRun && engineMode === 'pml' && (
-        <div
-          onClick={() => setLastRun(null)}
-          title="Click to dismiss"
-          style={{
-            gridColumn: '3',
-            gridRow: '2',
-            position: 'absolute',
-            top: 56,
-            right: 16,
-            zIndex: 6,
-            padding: '8px 12px',
-            background: SW_COLORS.ink,
-            color: '#fff',
-            fontFamily: SW_FONTS.mono,
-            fontSize: 11,
-            fontWeight: 700,
-            borderRadius: 6,
-            boxShadow: '0 6px 16px rgba(0,0,0,0.22)',
-            maxWidth: 460,
-            cursor: 'pointer',
-            borderLeft: `4px solid ${SW_COLORS.brand}`,
-          }}
-        >
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-            <span style={{ fontFamily: SW_FONTS.display, fontSize: 10, letterSpacing: '0.1em', color: SW_COLORS.brand }}>
-              ⚙ PML RUN
-            </span>
-            <span>{lastRun.text}</span>
-          </div>
-          {lastRun.warnings.length > 0 && (
-            <ul style={{ margin: '6px 0 0', padding: '0 0 0 18px', lineHeight: 1.4 }}>
-              {lastRun.warnings.map((w, i) => (
-                <li key={i} style={{ color: SW_COLORS.thread }}>
-                  {w}
-                </li>
-              ))}
-            </ul>
-          )}
-        </div>
-      )}
 
       {/* Deep-link confirmation chip — shows for a few seconds after the
           user lands on /builder?line=<id> from the Simulation or Orders tab,

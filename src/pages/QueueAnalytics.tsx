@@ -26,13 +26,13 @@ import {
 } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import {
-  buildSimConfig,
-  efficiencyFromSkillMatrix,
   meanOf,
-  useSim,
+  usePmlSim,
+  EMPTY_TWIN,
   type QueueDiscipline,
   type StationView,
 } from '../simulation';
+import { buildGarmentTwin } from '../domain/reference-twin';
 import { useGarments } from '../store/garments';
 import { useProject } from '../store/project';
 import { DRILL_PATHS } from '../lib/routes';
@@ -44,22 +44,17 @@ type ViewMode = 'strip' | 'compare';
 export function QueueAnalyticsPage() {
   const navigate = useNavigate();
   const selectedGarmentId = useProject((s) => s.selectedGarmentId);
-  const skillMatrix = useProject((s) => s.skillMatrix);
   const defaultOperators = useProject((s) => s.defaultOperators);
   const garments = useGarments();
   const garment = garments.byId[selectedGarmentId] ?? garments.all[0];
 
-  const opEfficiency = useMemo(
-    () => efficiencyFromSkillMatrix(skillMatrix, garment.operations),
-    [skillMatrix, garment],
+  // Synthesise a single-line twin from the garment so PML has a graph to run.
+  const twin = useMemo(
+    () => buildGarmentTwin(garment, defaultOperators) ?? EMPTY_TWIN,
+    [garment, defaultOperators],
   );
 
-  const config = useMemo(
-    () => buildSimConfig({ garment, operators: defaultOperators, opEfficiency }),
-    [garment, defaultOperators, opEfficiency],
-  );
-
-  const { state, step, reset } = useSim(config);
+  const { state, step, reset } = usePmlSim(twin, { garment });
 
   useEffect(() => {
     if (state.time === 0) step(WARMUP_MINUTES);

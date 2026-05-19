@@ -8,16 +8,49 @@ import {
   lineEfficiency,
   bottleneckSmv,
 } from '../domain';
-import { buildSimConfig, efficiencyFromSkillMatrix, runReplications, buildLinesFromTwin, aggregateFactoryKpis, type AggregateKpis, type LineBuild } from '../simulation';
+import {
+  efficiencyFromSkillMatrix,
+  runReplications,
+  buildLinesFromTwin,
+  aggregateFactoryKpis,
+  scopedTwinForLine,
+  type AggregateKpis,
+  type LineBuild,
+} from '../simulation';
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin } from '../simulation/pml-runner';
+import { buildGarmentTwin } from '../domain/reference-twin';
 import { getBlockSpec, apparelRoleFor } from '../domain/pml';
 import { REFERENCE_MODELS } from '../domain/reference-models';
 import { compareToPaper, type ReferenceVariant } from '../domain/reference-twin';
 import { useReferenceContext } from '../store/reference';
 
 const SHIFT_MIN = 480;
+/** Base RNG seed for the page-level replications. Replication i uses
+ *  `REPORT_BASE_SEED + i`. Kept as a constant so the seed strip in the
+ *  page chrome can display the exact range without re-running the engine. */
+const REPORT_BASE_SEED = 42;
+
+/** Empty-state aggregate — used before the first replication completes or
+ *  when the chosen garment carries no operations. */
+function emptyAgg(): AggregateKpis {
+  return {
+    n: 0,
+    producedPieces: { mean: 0, std: 0 },
+    throughputPerHr: { mean: 0, std: 0 },
+    efficiencyPct: { mean: 0, std: 0 },
+    meanLeadTime: { mean: 0, std: 0 },
+    utilization: { mean: 0, std: 0 },
+    wipBundles: { mean: 0, std: 0 },
+    bottleneckOpName: '—',
+    bottleneckQueue: 0,
+    replications: [],
+    firstHistory: [],
+    averagedHistory: [],
+    firstStations: [],
+  };
+}
 
 /**
  * Production KPIs page. Reads the user's selected garment + operator count
@@ -96,19 +129,43 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   );
   const skillEntries = Object.keys(opEfficiency).length;
   const [runs, setRuns] = useState<number>(1);
-  const runConfig = useMemo(
-    () => buildSimConfig({ garment: yamTemplate, operators: yamOperators, opEfficiency }),
-    [yamTemplate, yamOperators, opEfficiency],
+  // Synthesise a single-line twin from the chosen garment so the PML engine
+  // has a Source → ops → Sink graph to replicate. Falls back to a typed
+  // single-station twin when the bulletin is empty (corner case — the page
+  // shows zeros in that branch).
+  const runTwin = useMemo(
+    () => buildGarmentTwin(yamTemplate, yamOperators),
+    [yamTemplate, yamOperators],
   );
   const [agg, setAgg] = useState<AggregateKpis>(() =>
-    runReplications({ config: runConfig, replications: runs, simMinutes: SHIFT_MIN }),
+    runTwin
+      ? runReplications({
+          twin: runTwin,
+          replications: runs,
+          simMinutes: SHIFT_MIN,
+          garment: yamTemplate,
+          operatorsOverride: yamOperators,
+        })
+      : emptyAgg(),
   );
 
-  // Re-run when config or replication count changes. Synchronous —
-  // typically <100ms even at runs=10.
+  // Re-run when twin or replication count changes. Synchronous — typically
+  // <100ms even at runs=10.
   useEffect(() => {
-    setAgg(runReplications({ config: runConfig, replications: runs, simMinutes: SHIFT_MIN }));
-  }, [runConfig, runs]);
+    if (!runTwin) {
+      setAgg(emptyAgg());
+      return;
+    }
+    setAgg(
+      runReplications({
+        twin: runTwin,
+        replications: runs,
+        simMinutes: SHIFT_MIN,
+        garment: yamTemplate,
+        operatorsOverride: yamOperators,
+      }),
+    );
+  }, [runTwin, runs, yamTemplate, yamOperators]);
 
   // ── Per-line replication ─────────────────────────────────────────────────
   // When the active twin has more than one wired sewing line, the
@@ -133,19 +190,32 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const perLineAggs = useMemo(() => {
     return lineBuildsForReports
       .filter((lb) => lb.ok)
-      .map((lb) => ({
-        line: lb.line,
-        bundleSize: lb.build.config.bundleSize,
-        // Operators = sum of parallel servers across stations. Matches the
-        // denominator the per-line efficiency calc in replications.ts uses,
-        // so the factory-weighted efficiency stays internally consistent.
-        operators: lb.build.config.stationServers.reduce((s, c) => s + c, 0),
-        // SAM per piece for this line's garment. Drives the SAM-consumed
-        // weight in the factory efficiency aggregation.
-        totalSmv: lb.build.config.operations.reduce((s, o) => s + o.smv, 0),
-        agg: runReplications({ config: lb.build.config, replications: runs, simMinutes: SHIFT_MIN }),
-      }));
-  }, [lineBuildsForReports, runs]);
+      .map((lb) => {
+        // Scope the active twin to this line's workstations so PML treats
+        // each sewing line as an independent run — different garments and
+        // bundle sizes don't compose into one homogeneous simulation.
+        const lineTwin = scopedTwinForLine(reportsTwin, lb.line.id);
+        const operatorsForLine = lb.build.config.stationServers.reduce((s, c) => s + c, 0);
+        return {
+          line: lb.line,
+          bundleSize: lb.build.config.bundleSize,
+          // Operators = sum of parallel servers across stations. Matches the
+          // efficiency denominator below so the factory-weighted aggregate
+          // stays internally consistent.
+          operators: operatorsForLine,
+          // SAM per piece for this line's garment. Drives the SAM-consumed
+          // weight in the factory efficiency aggregation.
+          totalSmv: lb.build.config.operations.reduce((s, o) => s + o.smv, 0),
+          agg: runReplications({
+            twin: lineTwin,
+            replications: runs,
+            simMinutes: SHIFT_MIN,
+            garment: lb.build.meta.garment,
+            operatorsOverride: operatorsForLine,
+          }),
+        };
+      });
+  }, [lineBuildsForReports, reportsTwin, runs]);
 
   // ── Factory-level aggregate across wired lines ──────────────────────────
   // When the twin has ≥1 wired line, the top KPI tiles (and the FACTORY
@@ -294,7 +364,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       <SectionHeader
         kicker="Reports"
         title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Model validation' : 'Production performance'}
-        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : `${yamTemplate.name} · ${yamOperators} operators`} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${runConfig.randomSeed}${runs > 1 ? `..${runConfig.randomSeed + runs - 1}` : ''}`}
+        sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : `${yamTemplate.name} · ${yamOperators} operators`} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${REPORT_BASE_SEED}${runs > 1 ? `..${REPORT_BASE_SEED + runs - 1}` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             <div style={{ display:'flex', alignItems:'center', gap:6 }}>
@@ -306,7 +376,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 { value: '10', label: '10' },
               ]}/>
             </div>
-            <Button variant="secondary" size="sm" icon="↻" onClick={() => setAgg(runReplications({ config: runConfig, replications: runs, simMinutes: SHIFT_MIN }))}>
+            <Button variant="secondary" size="sm" icon="↻" onClick={() => runTwin && setAgg(runReplications({ twin: runTwin, replications: runs, simMinutes: SHIFT_MIN, garment: yamTemplate, operatorsOverride: yamOperators }))}>
               Re-run
             </Button>
             <Button variant="primary" size="sm" icon="✦"
@@ -575,7 +645,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                   ['pieces produced', 'finished pieces that exited the last station of the line during the shift'],
                   ['period multiplier', `${periodLabel} → ×${periodMultiplier} (SHIFT ×1 · DAY ×1 · WEEK ×6 · MONTH ×26)`],
                 ]}
-                replication={runs > 1 ? `Mean across ${runs} replications (seeds ${runConfig.randomSeed}..${runConfig.randomSeed + runs - 1}); ± shows std of that mean.` : undefined}
+                replication={runs > 1 ? `Mean across ${runs} replications (seeds ${REPORT_BASE_SEED}..${REPORT_BASE_SEED + runs - 1}); ± shows std of that mean.` : undefined}
               />
             }
           />

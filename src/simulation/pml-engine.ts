@@ -223,22 +223,45 @@ export interface PmlSimOpts {
  * One frozen frame of per-block metrics at a specific sim time. The
  * timeseries `result.samples` is the contiguous list of these — used by
  * LiveSim to play back a recorded run as an animation.
+ *
+ * Carries everything the LiveSim ISO / TOP / HEAT views and the queueing
+ * analytics page need to render a frame, so the legacy `SimState` shape
+ * can be reconstructed by an adapter without touching the engine again.
  */
 export interface PmlSimSample {
   /** Sim time in minutes when this snapshot was taken. */
   time: number;
-  /** Per-block running totals: keyed by Workstation.id. Cumulative
-   *  outflow in pieces, current queue + in-service agent count. */
+  /** Per-block running totals: keyed by Workstation.id. */
   blocks: Map<
     string,
     {
+      /** Cumulative outflow in pieces (or inflow for Sinks). */
       producedPieces: number;
+      /** Current queue depth (FIFO + per-input-port FIFOs combined). */
       queueLen: number;
+      /** Agents currently being serviced at this block. Equivalent to
+       *  the legacy `StationView.busy` — count of occupied server slots. */
       inService: number;
+      /** Alias of `inService` matching the legacy `StationView.busy` field
+       *  name. Kept as a separate field so the adapter can read it without
+       *  a rename per call site. */
+      busy: number;
+      /** Parallel servers at this block (machine count). Static; mirrors
+       *  the legacy `StationView.serversTotal`. */
+      serversTotal: number;
     }
   >;
   /** Cumulative agents that have reached any Sink. */
   totalSunkPieces: number;
+  /** Cumulative pieces produced — alias of `totalSunkPieces` exposed under
+   *  the legacy field name so consumers can read either. */
+  produced: number;
+  /** Piece-weighted mean lead time across all sunk agents up to `time`,
+   *  in minutes. 0 until the first agent sinks. */
+  meanLeadTimeMin: number;
+  /** Workstation id with the largest live queue at sample time, or null
+   *  when nothing is queued. Live — recomputed each sample. */
+  bottleneckWsId: string | null;
 }
 
 export interface BlockObserved {
@@ -551,22 +574,51 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   }
 
   /** Capture a frozen snapshot of every block's running totals at sim
-   *  time `t`. O(blocks) — cheap, runs once per `samplePeriodMin`. */
+   *  time `t`. O(blocks) — cheap, runs once per `samplePeriodMin`.
+   *
+   *  Computes a live bottleneck (block with the largest queue at this
+   *  instant) and a running piece-mean lead time so LiveSim can show the
+   *  same numbers the legacy engine surfaces frame-by-frame. */
   function takeSample(t: number): void {
     const m = new Map<
       string,
-      { producedPieces: number; queueLen: number; inService: number }
+      {
+        producedPieces: number;
+        queueLen: number;
+        inService: number;
+        busy: number;
+        serversTotal: number;
+      }
     >();
+    let liveBottleneckWsId: string | null = null;
+    let liveBottleneckQ = 0;
     for (const b of blocks.values()) {
       const portQ = [...b.queueByInputPort.values()].reduce((s, q) => s + q.length, 0);
+      const queueLen = b.queue.length + portQ;
+      if (queueLen > liveBottleneckQ) {
+        liveBottleneckQ = queueLen;
+        liveBottleneckWsId = b.ws.id;
+      }
       // Sinks have no output ports — their "produced" is what flowed IN.
       m.set(b.ws.id, {
         producedPieces: b.kind === 'Sink' ? b.inflowPieces : b.outflowPieces,
-        queueLen: b.queue.length + portQ,
+        queueLen,
         inService: b.inService,
+        // `busy` mirrors `inService` — both expose occupied service slots.
+        // Kept as separate fields so the legacy-shape adapter can read the
+        // legacy field name without an alias map.
+        busy: b.inService,
+        serversTotal: b.servers,
       });
     }
-    samples.push({ time: t, blocks: m, totalSunkPieces: totalProduced });
+    samples.push({
+      time: t,
+      blocks: m,
+      totalSunkPieces: totalProduced,
+      produced: totalProduced,
+      meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
+      bottleneckWsId: liveBottleneckWsId,
+    });
   }
   // Initial sample at t=0 so the timeline doesn't start empty.
   if (samplePeriodMin > 0) takeSample(0);
