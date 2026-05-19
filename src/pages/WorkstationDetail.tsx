@@ -18,14 +18,14 @@ import { Card, SectionHeader, StationTimeseriesGrid } from '../components';
 import { QueueAnalysisPanel, type QueueAnalysisChange } from '../components/QueueAnalysisPanel';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import {
-  buildSimConfig,
-  efficiencyFromSkillMatrix,
   meanOf,
-  useSim,
+  usePmlSim,
+  EMPTY_TWIN,
   type QueueDiscipline,
   type ServiceDist,
   type StationView,
 } from '../simulation';
+import { buildGarmentTwin } from '../domain/reference-twin';
 import { useGarments } from '../store/garments';
 import { useProject } from '../store/project';
 import { GARMENT_TEMPLATES } from '../domain';
@@ -36,10 +36,9 @@ export function WorkstationDetailPage() {
   const { deptId, wsId } = useParams();
   const navigate = useNavigate();
 
-  // Project + garment + skill matrix → SimConfig
+  // Project + garment + skill matrix → synthetic twin → PML
   const project = useProject();
   const selectedGarmentId = useProject((s) => s.selectedGarmentId);
-  const skillMatrix = useProject((s) => s.skillMatrix);
   const defaultOperators = useProject((s) => s.defaultOperators);
   const updateOperation = useProject((s) => s.updateOperation);
   const garments = useGarments();
@@ -57,17 +56,15 @@ export function WorkstationDetailPage() {
 
   const op = opIndex >= 0 ? garment.operations[opIndex] : undefined;
 
-  const opEfficiency = useMemo(
-    () => efficiencyFromSkillMatrix(skillMatrix, garment.operations),
-    [skillMatrix, garment],
+  // Synthesise a single-line twin from the garment so PML has a graph to run.
+  // Empty-twin fallback keeps the hook call unconditional in the corner case
+  // where the garment carries no ops (the page renders an empty state below).
+  const twin = useMemo(
+    () => buildGarmentTwin(garment, defaultOperators) ?? EMPTY_TWIN,
+    [garment, defaultOperators],
   );
 
-  const config = useMemo(
-    () => buildSimConfig({ garment, operators: defaultOperators, opEfficiency }),
-    [garment, defaultOperators, opEfficiency],
-  );
-
-  const { state, step, reset } = useSim(config);
+  const { state, step, reset } = usePmlSim(twin, { garment });
 
   // Auto-warm the sim once on mount so KPIs aren't all zeros.
   useEffect(() => {
@@ -95,7 +92,9 @@ export function WorkstationDetailPage() {
     );
   }
 
-  const station = state.stations[opIndex];
+  // Lookup by opId — robust to the adapter's ordering (which mirrors the
+  // synthesised twin's workstation order, not the garment's operation index).
+  const station = state.stations.find((s) => s.opId === op.id);
 
   // Save the change back to the operation in the project store so it
   // persists and re-flows through buildSimConfig on the next run.
@@ -105,10 +104,12 @@ export function WorkstationDetailPage() {
       serviceDistribution: ServiceDist;
       queueCapacity: number;
       queueDiscipline: typeof patch.queueDiscipline;
+      servers: number;
     }> = {};
     if (patch.serviceDistribution) opPatch.serviceDistribution = patch.serviceDistribution;
     if (patch.queueCapacity != null) opPatch.queueCapacity = patch.queueCapacity;
     if (patch.queueDiscipline) opPatch.queueDiscipline = patch.queueDiscipline;
+    if (patch.servers != null) opPatch.servers = patch.servers;
     if (Object.keys(opPatch).length === 0) return;
     updateOperation(garment.id, GARMENT_TEMPLATES[garment.id], op.id, opPatch);
   };

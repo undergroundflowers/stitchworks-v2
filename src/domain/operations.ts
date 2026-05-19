@@ -61,6 +61,13 @@ export interface Operation {
    * Queue discipline for tickets at this station. Missing ⇒ FCFS.
    */
   queueDiscipline?: QueueDiscipline;
+  /**
+   * Number of parallel servers (c) at this station. Lets the user pin
+   * c = 2, 3, … for a workstation manned by multiple operators on the
+   * same machine. Missing ⇒ engine falls back to the line's LPT auto-
+   * allocation (typically 1 per station).
+   */
+  servers?: number;
 }
 
 /**
