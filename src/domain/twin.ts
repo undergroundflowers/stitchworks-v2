@@ -40,7 +40,7 @@ import {
 // SCHEMA
 // ============================================================================
 
-export const TWIN_SCHEMA_VERSION = 7 as const;
+export const TWIN_SCHEMA_VERSION = 8 as const;
 export type TwinSchemaVersion = typeof TWIN_SCHEMA_VERSION;
 
 // ============================================================================
@@ -123,7 +123,8 @@ export interface SewingLine {
   /** Production system that paces this line. */
   productionSystem: ProductionSystemKey;
   /** Garment template id this line is configured to produce. Optional —
-   *  empty during initial set-up. */
+   *  empty during initial set-up. Falls back to the first order's garment
+   *  when an `orderSequence` is present. */
   garmentId?: string;
   /** Accent colour for the canvas band + tree pip. Defaults to the parent
    *  department's colour when unset at create time. */
@@ -131,6 +132,11 @@ export interface SewingLine {
   /** Target operator headcount across the line. Informational — the engine
    *  reads `workersRequired` per workstation. */
   operatorTarget?: number;
+  /** Ordered list of `Order.id`s this line will run in a shift. When set,
+   *  the engine emits each order's pieces in sequence, raising a
+   *  CHANGEOVER_BEGIN between consecutive orders whose garmentIds differ.
+   *  Empty / missing ⇒ legacy infinite Source behaviour using `garmentId`. */
+  orderSequence?: string[];
   notes?: string;
 }
 
@@ -300,7 +306,43 @@ export interface Twin {
    *  is computed from the source + target workstation footprints; this list
    *  stores only the topology. */
   connectors: Connector[];
+  /** Production orders this twin can run. Each line's `orderSequence`
+   *  references entries here by id. Empty / missing ⇒ legacy single-
+   *  garment-per-line behaviour. */
+  orders?: Order[];
   notes?: string;
+}
+
+/**
+ * A production order — a quantity of a specific garment to be produced.
+ * Lines pick orders up through `SewingLine.orderSequence` (ordered list
+ * of order ids); the engine emits each order's pieces in turn and raises
+ * a CHANGEOVER_BEGIN whenever consecutive orders have different garments.
+ *
+ * Schema landed in v8 (P4). Optional on the Twin so v7 saves keep
+ * loading cleanly.
+ */
+export interface Order {
+  id: string;
+  /** Customer / PO reference. Free-form, e.g. "PO-2026-04-1109". */
+  po?: string;
+  /** Buyer name. Free-form. */
+  client?: string;
+  /** Garment template id this order produces. */
+  garmentId: string;
+  /** Pieces ordered. */
+  quantity: number;
+  /** Optional ISO deadline. */
+  dueDate?: string;
+  /** 1 = highest. When two orders compete for the same line a planner
+   *  surfaces this; the engine itself is order-agnostic and runs the
+   *  declared sequence as-is. */
+  priority?: number;
+  /** Which line is committed to run this order. When set, it should
+   *  appear in that line's `orderSequence`. */
+  assignedLineId?: string;
+  /** ISO timestamp when the order was created in the planner. */
+  createdAt?: string;
 }
 
 // ============================================================================
@@ -340,6 +382,15 @@ export interface ScenarioKpis {
   intrinsicVsDynamicRatio?: number;
   /** Minutes lost to changeover during the run; populated in P4. */
   changeoverMinutes?: number;
+  /** Total changeover minutes summed across every changeover event in
+   *  the run. Identical to changeoverMinutes for single-line shifts;
+   *  diverges for multi-line factories where two lines change over in
+   *  parallel and the accumulator captures both. Populated in P4. */
+  totalChangeoverMinutes?: number;
+  /** Per-order completion time (sim minutes from the order's first piece
+   *  emitted by the Source until the order's last piece reaches the Sink).
+   *  Keyed by Order.id. Populated by P4's order-aware engine. */
+  perOrderCompletionTime?: Record<string, number>;
   /** Minutes lost to machine downtime during the run; populated in P2. */
   downtimeMinutes?: number;
   std?: {
@@ -804,9 +855,9 @@ export function validateTwin(twin: Twin): string[] {
   // time. Cast to number so the union-narrowed literal type doesn't make
   // the equality check tautological at compile time.
   const ver = twin.schemaVersion as number;
-  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== 4 && ver !== 5 && ver !== 6 && ver !== (TWIN_SCHEMA_VERSION as number)) {
+  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== 4 && ver !== 5 && ver !== 6 && ver !== 7 && ver !== (TWIN_SCHEMA_VERSION as number)) {
     errs.push(
-      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, 6, or ${TWIN_SCHEMA_VERSION}`,
+      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, 6, 7, or ${TWIN_SCHEMA_VERSION}`,
     );
   }
   const deptIds = new Set(twin.departments.map((d) => d.id));

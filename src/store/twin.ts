@@ -40,6 +40,7 @@ import {
   type ConnectorKind,
   type SewingLine,
   type ProductionSystemKey,
+  type Order,
   emptyTwin,
   forkTwin,
   newDeptId,
@@ -177,6 +178,17 @@ export interface TwinState {
   updateConnector: (id: string, patch: Partial<Omit<Connector, 'id'>>) => void;
   /** Remove a connector by id. */
   removeConnector: (id: string) => void;
+
+  // ── Order CRUD (P4) ──────────────────────────────────────────────────────
+  /** Append an Order to the active twin's `orders[]`. When `lineId` is
+   *  given AND that line exists, also push the order id onto the line's
+   *  `orderSequence` so the engine emits it. When `lineId` is missing the
+   *  order is stored unassigned — the IE can wire it up later by editing
+   *  `assignedLineId` / `orderSequence`. Returns the persisted order id. */
+  addOrderToActiveTwin: (
+    order: Omit<Order, 'id' | 'createdAt'> & { id?: string; createdAt?: string },
+    lineId?: string,
+  ) => string;
 
   // ── Lens-attribute writes (sugar over updateWorkstation) ─────────────────
   setOperation: (wsId: string, patch: Partial<Workstation['operation']>) => void;
@@ -654,6 +666,33 @@ export const useTwin = create<TwinState>()(
             connectors: (twin.connectors ?? []).filter((c) => c.id !== id),
           })),
         ),
+
+      // ── Order CRUD (P4) ─────────────────────────────────────────────────
+      addOrderToActiveTwin: (input, lineId) => {
+        const orderId =
+          input.id
+          ?? `ord-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 5)}`;
+        const order: Order = {
+          ...input,
+          id: orderId,
+          createdAt: input.createdAt ?? new Date().toISOString(),
+          assignedLineId: lineId ?? input.assignedLineId,
+        };
+        set((s) =>
+          updateActive(s, (twin) => {
+            const orders = [...(twin.orders ?? []), order];
+            const lines = lineId
+              ? (twin.lines ?? []).map((l) =>
+                  l.id === lineId
+                    ? { ...l, orderSequence: [...(l.orderSequence ?? []), orderId] }
+                    : l,
+                )
+              : twin.lines;
+            return { ...twin, orders, lines };
+          }),
+        );
+        return orderId;
+      },
 
       // ── Lens-attribute sugar ───────────────────────────────────────────────
       setOperation: (wsId, patch) =>

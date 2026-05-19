@@ -80,6 +80,9 @@ function emptyAgg(): AggregateKpis {
     offStandardLossPct: zero,
     labourProductivity: zero,
     demandTaktGap: zero,
+    totalChangeoverMin: zero,
+    totalDowntimeMin: zero,
+    perOrderCompletionTime: {},
     bottleneckOpName: '—',
     bottleneckQueue: 0,
     replications: [],
@@ -149,8 +152,14 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         operations: s.opIds.map((id) => opById.get(id)).filter((o): o is NonNullable<typeof o> => !!o),
       }));
     }
-    return autoAssign(yamTemplate.operations, yamOperators);
-  }, [storedOverride, yamOperators, yamTemplate]);
+    return autoAssign(
+      yamTemplate.operations,
+      yamOperators,
+      // Skill-aware balance: pass the matrix-derived efficiency so RPW
+      // biases ops toward operators who can actually run them at speed.
+      efficiencyFromSkillMatrix(project.skillMatrix, yamTemplate.operations),
+    );
+  }, [storedOverride, yamOperators, yamTemplate, project.skillMatrix]);
 
   function handleYamazumiChange(next: OperatorAssignment[]) {
     setYamazumiOverride(yamGarment, next.map((a) => ({ operatorId: a.id, opIds: a.operations.map((o) => o.id) })));
