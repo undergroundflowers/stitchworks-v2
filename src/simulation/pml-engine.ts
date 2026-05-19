@@ -37,6 +37,7 @@ import {
   getBlockParams,
   type PmlBlockKind,
 } from '../domain/pml';
+import { GARMENT_TEMPLATES } from '../domain';
 import { MinHeap, mulberry32 } from './priority-queue';
 import { sample as sampleDist, type ServiceDist } from './distributions';
 
@@ -402,6 +403,12 @@ interface BlockState {
    *  Caps `inService` even when the dept's ResourcePool has spare units;
    *  matches the real-world "one machine = one server" semantics. Default 1. */
   servers: number;
+  /** Source-only: pieces carried by each emitted agent. Cached at build so
+   *  the sourceTick handler doesn't re-read getBlockParams per tick. Falls
+   *  back to the downstream Service's `bundleSize` when the Source itself
+   *  doesn't pin a value — keeps pilot-factory `buf_in` workstations
+   *  emitting full bundles instead of single pieces. */
+  piecesPerAgent: number;
 }
 
 // ============================================================================
@@ -414,10 +421,44 @@ interface BlockState {
 // translate the resolved record into the engine's preferred units
 // (minutes for time, capacity counts).
 
-/** Service cycle time in MINUTES per agent (deterministic fallback). */
+/** Service cycle time in MINUTES per agent (deterministic fallback).
+ *
+ *  Priority order:
+ *    1. Authored override on `ws.block.params.cycleS`.
+ *    2. Op-bulletin SMV × bundleSize — when the workstation is bound to a
+ *       garment operation (typical for pilot-factory lines). Each engine
+ *       "agent" carries one bundle, so the cycle is `smv × bundleSize`
+ *       minutes per agent. Without this lookup, every sewing workstation
+ *       falls back to the catalog's generic `cycle_s` (35s for any sewing
+ *       machine), which makes Line 1 and Line 2 run at identical tempo
+ *       regardless of which garment they're stitching.
+ *    3. Catalog `cycle_s` / `capacity_per_hr` / 30s hard default.
+ */
 function cycleMinFor(ws: Workstation): number {
+  const overrideCycleS = ws.block?.params?.cycleS;
+  if (overrideCycleS != null && overrideCycleS > 0) {
+    return overrideCycleS / 60;
+  }
+  const opCycleMin = opCycleMinFor(ws);
+  if (opCycleMin != null) return opCycleMin;
   const r = getBlockParams(ws);
   return Math.max(0, r.cycleS) / 60;
+}
+
+/** If the workstation is bound to a garment operation, return the cycle
+ *  time per agent (in MINUTES) derived from the bulletin's SMV times the
+ *  bundle size. Returns null when the binding is incomplete or the op
+ *  lookup misses — caller falls back to the catalog default. */
+function opCycleMinFor(ws: Workstation): number | null {
+  const opId = ws.operation?.opId;
+  const garmentId = ws.operation?.garmentId;
+  if (!opId || !garmentId) return null;
+  const garment = GARMENT_TEMPLATES[garmentId];
+  if (!garment) return null;
+  const op = garment.operations.find((o) => o.id === opId);
+  if (!op || !(op.smv > 0)) return null;
+  const bundleSize = Math.max(1, Math.round(ws.operation?.bundleSize ?? 1));
+  return op.smv * bundleSize;
 }
 
 /** Service / Delay cycle distribution if set; undefined ⇒ engine falls
@@ -499,7 +540,46 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       passProb: passProbFor(ws),
       batchSize: batchSizeFor(ws),
       servers: Math.max(1, Math.round(getBlockParams(ws).servers)),
+      piecesPerAgent: Math.max(1, Math.round(getBlockParams(ws).piecesPerAgent)),
     });
+  }
+
+  // ── Smart Source defaults from downstream bundleSize ─────────────────────
+  // When a Source (typically a `buf_in` workstation) hasn't pinned an
+  // explicit `piecesPerAgent`, look at the first downstream Service block
+  // it feeds. If that block carries a `bundleSize` from the garment bulletin,
+  // emit full bundles instead of single pieces. Without this, every line
+  // bottoms out at the 60 agents/hr × 1 piece default — making the Source
+  // the true bottleneck regardless of which garment is on the line.
+  for (const ws of twin.workstations) {
+    const b = blocks.get(ws.id);
+    if (!b || b.kind !== 'Source') continue;
+    // Skip when the user has explicitly pinned piecesPerAgent on the block.
+    if (ws.block?.params?.piecesPerAgent != null) continue;
+    // Find the first downstream Service with a bundleSize.
+    let bundleSize: number | null = null;
+    for (const c of twin.connectors) {
+      if (c.fromWsId !== ws.id) continue;
+      const down = blocks.get(c.toWsId);
+      if (!down) continue;
+      const bs = down.ws.operation?.bundleSize;
+      if (bs && bs > 0) {
+        bundleSize = bs;
+        break;
+      }
+      // One more hop in case the immediate downstream is a Queue/Buffer.
+      for (const c2 of twin.connectors) {
+        if (c2.fromWsId !== down.ws.id) continue;
+        const down2 = blocks.get(c2.toWsId);
+        const bs2 = down2?.ws.operation?.bundleSize;
+        if (bs2 && bs2 > 0) {
+          bundleSize = bs2;
+          break;
+        }
+      }
+      if (bundleSize) break;
+    }
+    if (bundleSize) b.piecesPerAgent = bundleSize;
   }
 
   // ── Build dept resource pools (implicit binding for v1) ───────────────────
@@ -938,7 +1018,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (e.kind === 'sourceTick') {
       const src = blocks.get(e.wsId);
       if (!src) continue;
-      const pieces = getBlockParams(src.ws).piecesPerAgent;
+      const pieces = src.piecesPerAgent;
       const agent: Agent = { id: nextAgentId++, bornAt: now, pieces };
       // Source has no inputs but is the entry point — emit on its sole
       // output. emitOnPort handles outflow/pieces accounting.
