@@ -507,22 +507,23 @@ function cycleMinFor(
   ws: Workstation,
   opEfficiency?: Record<string, number>,
 ): number {
+  // P2: skill efficiency applies at every cycle source, not just the
+  // op-derived path. Pilot factories author block.params.cycleS directly
+  // from op.smv × bundleSize, so if skill effi is only applied to the
+  // op-derived branch the multiplier silently no-ops on pilot lines.
+  const opId = ws.operation?.opId;
+  const raw = opId ? opEfficiency?.[opId] : undefined;
+  const eff = clampSkillEfficiency(raw);
   const overrideCycleS = ws.block?.params?.cycleS;
   if (overrideCycleS != null && overrideCycleS > 0) {
-    return overrideCycleS / 60;
+    return (overrideCycleS / 60) / eff;
   }
   const opCycleMin = opCycleMinFor(ws);
   if (opCycleMin != null) {
-    // P2: apply per-op skill efficiency when the caller supplied one.
-    // Efficiency > 1 ⇒ faster than nominal; < 1 ⇒ slower. Clamped to a
-    // safe band so a stale matrix can't drive cycle to 0 or infinity.
-    const opId = ws.operation?.opId;
-    const raw = opId ? opEfficiency?.[opId] : undefined;
-    const eff = clampSkillEfficiency(raw);
     return opCycleMin / eff;
   }
   const r = getBlockParams(ws);
-  return Math.max(0, r.cycleS) / 60;
+  return Math.max(0, r.cycleS) / 60 / eff;
 }
 
 /** Skill efficiency multiplier — clamp to [0.5, 1.5] so a stale or wild
@@ -762,9 +763,21 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // handler reschedules the next BREAKDOWN_BEGIN, so this only seeds one
   // event per workstation.
   const breakdownByMachine = opts.machineBreakdowns ?? {};
+  /** Resolve the apparel `MachineCode` for a workstation by looking up the
+   *  bound op in its garment bulletin. Returns null when the workstation
+   *  isn't bound to an op (e.g. Source / Sink / buffer). */
+  const machineCodeFor = (ws: Workstation): string | null => {
+    const opId = ws.operation?.opId;
+    const garmentId = ws.operation?.garmentId;
+    if (!opId || !garmentId) return null;
+    const garment = GARMENT_TEMPLATES[garmentId];
+    if (!garment) return null;
+    const op = garment.operations.find((o) => o.id === opId);
+    return op?.machineCode ?? null;
+  };
   if (Object.keys(breakdownByMachine).length > 0) {
     for (const ws of twin.workstations) {
-      const code = ws.resources?.machineId;
+      const code = machineCodeFor(ws);
       if (!code) continue;
       const spec = breakdownByMachine[code];
       if (!spec || !(spec.mtbfMin > 0) || !(spec.mttrMin > 0)) continue;
@@ -1324,7 +1337,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (e.kind === 'breakdownBegin') {
       const ws = twin.workstations.find((w) => w.id === e.wsId);
       if (!ws) continue;
-      const code = ws.resources?.machineId;
+      const code = machineCodeFor(ws);
       const spec = code ? breakdownByMachine[code] : undefined;
       if (!spec) continue;
       frozenWorkstations.add(e.wsId);
