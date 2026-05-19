@@ -376,7 +376,7 @@ export function ProcessCodeView({ twin }: ProcessCodeViewProps) {
         title="Show generated code"
         style={{
           position: 'absolute',
-          top: 14,
+          bottom: 56,
           left: 14,
           zIndex: 6,
           background: '#0e1116',
@@ -400,7 +400,7 @@ export function ProcessCodeView({ twin }: ProcessCodeViewProps) {
     <div
       style={{
         position: 'absolute',
-        top: 14,
+        bottom: 56,
         left: 14,
         zIndex: 6,
         width: 480,

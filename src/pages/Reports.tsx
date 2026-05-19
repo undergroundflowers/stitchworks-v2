@@ -1,7 +1,8 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Card, Button, Stat, SectionHeader, Progress, ToggleGroup, Yamazumi, autoAssign, HideableBox, type OperatorAssignment } from '../components';
 import { useEffect, useMemo, useState, type ReactNode } from 'react';
-import { useNavigate } from 'react-router-dom';
+import { useLocation, useNavigate } from 'react-router-dom';
+import { ScenariosPanel } from './Scenarios';
 import {
   smoothnessIndex,
   balanceLoss,
@@ -32,17 +33,56 @@ const SHIFT_MIN = 480;
  *  page chrome can display the exact range without re-running the engine. */
 const REPORT_BASE_SEED = 42;
 
+/** Sum HistoryPoint series across multiple lines so the factory-scope
+ *  OUTPUT OVER TIME chart shows the wired factory's combined cumulative
+ *  output, not just one synthetic line's. Series are produced by the same
+ *  engine with the same shift duration / 5-min sampling, so element-wise
+ *  alignment is safe; the longest series wins on length and the shorter
+ *  ones contribute zero past their end (no NaN edges). */
+function sumHistories(
+  series: { time: number; produced: number; wip: number; throughputPerHr: number }[][],
+): { time: number; produced: number; wip: number; throughputPerHr: number }[] {
+  const nonEmpty = series.filter((s) => s.length > 0);
+  if (nonEmpty.length === 0) return [];
+  const longest = nonEmpty.reduce((a, b) => (b.length > a.length ? b : a));
+  return longest.map((point, i) => {
+    let produced = 0;
+    let wip = 0;
+    let throughputPerHr = 0;
+    for (const s of nonEmpty) {
+      const p = s[i];
+      if (!p) continue;
+      produced += p.produced;
+      wip += p.wip;
+      throughputPerHr += p.throughputPerHr;
+    }
+    return { time: point.time, produced, wip, throughputPerHr };
+  });
+}
+
 /** Empty-state aggregate — used before the first replication completes or
  *  when the chosen garment carries no operations. */
 function emptyAgg(): AggregateKpis {
+  const zero = { mean: 0, std: 0 };
   return {
     n: 0,
-    producedPieces: { mean: 0, std: 0 },
-    throughputPerHr: { mean: 0, std: 0 },
-    efficiencyPct: { mean: 0, std: 0 },
-    meanLeadTime: { mean: 0, std: 0 },
-    utilization: { mean: 0, std: 0 },
-    wipBundles: { mean: 0, std: 0 },
+    producedPieces: zero,
+    throughputPerHr: zero,
+    efficiencyPct: zero,
+    meanLeadTime: zero,
+    utilization: zero,
+    wipBundles: zero,
+    oee: zero,
+    oeeAvailability: zero,
+    oeePerformance: zero,
+    oeeQuality: zero,
+    onStandardPct: zero,
+    offStandardLossPct: zero,
+    labourProductivity: zero,
+    demandTaktGap: zero,
+    totalChangeoverMin: zero,
+    totalDowntimeMin: zero,
+    perOrderCompletionTime: {},
     bottleneckOpName: '—',
     bottleneckQueue: 0,
     replications: [],
@@ -69,10 +109,25 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const garments = useGarments();
   const setYamazumiOverride = project.setYamazumiOverride;
   const clearYamazumiOverride = project.clearYamazumiOverride;
+  const location = useLocation();
   const [period, setPeriod] = useState<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>('SHIFT');
-  // In-page tab nav. Line balance is a part of performance, so it lives as a
-  // section under the same Reports umbrella rather than its own route.
-  const [tab, setTab] = useState<'performance' | 'balance' | 'validation'>('performance');
+  // In-page tab nav. Line balance is a part of performance, Scenarios is the
+  // saved-run comparison surface — both live under the same Reports umbrella
+  // rather than as their own routes.
+  const [tab, setTab] = useState<'performance' | 'balance' | 'validation' | 'scenarios'>(() => {
+    const qs = new URLSearchParams(location.search).get('tab');
+    return qs === 'scenarios' || qs === 'balance' || qs === 'validation' || qs === 'performance'
+      ? qs
+      : 'performance';
+  });
+  // Honour ?tab= changes on subsequent navigations (e.g. clicking "Scenarios"
+  // from elsewhere in the app after the page is already mounted).
+  useEffect(() => {
+    const qs = new URLSearchParams(location.search).get('tab');
+    if (qs === 'scenarios' || qs === 'balance' || qs === 'validation' || qs === 'performance') {
+      setTab(qs);
+    }
+  }, [location.search]);
 
   // Save-scenario modal state. We avoid `window.prompt()` because it's
   // suppressed inside many embedded preview / iframe contexts, which silently
@@ -97,8 +152,14 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         operations: s.opIds.map((id) => opById.get(id)).filter((o): o is NonNullable<typeof o> => !!o),
       }));
     }
-    return autoAssign(yamTemplate.operations, yamOperators);
-  }, [storedOverride, yamOperators, yamTemplate]);
+    return autoAssign(
+      yamTemplate.operations,
+      yamOperators,
+      // Skill-aware balance: pass the matrix-derived efficiency so RPW
+      // biases ops toward operators who can actually run them at speed.
+      efficiencyFromSkillMatrix(project.skillMatrix, yamTemplate.operations),
+    );
+  }, [storedOverride, yamOperators, yamTemplate, project.skillMatrix]);
 
   function handleYamazumiChange(next: OperatorAssignment[]) {
     setYamazumiOverride(yamGarment, next.map((a) => ({ operatorId: a.id, opIds: a.operations.map((o) => o.id) })));
@@ -363,7 +424,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       : { width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
       <SectionHeader
         kicker="Reports"
-        title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Model validation' : 'Production performance'}
+        title={tab === 'balance' ? 'Line balance' : tab === 'validation' ? 'Model validation' : tab === 'scenarios' ? 'Saved scenarios' : 'Production performance'}
         sub={`${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · 480-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : `${yamTemplate.name} · ${yamOperators} operators`} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${REPORT_BASE_SEED}${runs > 1 ? `..${REPORT_BASE_SEED + runs - 1}` : ''}`}
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -385,7 +446,10 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 // save later; the "(device)" suffix calls out that the
                 // timestamp is wall time, not sim/calendar time.
                 const wallStamp = new Date().toLocaleString(undefined, { month: 'short', day: 'numeric', hour: '2-digit', minute: '2-digit' });
-                const defaultName = `${yamTemplate.name} · ${yamOperators} ops · ${runs > 1 ? `${runs}× ` : ''}${wallStamp} (device)`;
+                const scopeLabel = factoryAgg !== null
+                  ? `Factory · ${perLineAggs.length} ${perLineAggs.length === 1 ? 'line' : 'lines'} · ${perLineAggs.reduce((sum, l) => sum + l.operators, 0)} ops`
+                  : `${yamTemplate.name} · ${yamOperators} ops`;
+                const defaultName = `${scopeLabel} · ${runs > 1 ? `${runs}× ` : ''}${wallStamp} (device)`;
                 setSaveName(defaultName);
                 setSaveNotes('');
                 setSaveOpen(true);
@@ -870,7 +934,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900 }}>OUTPUT OVER TIME</div>
                 <div style={{ fontSize:12, color: SW_COLORS.muted }}>
                   {factoryScope
-                    ? `Single-line trace from ${yamTemplate.name} — see PER-LINE OUTPUT OVER TIME below for the wired factory's per-line curves.`
+                    ? `Factory cumulative — sum of all ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}, sampled every 5 sim-minutes. Per-line curves below.`
                     : 'Bundles produced per 5-min interval — sampled live from the engine.'}
                 </div>
               </div>
@@ -879,7 +943,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 <span><span style={{ color: SW_COLORS.bobbin }}>■</span> WIP</span>
               </div>
             </div>
-            <KpiLineChart history={agg.firstHistory}/>
+            <KpiLineChart history={factoryScope ? sumHistories(perLineAggs.map((r) => r.agg.firstHistory)) : agg.firstHistory}/>
           </Card>
         </HideableBox>
 
@@ -920,32 +984,67 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
       </div>
       )}
 
-      {tab === 'performance' && (
+      {tab === 'performance' && perLineAggs.length > 0 && (
       <div style={{ marginBottom:14 }}>
         <HideableBox>
           <Card padding={20}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:14, paddingRight: 36 }}>BY SYSTEM</div>
-            {[
-              { k:'PBS',     v: 88, basePcs: 524, col: SW_COLORS.brand },
-              { k:'Modular', v: 82, basePcs: 312, col: SW_COLORS.fabric },
-              { k:'UPS',     v: 76, basePcs: 208, col: SW_COLORS.bobbin },
-              { k:'Straight',v: 64, basePcs: 140, col: SW_COLORS.thread },
-            ].map(r => ({ ...r, n: `${(r.basePcs * periodMultiplier).toLocaleString()} pcs` })).map(r => (
-              <div key={r.k} style={{ marginBottom: 12 }}>
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:4 }}>
-                  <span style={{ fontWeight:700, fontSize:13 }}>{r.k}</span>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontSize:12, fontWeight:700, color: r.col }}>{r.v}%</span>
-                </div>
-                <Progress value={r.v} color={r.col} height={8}/>
-                <div style={{ fontSize:10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop:2 }}>{r.n}</div>
-              </div>
-            ))}
+            <div style={{ fontFamily: SW_FONTS.display, fontSize:14, fontWeight:900, marginBottom:6, paddingRight: 36 }}>BY SYSTEM</div>
+            <div style={{ fontSize: 12, color: SW_COLORS.muted, marginBottom: 14 }}>
+              Efficiency = SAM-earned ÷ operator-minutes, weighted across the lines on each system. Pieces are summed across those lines{periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''}.
+            </div>
+            {(() => {
+              const SYSTEM_META: Record<string, { label: string; color: string }> = {
+                PBS:      { label: 'PBS',      color: SW_COLORS.brand },
+                modular:  { label: 'Modular',  color: SW_COLORS.fabric },
+                UPS:      { label: 'UPS',      color: SW_COLORS.bobbin },
+                synchro:  { label: 'Synchro',  color: SW_COLORS.ok },
+                straight: { label: 'Straight', color: SW_COLORS.thread },
+              };
+              type Bucket = { key: string; label: string; color: string; lines: number; produced: number; opMinutes: number; samEarned: number };
+              const byKey: Record<string, Bucket> = {};
+              for (const r of perLineAggs) {
+                const key = r.line.productionSystem;
+                const meta = SYSTEM_META[key] ?? { label: key, color: SW_COLORS.muted };
+                const b = byKey[key] ?? { key, label: meta.label, color: meta.color, lines: 0, produced: 0, opMinutes: 0, samEarned: 0 };
+                b.lines += 1;
+                b.produced += r.agg.producedPieces.mean;
+                b.opMinutes += r.operators * SHIFT_MIN;
+                b.samEarned += r.agg.producedPieces.mean * r.totalSmv;
+                byKey[key] = b;
+              }
+              const buckets = Object.values(byKey).sort((a, b) => b.produced - a.produced);
+              if (buckets.length === 0) return null;
+              return buckets.map((b) => {
+                const efficiency = b.opMinutes > 0 ? (b.samEarned / b.opMinutes) * 100 : 0;
+                return (
+                  <div key={b.key} style={{ marginBottom: 12 }}>
+                    <div style={{ display:'flex', justifyContent:'space-between', alignItems:'baseline', marginBottom:4 }}>
+                      <span style={{ fontWeight:700, fontSize:13 }}>
+                        {b.label}
+                        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 600, color: SW_COLORS.muted, marginLeft: 6 }}>
+                          · {b.lines} {b.lines === 1 ? 'line' : 'lines'}
+                        </span>
+                      </span>
+                      <span style={{ fontFamily: SW_FONTS.mono, fontSize:12, fontWeight:700, color: b.color }}>{efficiency.toFixed(1)}%</span>
+                    </div>
+                    <Progress value={Math.min(100, efficiency)} color={b.color} height={8}/>
+                    <div style={{ fontSize:10, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono, marginTop:2 }}>
+                      {Math.round(b.produced * periodMultiplier).toLocaleString()} pcs
+                    </div>
+                  </div>
+                );
+              });
+            })()}
           </Card>
         </HideableBox>
       </div>
       )}
 
-      <div style={{ display:'flex', gap:10, justifyContent:'flex-end' }}>
+      {tab === 'scenarios' && (
+        <ScenariosPanel embedded />
+      )}
+
+      <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop: 18 }}>
         <Button variant="secondary" icon="↓">Export PDF</Button>
         {!embedded && (
           <Button variant="dark" icon="✓" onClick={() => navigate('/builder')}>Back to builder</Button>
@@ -959,11 +1058,13 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           onNameChange={setSaveName}
           onNotesChange={setSaveNotes}
           summary={{
-            template: yamTemplate.name,
-            operators: yamOperators,
-            runs: agg.n,
-            throughputPerHr: agg.throughputPerHr.mean,
-            efficiencyPct: agg.efficiencyPct.mean,
+            template: factoryScope ? `Factory · ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : yamTemplate.name,
+            operators: factoryScope
+              ? perLineAggs.reduce((sum, l) => sum + l.operators, 0)
+              : yamOperators,
+            runs: kpiSource.n,
+            throughputPerHr: kpiSource.throughputPerHr.mean,
+            efficiencyPct: kpiSource.efficiencyPct.mean,
           }}
           onCancel={() => setSaveOpen(false)}
           onConfirm={() => {
@@ -972,28 +1073,29 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             project.saveScenario({
               name: trimmed,
               notes: saveNotes.trim() || undefined,
+              twin: reportsTwin,
               kpis: {
-                producedPieces: agg.producedPieces.mean,
-                throughputPerHr: agg.throughputPerHr.mean,
-                efficiencyPct: agg.efficiencyPct.mean,
-                meanLeadTime: agg.meanLeadTime.mean,
-                utilization: agg.utilization.mean,
-                wipBundles: agg.wipBundles.mean,
-                bottleneckOpName: agg.bottleneckOpName,
-                bottleneckQueue: agg.bottleneckQueue,
-                replicationCount: agg.n,
-                std: agg.n > 1 ? {
-                  producedPieces: agg.producedPieces.std,
-                  throughputPerHr: agg.throughputPerHr.std,
-                  efficiencyPct: agg.efficiencyPct.std,
-                  meanLeadTime: agg.meanLeadTime.std,
-                  utilization: agg.utilization.std,
-                  wipBundles: agg.wipBundles.std,
+                producedPieces: kpiSource.producedPieces.mean,
+                throughputPerHr: kpiSource.throughputPerHr.mean,
+                efficiencyPct: kpiSource.efficiencyPct.mean,
+                meanLeadTime: kpiSource.meanLeadTime.mean,
+                utilization: kpiSource.utilization.mean,
+                wipBundles: kpiSource.wipBundles.mean,
+                bottleneckOpName: kpiSource.bottleneckOpName,
+                bottleneckQueue: kpiSource.bottleneckQueue,
+                replicationCount: kpiSource.n,
+                std: kpiSource.n > 1 ? {
+                  producedPieces: kpiSource.producedPieces.std,
+                  throughputPerHr: kpiSource.throughputPerHr.std,
+                  efficiencyPct: kpiSource.efficiencyPct.std,
+                  meanLeadTime: kpiSource.meanLeadTime.std,
+                  utilization: kpiSource.utilization.std,
+                  wipBundles: kpiSource.wipBundles.std,
                 } : undefined,
               },
             });
             setSaveOpen(false);
-            navigate('/scenarios');
+            setTab('scenarios');
           }}
         />
       )}
@@ -1001,7 +1103,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   );
 }
 
-type ReportTab = 'performance' | 'balance' | 'validation';
+type ReportTab = 'performance' | 'balance' | 'validation' | 'scenarios';
 
 interface ReportTabBarProps {
   value: ReportTab;
@@ -1023,6 +1125,7 @@ function ReportTabBar({ value, onChange, hasReference, hasPml }: ReportTabBarPro
       hint: 'Reference paper · PML run',
       badge: hasReference ? 'PAPER' : hasPml ? 'PML' : undefined,
     },
+    { id: 'scenarios',   label: 'Scenarios',   hint: 'Saved runs · compare KPIs' },
   ];
   return (
     <div

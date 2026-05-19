@@ -42,6 +42,25 @@ export interface Operation {
   follows?: string[];
   /** True if rejected pieces can be reworked at this op. */
   reworkable?: boolean;
+  /**
+   * Fraction (0..1) of pieces leaving this op's Service block that must be
+   * routed back upstream for rework. 0 ⇒ no rework, every piece passes
+   * first time. P2 default: 0 (off). Combine with `reworkRouteToOpId` to
+   * pick where the rework loop re-enters the bulletin.
+   */
+  reworkRate?: number;
+  /**
+   * Operation id the rework loop re-enters at. Missing ⇒ rework loops back
+   * to this same operation (in-place rework). When a piece's reworkCount
+   * exceeds `maxReworkAttempts` it is scrapped (counted in firstPassYield
+   * denominator, dropped from totalProduced).
+   */
+  reworkRouteToOpId?: string;
+  /**
+   * Maximum rework attempts per piece. After this many cycles the piece is
+   * scrapped. Defaults to 1 — one rework attempt then scrap if still bad.
+   */
+  maxReworkAttempts?: number;
   /** Free-form notes (e.g. "uses pattern guide", "watch needle gauge"). */
   notes?: string;
   // ── Queueing-theory overrides ────────────────────────────────────────────

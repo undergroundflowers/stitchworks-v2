@@ -213,6 +213,26 @@ function buildLine(opts: {
   const connectors: Connector[] = [];
 
   // Bundle IN at the head of sub-row 0.
+  // Explicitly tag as a PML Source with a bundle-aware emission rate.
+  // Without this, the catalog inference still picks Source (per the
+  // pml.ts CATALOG_TO_BLOCK map) but `getBlockParams` falls back to
+  // 60 agents/hr × 1 piece/agent — i.e. 60 pcs/hr — which becomes the
+  // global bottleneck for every line regardless of its garment / SMV.
+  // The result was that Line 1 (T-shirt) and Line 2 (Polo) both
+  // bottomed out at the same 339 pcs/shift even though their per-op
+  // SMVs differ. Sizing the Source from the line's bottleneck cycle
+  // makes sewing capacity the real bottleneck.
+  const bottleneckSmvMin = Math.max(
+    1e-3,
+    ...garment.operations.map((o) => o.smv),
+  );
+  const lineMaxPcsPerHr = 60 / bottleneckSmvMin; // 1 server per op
+  // 1.5× safety so the line is never starved; rounded up to whole bundles.
+  const bundleRatePerHr = Math.max(
+    1,
+    Math.ceil((lineMaxPcsPerHr / bundleSize) * 1.5),
+  );
+
   const bundleIn = makeWorkstation({
     deptId: opts.deptId,
     catalogId: 'buf_in',
@@ -220,6 +240,13 @@ function buildLine(opts: {
     name: `${opts.spec.name} · Bundle IN`,
   });
   bundleIn.lineId = lineId;
+  bundleIn.block = {
+    kind: 'Source',
+    params: {
+      sourceRatePerHr: bundleRatePerHr,
+      piecesPerAgent: bundleSize,
+    },
+  };
   stations.push(bundleIn);
 
   // One workstation per operation in the bulletin order.
@@ -244,6 +271,21 @@ function buildLine(opts: {
       ...ws.resources,
       workersRequired: 1,
       machineId: fixtureId,
+    };
+    // Pin the Service cycle to the operation's SMV (× bundleSize, because
+    // one engine "agent" carries a full bundle of pieces). Without this,
+    // getBlockParams falls back to the catalog's generic `cycle_s` (35s
+    // for any sewing machine), which makes every line run at the same
+    // tempo regardless of which garment it's stitching — Line 1 (T-shirt)
+    // and Line 2 (Polo) come out with identical throughput. SMV is in
+    // minutes-per-piece, so the agent's bundle-level cycle is
+    // smv × bundleSize × 60 seconds.
+    ws.block = {
+      kind: 'Service',
+      params: {
+        cycleS: Math.max(1, Math.round(op.smv * bundleSize * 60)),
+        servers: Math.max(1, Math.round(op.servers ?? 1)),
+      },
     };
     stations.push(ws);
     opStations.push(ws);
@@ -285,6 +327,7 @@ function buildLine(opts: {
     name: `${opts.spec.name} · Bundle OUT`,
   });
   bundleOut.lineId = lineId;
+  bundleOut.block = { kind: 'Sink' };
   stations.push(bundleOut);
   connectors.push({
     id: newConnectorId(),
