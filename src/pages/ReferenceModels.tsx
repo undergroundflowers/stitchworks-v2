@@ -1,6 +1,6 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
-import { Card, Tag, Button, SectionHeader } from '../components';
+import { Card, Tag, Button, SectionHeader, HudSelect } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import {
   REFERENCE_MODELS,
@@ -15,6 +15,7 @@ import {
   type ValidationRow,
 } from '../domain/reference-twin';
 import { useTwin } from '../store/twin';
+import { useReferenceContext } from '../store/reference';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 
 /**
@@ -53,6 +54,138 @@ export function ReferenceModelsPage() {
     [selectedSlug],
   );
   const [runMode, setRunMode] = useState<RunMode>(DEFAULT_RUN_MODE);
+
+  return (
+    <ReferenceModelsView
+      selected={selected}
+      onSelectSlug={setSelectedSlug}
+      runMode={runMode}
+      onRunModeChange={setRunMode}
+    />
+  );
+}
+
+/** Inner view — separated so the LOAD-and-simulate strip can sit in the
+ *  page hierarchy alongside the two-column grid without bloating the
+ *  top-level component. Pure presentation; state still owned by the
+ *  parent so url params / persistence can hook in later. */
+function ReferenceModelsView({
+  selected,
+  onSelectSlug,
+  runMode,
+  onRunModeChange,
+}: {
+  selected: ReferenceModel;
+  onSelectSlug: (s: string) => void;
+  runMode: RunMode;
+  onRunModeChange: (m: RunMode) => void;
+}) {
+  const navigate = useNavigate();
+  const loadCanonical = useTwin((s) => s.loadCanonical);
+  const refCtx = useReferenceContext();
+  const setRefContext = useReferenceContext((s) => s.setContext);
+  const clearRefContext = useReferenceContext((s) => s.clear);
+
+  // Variant menu derived from the currently-selected paper. Same shape the
+  // Sim toolbar used to surface, lifted up here so the page becomes the
+  // single home for picking + loading a reference run.
+  const variantOptions = useMemo(() => {
+    const opts: { key: string; label: string; tag: string }[] = [
+      {
+        key: 'baseline',
+        label: `Baseline · ${selected.baseline.operators} operators${
+          selected.baseline.throughputPerDayPcs
+            ? ` · ${selected.baseline.throughputPerDayPcs}/day`
+            : ''
+        }`,
+        tag: 'BASE',
+      },
+    ];
+    if (selected.proposed) {
+      opts.push({
+        key: 'proposed',
+        label: `Proposed · ${selected.proposed.operators} operators${
+          selected.proposed.throughputPerDayPcs
+            ? ` · ${selected.proposed.throughputPerDayPcs}/day`
+            : ''
+        }`,
+        tag: 'PROP',
+      });
+    }
+    if (selected.scenarios) {
+      for (const s of selected.scenarios) {
+        opts.push({
+          key: s.id,
+          label: `${s.id} · ${s.name} · ${s.operators} operators · ${s.throughputPerDayPcs}/day (+${s.upliftPct}%)`,
+          tag: s.id,
+        });
+      }
+    }
+    return opts;
+  }, [selected]);
+
+  const [variantKey, setVariantKey] = useState<string>(
+    refCtx.slug === selected.slug && refCtx.variantKey ? refCtx.variantKey : 'baseline',
+  );
+
+  // Reset variant if the user picks a paper that doesn't have the
+  // previously-chosen variant key (e.g. moved from a paper with scenarios
+  // to one without).
+  useEffect(() => {
+    if (!variantOptions.some((o) => o.key === variantKey)) {
+      setVariantKey(variantOptions[0].key);
+    }
+  }, [variantOptions, variantKey]);
+
+  const [loadFlash, setLoadFlash] = useState<string | null>(null);
+
+  function handleLoadAndSimulate() {
+    const opts =
+      variantKey === 'baseline' || variantKey === 'proposed'
+        ? { variant: variantKey as 'baseline' | 'proposed' }
+        : { scenarioId: variantKey };
+    const twin = buildReferenceTwin(selected, opts);
+    if (!twin) {
+      setLoadFlash('This paper has no enumerated operations — twin not built.');
+      return;
+    }
+    const r = loadCanonical(twin);
+    if (!r.ok) {
+      setLoadFlash(`Could not load twin: ${r.reason}`);
+      return;
+    }
+    setRefContext({ slug: selected.slug, variantKey });
+    const variantLabel =
+      variantKey === 'baseline'
+        ? 'Baseline'
+        : variantKey === 'proposed'
+          ? 'Proposed'
+          : variantKey;
+    setLoadFlash(`Loaded · ${selected.authorYear} · ${variantLabel}`);
+    setTimeout(() => setLoadFlash(null), 1500);
+    // Jump to PML view in /sim so the user sees the topology immediately.
+    navigate('/sim?view=pml');
+  }
+
+  function handleClearReference() {
+    clearRefContext();
+    setLoadFlash(null);
+  }
+
+  const refLoadedLabel =
+    refCtx.slug && refCtx.variantKey
+      ? (() => {
+          const m = REFERENCE_MODELS.find((x) => x.slug === refCtx.slug);
+          if (!m) return null;
+          const vlabel =
+            refCtx.variantKey === 'baseline'
+              ? 'Baseline'
+              : refCtx.variantKey === 'proposed'
+                ? 'Proposed'
+                : refCtx.variantKey;
+          return `${m.authorYear} · ${vlabel}`;
+        })()
+      : null;
 
   return (
     <div
@@ -104,6 +237,106 @@ export function ReferenceModelsPage() {
           Stitchworks and verify against the paper's published KPIs.
         </p>
 
+        {/* ── LOAD & SIMULATE STRIP ─────────────────────────────────────
+            Centralised picker that builds the currently-selected paper's
+            twin (baseline / proposed / per-scenario), parks it as the
+            active reference context, and jumps to /sim?view=pml so the
+            user lands on the topology view ready to run. Lives on this
+            page (not in the Sim toolbar) so the Sim chrome stays focused
+            on observing; authoring + loading happens here. */}
+        <div
+          style={{
+            marginTop: 18,
+            padding: '12px 16px',
+            border: `1px solid ${SW_COLORS.line}`,
+            background: SW_COLORS.paper,
+            borderRadius: SW_RADIUS.md,
+            boxShadow: '0 1px 0 rgba(0,0,0,0.02)',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+            flexWrap: 'wrap',
+          }}
+        >
+          <span
+            style={{
+              color: SW_COLORS.brand,
+              fontFamily: SW_FONTS.mono,
+              fontWeight: 800,
+              fontSize: 10,
+              letterSpacing: '2px',
+            }}
+          >
+            📚 LOAD &amp; SIMULATE
+          </span>
+          <span style={{ color: SW_COLORS.muted, fontFamily: SW_FONTS.body, fontSize: 12 }}>
+            {selected.authorYear} — {selected.title}
+          </span>
+          <div style={{ flex: '0 0 auto' }}>
+            <HudSelect
+              value={variantKey}
+              onChange={setVariantKey}
+              minWidth={320}
+              variant="light"
+              options={variantOptions.map((o) => ({
+                value: o.key,
+                label: o.label,
+                tag: o.tag,
+              }))}
+            />
+          </div>
+          <Button variant="primary" size="sm" icon="▶" onClick={handleLoadAndSimulate}>
+            LOAD &amp; SIMULATE
+          </Button>
+          {refLoadedLabel && (
+            <div
+              style={{
+                display: 'flex',
+                alignItems: 'center',
+                gap: 8,
+                padding: '4px 10px',
+                border: `1px solid ${SW_COLORS.brand}55`,
+                background: `${SW_COLORS.brand}12`,
+                borderRadius: SW_RADIUS.sm,
+                fontFamily: SW_FONTS.mono,
+                fontSize: 11,
+                fontWeight: 700,
+                color: SW_COLORS.brand,
+                letterSpacing: '1px',
+              }}
+            >
+              ACTIVE · {refLoadedLabel}
+              <button
+                onClick={handleClearReference}
+                title="Clear reference context"
+                style={{
+                  background: 'transparent',
+                  border: 'none',
+                  color: SW_COLORS.brand,
+                  cursor: 'pointer',
+                  fontSize: 14,
+                  lineHeight: 1,
+                  padding: 0,
+                }}
+              >
+                ×
+              </button>
+            </div>
+          )}
+          {loadFlash && (
+            <span
+              style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 11,
+                fontWeight: 700,
+                color: SW_COLORS.ok,
+              }}
+            >
+              ✓ {loadFlash}
+            </span>
+          )}
+        </div>
+
         <div
           style={{
             display: 'grid',
@@ -132,13 +365,13 @@ export function ReferenceModelsPage() {
                 key={m.slug}
                 model={m}
                 selected={m.slug === selected.slug}
-                onSelect={() => setSelectedSlug(m.slug)}
+                onSelect={() => onSelectSlug(m.slug)}
               />
             ))}
           </div>
 
           {/* ── RIGHT: selected model detail ─────────────────────────── */}
-          <ModelDetail model={selected} runMode={runMode} onRunModeChange={setRunMode} />
+          <ModelDetail model={selected} runMode={runMode} onRunModeChange={onRunModeChange} />
         </div>
       </div>
     </div>

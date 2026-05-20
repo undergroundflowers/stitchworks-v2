@@ -47,13 +47,17 @@ import {
 } from '../store/twin';
 import { useProject, useFactoryLibrary } from '../store';
 import type {
+  Assignment,
   Department,
   Workstation,
   Connector,
   ConnectorKind,
+  Operator,
   SewingLine,
   ProductionSystemKey,
+  LinePolicy,
 } from '../domain/twin';
+import { defaultPolicyFor, lineSystemBadge, shareDebtForLine, validateTwinWarnings } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
@@ -147,6 +151,51 @@ const CONNECTOR_LABEL: Record<ConnectorKind, string> = {
   material: 'MATERIAL',
 };
 
+/** Per-`MaterialFlow.carrier` visual style. Bundle is the heaviest line —
+ *  it carries the most pieces per move. Piece flow is a thin solid line
+ *  because each move is one unit. Hanger flow is dotted to suggest the
+ *  small clips along an overhead rail. Takt flow is dashed long-short to
+ *  evoke a metronome / belt pulse. Returned dash strings use SVG's
+ *  `stroke-dasharray` grammar; `null` means "no dash". */
+const CARRIER_STYLE: Record<
+  'bundle' | 'piece' | 'hanger' | 'takt',
+  { stroke: string; width: number; dash: string | null; label: string }
+> = {
+  bundle: { stroke: SW_COLORS.brand, width: 2.6, dash: null, label: 'B' },
+  piece: { stroke: SW_COLORS.steel, width: 1.6, dash: null, label: 'P' },
+  hanger: { stroke: SW_COLORS.brand, width: 2.0, dash: '1 4', label: 'H' },
+  takt: { stroke: SW_COLORS.ink, width: 2.0, dash: '8 4', label: 'T' },
+};
+
+interface FlowStyle {
+  stroke: string;
+  width: number;
+  dash: string | null;
+  label: string | null;
+}
+
+/** Resolve a Connector to its render style. Flow connectors with a
+ *  `flow.carrier` annotation get a per-carrier look; everything else
+ *  falls through to the base ConnectorKind color so the existing
+ *  operator/material/un-annotated-flow visuals don't regress. */
+function flowStyleFor(c: Connector): FlowStyle {
+  if (c.kind === 'flow' && c.flow?.carrier) {
+    const s = CARRIER_STYLE[c.flow.carrier];
+    return { stroke: s.stroke, width: s.width, dash: s.dash, label: s.label };
+  }
+  return {
+    stroke: CONNECTOR_HEX[c.kind],
+    width: c.kind === 'flow' ? 2.4 : 1.8,
+    dash: c.kind === 'flow' ? null : '6 4',
+    label: null,
+  };
+}
+
+/** Opacity of unfocused entities while a selection is active. Tuned so dimmed
+ *  shapes stay legible as context but the selection clearly pops. Used by
+ *  all three Builder views (iso · logic · process) to render focus-dimming. */
+const FOCUS_DIM = 0.22;
+
 /** Resolve a catalog id to its IsoFixture entry. Used to look up draw-fn,
  *  footprint, and label from ids that live in the apparel palette. */
 function resolveFixture(catalogId: string): IsoFixture | undefined {
@@ -155,14 +204,27 @@ function resolveFixture(catalogId: string): IsoFixture | undefined {
 
 /** Effective footprint for a workstation. Per-ws `size` override wins over
  *  the catalog fixture's defaults, so two SNLS machines can be different
- *  sizes. Values are decimal (no integer rounding). */
-function wsFootprint(ws: Workstation): { w: number; d: number; h: number } {
+ *  sizes. Values are decimal (no integer rounding).
+ *
+ *  When the workstation is rotated 90° or 270° on the build plane, the
+ *  effective floor occupancy swaps w ↔ d — a 1 × 2 SNLS lying lengthwise
+ *  along Y becomes 2 × 1 along X. The selection ring, dept-containment
+ *  check, marquee hit-test, and centroid all read this rotated footprint
+ *  so they outline the cells the sprite actually covers after rotation.
+ *  The raw (unrotated) catalog dims are still available via
+ *  `wsBaseFootprint` when a fixture's draw fn needs them. */
+function wsBaseFootprint(ws: Workstation): { w: number; d: number; h: number } {
   const fix = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
   return {
     w: ws.size?.w ?? fix?.w ?? 1,
     d: ws.size?.d ?? fix?.d ?? 1,
     h: ws.size?.h ?? fix?.h ?? 1,
   };
+}
+function wsFootprint(ws: Workstation): { w: number; d: number; h: number } {
+  const base = wsBaseFootprint(ws);
+  const turned = ws.rotation === 90 || ws.rotation === 270;
+  return turned ? { w: base.d, d: base.w, h: base.h } : base;
 }
 
 // ============================================================================
@@ -448,8 +510,18 @@ export function BuilderPage() {
 
   // Live graph validation — recomputed on every twin change. Cheap, runs
   // the same pure validator the engine uses post-run for consistency. PML
-  // is the only engine now, so the chip is always live.
-  const pmlIssues = useMemo<PmlIssue[]>(() => validatePmlGraph(twin), [twin]);
+  // is the only engine now, so the chip is always live. We also fold in
+  // operator-allocation warnings from `validateTwinWarnings` so an over-
+  // allocated operator surfaces in the same WARN chip the user already
+  // watches for engine wiring issues.
+  const pmlIssues = useMemo<PmlIssue[]>(() => {
+    const graph = validatePmlGraph(twin);
+    const staffing: PmlIssue[] = validateTwinWarnings(twin).map((m) => ({
+      level: 'warn' as const,
+      message: m,
+    }));
+    return [...graph, ...staffing];
+  }, [twin]);
 
   /** Effective selected-workstation id set: the primary `selected` anchor
    *  (when it's a ws) plus every id in `extraSelectedWs`. This is what the
@@ -847,16 +919,8 @@ export function BuilderPage() {
       e.stopPropagation();
       const startX = e.clientX;
       const startY = e.clientY;
-      const initial = (() => {
-        const t = selectActiveTwin(useTwin.getState());
-        if (kind === 'ws') {
-          const w = t.workstations.find((x) => x.id === id);
-          return w ? { x: w.position.x, y: w.position.y } : null;
-        }
-        const d = t.departments.find((x) => x.id === id);
-        return d ? { x: d.bounds.x, y: d.bounds.y } : null;
-      })();
-      if (!initial) return;
+      const t0 = selectActiveTwin(useTwin.getState());
+
       // Preserve a multi-selection when the user grabs a workstation that's
       // already part of it. Otherwise replace with a single selection. SHIFT
       // is reserved for toggling — leave the selection untouched on mousedown
@@ -867,22 +931,68 @@ export function BuilderPage() {
         setSelected({ kind, id });
         if (!inMulti) setExtraSelectedWs(new Set());
       }
+
+      // Build the snapshot set — every entity whose initial position the
+      // drag delta should be added to. Captured once at gesture start so
+      // live state changes during the drag can't poison the math.
+      //
+      //  • Grabbing a multi-selected ws (no SHIFT) drags the whole multi-set
+      //    as one rigid group — the user's explicit ask.
+      //  • SHIFT-drag intentionally moves only the grabbed station so a user
+      //    can nudge one member without losing the rest of the selection.
+      //  • Grabbing a department drags the dept rect AND every workstation
+      //    whose initial coords lay inside its bounds, so the equipment
+      //    stays nested rather than getting left behind.
+      const wsSnap: { id: string; x0: number; y0: number }[] = [];
+      const deptSnap: { id: string; x0: number; y0: number; w: number; h: number }[] = [];
+
+      if (kind === 'ws') {
+        const ids = new Set<string>();
+        ids.add(id);
+        if (!e.shiftKey && inMulti) {
+          for (const wid of selectedWsIdsRef.current) ids.add(wid);
+        }
+        for (const w of t0.workstations) {
+          if (ids.has(w.id)) wsSnap.push({ id: w.id, x0: w.position.x, y0: w.position.y });
+        }
+      } else {
+        const dept = t0.departments.find((x) => x.id === id);
+        if (!dept) return;
+        deptSnap.push({
+          id: dept.id,
+          x0: dept.bounds.x,
+          y0: dept.bounds.y,
+          w: dept.bounds.w,
+          h: dept.bounds.h,
+        });
+        for (const w of t0.workstations) {
+          if (
+            w.position.x >= dept.bounds.x &&
+            w.position.x < dept.bounds.x + dept.bounds.w &&
+            w.position.y >= dept.bounds.y &&
+            w.position.y < dept.bounds.y + dept.bounds.h
+          ) {
+            wsSnap.push({ id: w.id, x0: w.position.x, y0: w.position.y });
+          }
+        }
+      }
+
+      if (wsSnap.length === 0 && deptSnap.length === 0) return;
+
       let moved = false;
       function onMove(ev: MouseEvent) {
-        const dx = (ev.clientX - startX) / zoomRef.current;
-        const dy = (ev.clientY - startY) / zoomRef.current;
-        const w = unproject(dx, dy);
-        const nx = Math.round(initial!.x + w.x);
-        const ny = Math.round(initial!.y + w.y);
+        const sx = (ev.clientX - startX) / zoomRef.current;
+        const sy = (ev.clientY - startY) / zoomRef.current;
+        const delta = unproject(sx, sy);
+        const dx = Math.round(delta.x);
+        const dy = Math.round(delta.y);
         if (!moved && Math.hypot(ev.clientX - startX, ev.clientY - startY) < 3) return;
         moved = true;
-        if (kind === 'ws') {
-          moveWorkstation(id, { x: nx, y: ny });
-        } else {
-          const t = selectActiveTwin(useTwin.getState());
-          const dept = t.departments.find((x) => x.id === id);
-          if (!dept) return;
-          moveDepartment(id, { ...dept.bounds, x: nx, y: ny });
+        for (const s of wsSnap) {
+          moveWorkstation(s.id, { x: s.x0 + dx, y: s.y0 + dy });
+        }
+        for (const s of deptSnap) {
+          moveDepartment(s.id, { x: s.x0 + dx, y: s.y0 + dy, w: s.w, h: s.h });
         }
       }
       function onUp() {
@@ -1098,7 +1208,14 @@ export function BuilderPage() {
 
       if (!selected && extraSelectedWs.size === 0) return;
       if (e.key === 'r' || e.key === 'R') {
-        if (selected?.kind === 'ws') rotateWorkstation(selected.id, e.shiftKey ? -1 : 1);
+        // Rotate every selected workstation in step (anchor + marquee extras)
+        // so a multi-select cluster all face the same new direction together.
+        // SHIFT reverses the rotation step (counter-clockwise).
+        const dir: 1 | -1 = e.shiftKey ? -1 : 1;
+        const ids = new Set<string>();
+        if (selected?.kind === 'ws') ids.add(selected.id);
+        for (const id of extraSelectedWs) ids.add(id);
+        for (const id of ids) rotateWorkstation(id, dir);
       } else if (e.key === 'Delete' || e.key === 'Backspace') {
         // Delete the entire ws selection set (anchor + extras). Departments
         // are still removed only when they are the lone anchor — multi-select
@@ -1547,7 +1664,7 @@ export function BuilderPage() {
             clean at rest. */}
         {(selectedWsIds.size > 0 || clipboard) && (
           <div
-            title="▭ SELECT marquee · ⇧+Click toggles a station in/out · ⌘/Ctrl+A select all · ⌘/Ctrl+C copy · ⌘/Ctrl+X cut · ⌘/Ctrl+V paste at cursor · Esc clears"
+            title="▭ SELECT marquee · ⇧+Click toggles a station in/out · Drag any selected to move the whole group · ⌘/Ctrl+A select all · ⌘/Ctrl+C copy · ⌘/Ctrl+X cut · ⌘/Ctrl+V paste at cursor · Esc clears"
             style={{
               display: 'flex',
               alignItems: 'center',
@@ -2599,6 +2716,18 @@ function workstationScreenCenter(ws: Workstation): { sx: number; sy: number } {
 function CanvasSVG(props: CanvasSVGProps) {
   const { twin, lens, hoverCell, drop, selected, selectedWsIds, selectRect, zoom, pan, stageSize, clipboardGhost } = props;
 
+  // Focus-dim: when there's an active selection, fade everything that isn't
+  // the focused entity so the user sees what they've picked. `focusActive` is
+  // true when any dept or ws is selected; `dim(focused)` returns the wrapper
+  // opacity (1 for focused, FOCUS_DIM for unfocused, 1 when nothing selected).
+  const focusActive = selectedWsIds.size > 0 || selected !== null;
+  const dim = (focused: boolean) => (focusActive && !focused ? FOCUS_DIM : 1);
+  const selectedDeptId = selected?.kind === 'dept' ? selected.id : null;
+  // A line is in focus if it lives in the selected dept or holds a selected ws.
+  const lineFocused = (line: SewingLine) =>
+    selectedDeptId === line.deptId ||
+    twin.workstations.some((w) => w.lineId === line.id && selectedWsIds.has(w.id));
+
   // Grid subdivision density. As the user zooms in, each integer cell is
   // divided into more sub-cells (powers of 2). Steps are tuned so the next
   // tier kicks in just after the previous one becomes too coarse to track
@@ -2766,25 +2895,46 @@ function CanvasSVG(props: CanvasSVGProps) {
       {/* DEPARTMENTS — drawn first so they sit under workstations.
           While a drop tool is armed (drop.kind !== 'none'), entity shapes must
           let clicks pass through to the stage's onCanvasClick so placement
-          works *inside* a department instead of getting eaten by dept select. */}
-      {twin.departments.map((d) => (
-        <DepartmentShape
-          key={d.id}
-          dept={d}
-          selected={selected?.kind === 'dept' && selected.id === d.id}
-          placing={props.drop.kind !== 'none'}
-          onClick={(e) => props.onSelect({ kind: 'dept', id: d.id }, { shift: e.shiftKey })}
-          onMouseDown={(e) => props.onStartDrag('dept', d.id, e)}
-        />
-      ))}
+          works *inside* a department instead of getting eaten by dept select.
+          Each shape is wrapped in a focus-dim group: when something else is
+          selected, this dept fades to FOCUS_DIM so the selection pops. */}
+      {twin.departments.map((d) => {
+        const isDeptFocused = selectedDeptId === d.id;
+        return (
+          <g
+            key={d.id}
+            style={{ opacity: dim(isDeptFocused), transition: 'opacity 160ms' }}
+          >
+            <DepartmentShape
+              dept={d}
+              selected={selected?.kind === 'dept' && selected.id === d.id}
+              placing={props.drop.kind !== 'none'}
+              onClick={(e) => props.onSelect({ kind: 'dept', id: d.id }, { shift: e.shiftKey })}
+              onMouseDown={(e) => props.onStartDrag('dept', d.id, e)}
+            />
+          </g>
+        );
+      })}
 
       {/* SEWING LINE BANDS — translucent halo around the convex bounding box
           of each line's member workstations. Drawn above departments so the
           line accent reads on top of the dept fill, but below workstations so
           machine sprites stay clickable. */}
       {(twin.lines ?? []).map((line) => (
-        <SewingLineBand key={line.id} line={line} twin={twin} />
+        <g
+          key={line.id}
+          style={{ opacity: dim(lineFocused(line)), transition: 'opacity 160ms' }}
+        >
+          <SewingLineBand line={line} twin={twin} />
+        </g>
       ))}
+
+      {/* ROTATION CELLS — dashed loops connecting rotation_member stations
+          in rotation order. One overlay per unique cell (ws-set). Modular
+          / TSS twins get a visible cycle showing operators traverse the
+          cell; PBS / synchro / UPS have no rotation assignments so this
+          renders nothing. */}
+      <RotationCellsOverlay twin={twin} />
 
       {/* WORKSTATIONS — depth-sorted by x+y */}
       {[...twin.workstations]
@@ -2792,25 +2942,49 @@ function CanvasSVG(props: CanvasSVGProps) {
         .map((w) => {
           const isConnectSource =
             props.connect.on && props.connect.fromWsId === w.id;
+          const isWsFocused = selectedWsIds.has(w.id);
+          // "Shared" = at least one non-rotation assignment is fractional.
+          // Rotation cells are already labelled at the line-band level, so
+          // we deliberately exclude them here to keep the canvas readable
+          // on modular twins (otherwise every modular station would carry
+          // a redundant ⇄ pill).
+          const sharedAsgn = (twin.assignments ?? []).find(
+            (a) =>
+              a.wsId === w.id &&
+              a.role !== 'rotation_member' &&
+              (a.shareFrac ?? 1) < 1,
+          );
+          const sharedPct = sharedAsgn
+            ? Math.round((sharedAsgn.shareFrac ?? 1) * 100)
+            : null;
           return (
-            <WorkstationSprite
+            <g
               key={w.id}
-              ws={w}
-              selected={selectedWsIds.has(w.id)}
-              connectSource={isConnectSource}
-              lens={lens}
-              placing={props.drop.kind !== 'none'}
-              onClick={(e) => props.onSelect({ kind: 'ws', id: w.id }, { shift: e.shiftKey })}
-              onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
-            />
+              style={{ opacity: dim(isWsFocused), transition: 'opacity 160ms' }}
+            >
+              <WorkstationSprite
+                ws={w}
+                selected={selectedWsIds.has(w.id)}
+                connectSource={isConnectSource}
+                lens={lens}
+                placing={props.drop.kind !== 'none'}
+                sharedPct={sharedPct}
+                onClick={(e) => props.onSelect({ kind: 'ws', id: w.id }, { shift: e.shiftKey })}
+                onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
+              />
+            </g>
           );
         })}
 
-      {/* CONNECTORS — drawn above stations so arrows aren't occluded */}
+      {/* CONNECTORS — drawn above stations so arrows aren't occluded.
+          Connectors stay fully visible when either endpoint is in focus,
+          otherwise they fade with the rest of the scene. */}
       <ConnectorLayer
         twin={twin}
         connect={props.connect}
         onRemove={props.onRemoveConnector}
+        focusActive={focusActive}
+        focusedWsIds={selectedWsIds}
       />
 
       {/* HOVER PREVIEW */}
@@ -2942,6 +3116,106 @@ function DepartmentShape({
  * pointer events so workstation clicks pass through. Hidden when the line has
  * no member workstations yet (skeleton placeholder).
  */
+/**
+ * Dashed-loop overlay showing the rotation order across stations in each
+ * modular / TSS rotation cell. Renders one loop per unique cell (cells
+ * are identified by their canonical wsId-set, so multiple operators
+ * rotating the same group collapse to one overlay).
+ *
+ * Static today — the loop is fixed at sim build time. A future revision
+ * can animate the marker between dots using `PmlSimSample.rotationPointers`
+ * from LiveSim playback; until then, the static loop already communicates
+ * the rotation structure on the Builder canvas.
+ */
+function RotationCellsOverlay({
+  twin,
+}: {
+  twin: ReturnType<typeof selectActiveTwin>;
+}) {
+  // Bucket rotation_member assignments by canonical ws-id set so two
+  // operators rotating through the same cell render one overlay.
+  const cellsByKey = new Map<string, { wsIds: string[] }>();
+  const byOp = new Map<string, { wsId: string; rotationOrder: number }[]>();
+  for (const a of twin.assignments ?? []) {
+    if (a.role !== 'rotation_member') continue;
+    const arr = byOp.get(a.operatorId) ?? [];
+    arr.push({ wsId: a.wsId, rotationOrder: a.rotationOrder ?? arr.length });
+    byOp.set(a.operatorId, arr);
+  }
+  for (const [_, members] of byOp) {
+    if (members.length < 2) continue;
+    members.sort((a, b) => a.rotationOrder - b.rotationOrder);
+    const wsIds = members.map((m) => m.wsId);
+    const key = wsIds.join('|');
+    if (!cellsByKey.has(key)) cellsByKey.set(key, { wsIds });
+  }
+  if (cellsByKey.size === 0) return null;
+
+  const wsById = new Map(twin.workstations.map((w) => [w.id, w]));
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      {[...cellsByKey.values()].map((cell, ci) => {
+        // Project each workstation's centre to iso screen coords.
+        const points = cell.wsIds
+          .map((id) => wsById.get(id))
+          .filter((w): w is NonNullable<typeof w> => !!w)
+          .map((w) => {
+            const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === w.catalogId);
+            const fw = w.size?.w ?? fixture?.w ?? 1;
+            const fd = w.size?.d ?? fixture?.d ?? 1;
+            const cx = w.position.x + fw / 2;
+            const cy = w.position.y + fd / 2;
+            return isoProj(cx, cy);
+          });
+        if (points.length < 2) return null;
+        // Close the loop.
+        const ringPoints = [...points, points[0]];
+        const pathStr = ringPoints
+          .map((p, i) => `${i === 0 ? 'M' : 'L'} ${p.sx.toFixed(1)} ${p.sy.toFixed(1)}`)
+          .join(' ');
+        return (
+          <g key={ci}>
+            <path
+              d={pathStr}
+              fill="none"
+              stroke={SW_COLORS.bobbin}
+              strokeOpacity={0.55}
+              strokeWidth={1.2}
+              strokeDasharray="4 3"
+            />
+            {points.map((p, i) => (
+              <circle
+                key={i}
+                cx={p.sx}
+                cy={p.sy}
+                r={3}
+                fill={SW_COLORS.paper}
+                stroke={SW_COLORS.bobbin}
+                strokeWidth={1.2}
+              />
+            ))}
+            {/* Tiny arrow head at the second point so the user reads the
+                rotation direction. */}
+            {points.length >= 2 && (
+              <text
+                x={points[1].sx + 6}
+                y={points[1].sy - 6}
+                fontFamily={SW_FONTS.mono}
+                fontSize={8}
+                fontWeight={800}
+                fill={SW_COLORS.bobbin}
+                style={{ letterSpacing: '0.05em' }}
+              >
+                ↻ ROT
+              </text>
+            )}
+          </g>
+        );
+      })}
+    </g>
+  );
+}
+
 function SewingLineBand({
   line,
   twin,
@@ -2984,6 +3258,18 @@ function SewingLineBand({
   const labelX = tl.sx + 8;
   const labelY = tl.sy + 4;
 
+  const badge = lineSystemBadge(line, twin);
+  const nameWidth = Math.max(70, line.name.length * 5.6 + 18);
+  const badgeWidth = Math.max(60, badge.length * 5 + 14);
+
+  // Share-debt rollup for this line — same rule the engine and Reports use,
+  // pulled from the shared helper so the three call sites can't drift.
+  const { stations: sharedStations, savings: sharedSavings } = shareDebtForLine(twin, line.id);
+  const shareChip = sharedStations > 0
+    ? `⇄ ${sharedStations} · −${sharedSavings.toFixed(1)} OPR`
+    : null;
+  const shareChipWidth = shareChip ? Math.max(60, shareChip.length * 5 + 14) : 0;
+
   return (
     <g style={{ pointerEvents: 'none' }}>
       <polygon
@@ -2998,7 +3284,7 @@ function SewingLineBand({
       <rect
         x={labelX - 4}
         y={labelY - 10}
-        width={Math.max(70, line.name.length * 5.6 + 18)}
+        width={nameWidth}
         height={14}
         rx={2}
         fill={accent}
@@ -3015,6 +3301,60 @@ function SewingLineBand({
       >
         {line.name.toUpperCase()}
       </text>
+      {/* Second-line system badge — pale fill, accent border so it reads
+          as supplemental metadata rather than competing with the name. */}
+      <rect
+        x={labelX - 4}
+        y={labelY + 4}
+        width={badgeWidth}
+        height={12}
+        rx={2}
+        fill={SW_COLORS.paper}
+        stroke={accent}
+        strokeOpacity={0.8}
+        strokeWidth={1}
+      />
+      <text
+        x={labelX}
+        y={labelY + 12}
+        fontFamily={SW_FONTS.mono}
+        fontSize={8}
+        fontWeight={800}
+        fill={accent}
+        style={{ letterSpacing: '0.08em' }}
+      >
+        {badge}
+      </text>
+      {/* Third-line share-debt chip — only rendered when any station on this
+          line has a non-rotation shareFrac < 1. Alarm-tinted to flag the
+          engine cycle slowdown (each shared station cycles 1/shareFrac×). */}
+      {shareChip && (
+        <>
+          <rect
+            x={labelX - 4}
+            y={labelY + 16}
+            width={shareChipWidth}
+            height={12}
+            rx={2}
+            fill={SW_COLORS.paper}
+            stroke={SW_COLORS.alarm}
+            strokeOpacity={0.85}
+            strokeWidth={1}
+            strokeDasharray="2 1.5"
+          />
+          <text
+            x={labelX}
+            y={labelY + 24}
+            fontFamily={SW_FONTS.mono}
+            fontSize={8}
+            fontWeight={800}
+            fill={SW_COLORS.alarm}
+            style={{ letterSpacing: '0.08em' }}
+          >
+            {shareChip}
+          </text>
+        </>
+      )}
     </g>
   );
 }
@@ -3027,6 +3367,7 @@ function WorkstationSprite({
   connectSource,
   lens,
   placing,
+  sharedPct = null,
   onClick,
   onMouseDown,
 }: {
@@ -3035,6 +3376,13 @@ function WorkstationSprite({
   connectSource: boolean;
   lens: Lens;
   placing: boolean;
+  /** When this workstation's primary operator covers more than one
+   *  station (`shareFrac < 1`), the integer percentage of an operator
+   *  shift that lands here. `null` ⇒ not shared; no badge is drawn.
+   *  Rotation cells stay `null` because the line-band already calls
+   *  them out — adding a pill on every rotation station would just
+   *  clutter the canvas. */
+  sharedPct?: number | null;
   onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
@@ -3042,7 +3390,13 @@ function WorkstationSprite({
   if (!fixture) return null;
 
   const origin = isoProj(ws.position.x, ws.position.y);
-  const { w: fw, d: fd, h: fh } = wsFootprint(ws);
+  // `fw / fd / fh` is the effective (rotated) footprint used by the selection
+  // ring + heat overlay — those should outline the cells the sprite actually
+  // occupies after rotation. The fixture draw fn instead receives the raw
+  // catalog dims plus `r: ws.rotation` so it can rotate its geometry on the
+  // iso build plane (via isoProjR) rather than spinning in screen space.
+  const { w: fw, d: fd } = wsFootprint(ws);
+  const base = wsBaseFootprint(ws);
 
   // KPI heat tint (lens=kpis only) — based on observed.utilizationPct.
   const heat =
@@ -3058,7 +3412,7 @@ function WorkstationSprite({
 
   return (
     <g
-      transform={`translate(${origin.sx}, ${origin.sy}) rotate(${ws.rotation})`}
+      transform={`translate(${origin.sx}, ${origin.sy})`}
       onClick={(e) => {
         if (placing) return; // let placement click bubble to the stage
         e.stopPropagation();
@@ -3098,7 +3452,7 @@ function WorkstationSprite({
           strokeOpacity={0.9}
         />
       )}
-      {fixture.draw({ w: fw, d: fd, h: fh }) as ReactNode}
+      {fixture.draw({ w: base.w, d: base.d, h: base.h, r: ws.rotation }) as ReactNode}
 
       {/* KPI heat overlay */}
       {heat && (
@@ -3140,6 +3494,36 @@ function WorkstationSprite({
           <rect x={-26} y={-9} width={52} height={14} rx={3} fill={ws.kpiObserved ? SW_COLORS.brandDeep : SW_COLORS.muted} fillOpacity={0.92} />
           <text x={0} y={1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
             {ws.kpiObserved ? `${Math.round(ws.kpiObserved.utilizationPct)}% util` : 'no run'}
+          </text>
+        </g>
+      )}
+
+      {/* SHARED-WORKER pill — lens-independent, sits above the per-lens
+          badge so the user can spot shared stations from across the
+          canvas without entering Resources lens or opening the
+          Inspector. Brand-orange so it pops against the iso scene. */}
+      {sharedPct !== null && (
+        <g transform="translate(0, -44)" style={{ pointerEvents: 'none' }}>
+          <rect
+            x={-22}
+            y={-9}
+            width={44}
+            height={14}
+            rx={3}
+            fill={SW_COLORS.brand}
+            fillOpacity={0.95}
+          />
+          <text
+            x={0}
+            y={1}
+            textAnchor="middle"
+            fontFamily={SW_FONTS.mono}
+            fontSize={9}
+            fontWeight={800}
+            fill="#fff"
+            style={{ letterSpacing: '0.05em' }}
+          >
+            {`⇄ ${sharedPct}%`}
           </text>
         </g>
       )}
@@ -3370,10 +3754,16 @@ function ConnectorLayer({
   twin,
   connect,
   onRemove,
+  focusActive,
+  focusedWsIds,
 }: {
   twin: ReturnType<typeof selectActiveTwin>;
   connect: { on: boolean; kind: ConnectorKind; fromWsId: string | null };
   onRemove: (id: string) => void;
+  /** When true, dim every connector whose endpoints aren't in `focusedWsIds`.
+   *  Driven by the canvas-wide focus-dim feature. */
+  focusActive: boolean;
+  focusedWsIds: Set<string>;
 }) {
   const wsById = new Map(twin.workstations.map((w) => [w.id, w] as const));
   const dim = connect.on ? 0.35 : 1; // de-emphasise existing arrows while connecting
@@ -3403,12 +3793,18 @@ function ConnectorLayer({
         if (!a || !b) return null;
         const pa = workstationScreenCenter(a);
         const pb = workstationScreenCenter(b);
-        const color = CONNECTOR_HEX[c.kind];
+        const style = flowStyleFor(c);
+        const color = style.stroke;
         const mx = (pa.sx + pb.sx) / 2;
         const my = (pa.sy + pb.sy) / 2 - 6;
-        const isFlow = c.kind === 'flow';
+        const focusKept = focusedWsIds.has(c.fromWsId) || focusedWsIds.has(c.toWsId);
+        const focusOpacity = focusActive && !focusKept ? FOCUS_DIM : 1;
+        // Carrier mini-badge near the midpoint when the connector carries
+        // a system-specific annotation (B / P / H / T). Lets the user read
+        // the line type at a glance without opening the inspector.
+        const carrierLabel = style.label;
         return (
-          <g key={c.id} style={{ pointerEvents: 'auto' }}>
+          <g key={c.id} style={{ pointerEvents: 'auto', opacity: focusOpacity, transition: 'opacity 160ms' }}>
             <line
               x1={pa.sx}
               y1={pa.sy}
@@ -3416,8 +3812,8 @@ function ConnectorLayer({
               y2={pb.sy}
               stroke={color}
               strokeOpacity={dim}
-              strokeWidth={isFlow ? 2.4 : 1.8}
-              strokeDasharray={isFlow ? undefined : '6 4'}
+              strokeWidth={style.width}
+              strokeDasharray={style.dash ?? undefined}
               markerEnd={`url(#sw-arrow-${c.kind})`}
             />
             {/* Click target — invisible thicker line for easier hit-testing */}
@@ -3436,9 +3832,11 @@ function ConnectorLayer({
               }}
               style={{ cursor: 'pointer' }}
             >
-              <title>{`${CONNECTOR_LABEL[c.kind]} · ${a.name} → ${b.name} (click to delete)`}</title>
+              <title>
+                {`${CONNECTOR_LABEL[c.kind]}${c.flow?.carrier ? ` · ${c.flow.carrier}` : ''} · ${a.name} → ${b.name} (click to delete)`}
+              </title>
             </line>
-            {c.label && (
+            {c.label ? (
               <text
                 x={mx}
                 y={my}
@@ -3452,7 +3850,22 @@ function ConnectorLayer({
               >
                 {c.label}
               </text>
-            )}
+            ) : carrierLabel ? (
+              <g style={{ pointerEvents: 'none' }} opacity={dim * 0.9}>
+                <circle cx={mx} cy={my} r={6} fill={SW_COLORS.paper} stroke={color} strokeWidth={1} />
+                <text
+                  x={mx}
+                  y={my + 3}
+                  textAnchor="middle"
+                  fontFamily={SW_FONTS.mono}
+                  fontSize={8}
+                  fontWeight={800}
+                  fill={color}
+                >
+                  {carrierLabel}
+                </text>
+              </g>
+            ) : null}
           </g>
         );
       })}
@@ -3823,8 +4236,9 @@ function BuilderLogicView({
             sit outside so they stay anchored to the SVG corners. */}
         <g transform={`translate(${pan.x} ${pan.y}) scale(${zoom})`}>
 
-        {/* Flow arrows */}
-        {ordered.map((_, i) => {
+        {/* Flow arrows. When something is selected, fade arrows that don't
+            touch the focused dept so the user's pick stands out. */}
+        {ordered.map((d, i) => {
           if (i === ordered.length - 1) return null;
           const a = positions[i];
           const b = positions[i + 1];
@@ -3839,6 +4253,12 @@ function BuilderLogicView({
             const midY = (a.y + CARD_H + b.y) / 2;
             path = `M ${sx} ${sy} L ${sx + 24} ${sy} L ${sx + 24} ${midY} L ${b.x - 24} ${midY} L ${b.x - 24} ${ey} L ${ex - 6} ${ey}`;
           }
+          const nextDept = ordered[i + 1];
+          const arrowFocused =
+            selected?.kind === 'dept' &&
+            (selected.id === d.id || selected.id === nextDept.id);
+          const arrowOpacity =
+            selected !== null && !arrowFocused ? FOCUS_DIM : 1;
           return (
             <path
               key={`flow-${i}`}
@@ -3849,6 +4269,8 @@ function BuilderLogicView({
               strokeDasharray="6 5"
               markerEnd="url(#builder-logic-arrow)"
               pointerEvents="none"
+              opacity={arrowOpacity}
+              style={{ transition: 'opacity 160ms' }}
             />
           );
         })}
@@ -3873,6 +4295,9 @@ function BuilderLogicView({
           });
           const summary = Object.entries(byCatalog).slice(0, 3);
 
+          const focusActive = selected !== null;
+          const cardFocused = isSelected;
+          const focusOpacity = focusActive && !cardFocused ? FOCUS_DIM : 1;
           return (
             <g
               key={d.id}
@@ -3889,7 +4314,8 @@ function BuilderLogicView({
               }}
               style={{
                 cursor: connect.on ? 'crosshair' : isDragging ? 'grabbing' : 'grab',
-                opacity: isDragging ? 0.7 : 1,
+                opacity: (isDragging ? 0.7 : 1) * focusOpacity,
+                transition: 'opacity 160ms',
               }}
             >
               {isConnectFrom && (
@@ -4583,17 +5009,33 @@ function BuilderProcessView({
           {twin.name.toUpperCase()} · PROCESS · PML BLOCKS WITH I/O PORTS
         </text>
 
-        {/* Swim-lane backgrounds + dept labels */}
+        {/* Swim-lane backgrounds + dept labels. Each lane fades when a
+            *different* dept/ws is the focus so the user's pick reads clearly.
+            A lane stays in focus when its dept is selected, or when it
+            contains the selected workstation. */}
         {(() => {
           let y = PAD_TOP;
           const lanes: ReactNode[] = [];
+          const focusActive = selected !== null;
+          const selectedDeptId = selected?.kind === 'dept' ? selected.id : null;
+          const selectedWsDeptId =
+            selected?.kind === 'ws'
+              ? twin.workstations.find((w) => w.id === selected.id)?.deptId ?? null
+              : null;
           ordered.forEach((d) => {
             const blocksInLane = flowNodes.filter((n) => n.ws.deptId === d.id);
             const laneH = BLOCK_H + LANE_PAD_TOP + LANE_GAP;
             const accent = DEPT_COLOR_HEX[d.color];
             const laneArmed = drop.kind === 'ws';
+            const laneFocused =
+              selectedDeptId === d.id || selectedWsDeptId === d.id;
+            const laneOpacity = focusActive && !laneFocused ? FOCUS_DIM : 1;
             lanes.push(
-              <g key={`lane-${d.id}`} transform={`translate(0, ${y})`}>
+              <g
+                key={`lane-${d.id}`}
+                transform={`translate(0, ${y})`}
+                style={{ opacity: laneOpacity, transition: 'opacity 160ms' }}
+              >
                 <rect
                   x={LANE_LABEL_W}
                   y={4}
@@ -4708,28 +5150,55 @@ function BuilderProcessView({
           </g>
         )}
 
-        {/* Connector wires (drawn before blocks so blocks sit on top) */}
-        {wires.map(({ c, a, b }) => {
-          const dx = b.x - a.x;
-          const cx1 = a.x + Math.max(28, dx / 2);
-          const cx2 = b.x - Math.max(28, dx / 2);
-          const path = `M ${a.x} ${a.y} C ${cx1} ${a.y}, ${cx2} ${b.y}, ${b.x} ${b.y}`;
-          return (
-            <g key={c.id}>
-              <path
-                d={path}
-                fill="none"
-                stroke={CONNECTOR_HEX[c.kind]}
-                strokeWidth={2}
-                strokeOpacity={0.85}
-                markerEnd="url(#builder-process-arrow)"
-                pointerEvents="none"
-              />
-            </g>
-          );
-        })}
+        {/* Connector wires (drawn before blocks so blocks sit on top).
+            Wires stay full opacity when either endpoint is part of the focus,
+            otherwise they fade with the rest of the diagram. */}
+        {(() => {
+          const focusActive = selected !== null;
+          const selectedWsId = selected?.kind === 'ws' ? selected.id : null;
+          const selectedDeptId = selected?.kind === 'dept' ? selected.id : null;
+          const wireFocused = (c: Connector) => {
+            if (selectedWsId)
+              return c.fromWsId === selectedWsId || c.toWsId === selectedWsId;
+            if (selectedDeptId) {
+              const from = twin.workstations.find((w) => w.id === c.fromWsId);
+              const to = twin.workstations.find((w) => w.id === c.toWsId);
+              return (
+                from?.deptId === selectedDeptId || to?.deptId === selectedDeptId
+              );
+            }
+            return false;
+          };
+          return wires.map(({ c, a, b }) => {
+            const dx = b.x - a.x;
+            const cx1 = a.x + Math.max(28, dx / 2);
+            const cx2 = b.x - Math.max(28, dx / 2);
+            const path = `M ${a.x} ${a.y} C ${cx1} ${a.y}, ${cx2} ${b.y}, ${b.x} ${b.y}`;
+            const wireOpacity =
+              focusActive && !wireFocused(c) ? FOCUS_DIM : 1;
+            return (
+              <g
+                key={c.id}
+                style={{ opacity: wireOpacity, transition: 'opacity 160ms' }}
+              >
+                <path
+                  d={path}
+                  fill="none"
+                  stroke={flowStyleFor(c).stroke}
+                  strokeWidth={flowStyleFor(c).width}
+                  strokeDasharray={flowStyleFor(c).dash ?? undefined}
+                  strokeOpacity={0.85}
+                  markerEnd="url(#builder-process-arrow)"
+                  pointerEvents="none"
+                />
+              </g>
+            );
+          });
+        })()}
 
-        {/* Block cards */}
+        {/* Block cards. A block stays in focus when it is itself selected, or
+            when the selected dept is its parent lane (so picking a dept lights
+            up all of its blocks). */}
         {Array.from(positions.values()).map((n) => {
           const isSelected = selected?.kind === 'ws' && selected.id === n.ws.id;
           const isDragging = dragWsId === n.ws.id;
@@ -4740,6 +5209,12 @@ function BuilderProcessView({
             stroke: SW_COLORS.line,
           };
           const role = apparelRoleFor(n.ws);
+          const focusActive = selected !== null;
+          const blockFocused =
+            isSelected ||
+            (selected?.kind === 'dept' && selected.id === n.ws.deptId);
+          const focusOpacity =
+            focusActive && !blockFocused ? FOCUS_DIM : 1;
           return (
             <g
               key={n.ws.id}
@@ -4750,7 +5225,8 @@ function BuilderProcessView({
                   : isDragging
                     ? 'grabbing'
                     : 'grab',
-                opacity: isDragging ? 0.75 : 1,
+                opacity: (isDragging ? 0.75 : 1) * focusOpacity,
+                transition: 'opacity 160ms',
               }}
               onMouseDown={(e) => {
                 // Skip when port-connect is the user's intent: ports have
@@ -5076,6 +5552,488 @@ function LensToggle({
   );
 }
 
+/**
+ * Show every operator currently assigned to a workstation, with their
+ * role + shareFrac. Surfaces the data model that the Build-in-Builder seed
+ * authors so the user can see at a glance whether a station is run by
+ * one primary, by a rotation cell, or shared between two operators.
+ *
+ * Render-only for now — editing assignments (drag an operator onto a
+ * station, change shareFrac, mark a worker as shared) is a follow-up.
+ * When there are no assignments we render a short hint so the user knows
+ * the station is currently uncovered.
+ */
+function WorkstationAssignmentsView({
+  ws,
+  operators,
+  assignments,
+  connectors,
+}: {
+  ws: Workstation;
+  operators: Operator[];
+  assignments: Assignment[];
+  connectors: Connector[];
+}) {
+  const rows = assignments.filter((a) => a.wsId === ws.id);
+  const operatorsById = new Map(operators.map((o) => [o.id, o]));
+
+  // "Share with next station" is offered when:
+  //   - this station has exactly one primary assignment (the typical
+  //     fixed-station shape — sharing a rotation cell doesn't make sense),
+  //   - that operator isn't already shared (shareFrac === 1),
+  //   - a flow connector leaves this station to a downstream one,
+  //   - and that downstream station also has a primary assignment whose
+  //     operator differs from ours (otherwise they're already shared).
+  // Gating like this keeps the button quiet when the gesture wouldn't
+  // mean anything; users only see it when it's actually applicable.
+  const myPrimary = rows.find((a) => a.role === 'primary');
+  const nextEdge = connectors.find(
+    (c) => c.kind === 'flow' && c.fromWsId === ws.id,
+  );
+  const nextPrimary = nextEdge
+    ? assignments.find((a) => a.wsId === nextEdge.toWsId && a.role === 'primary')
+    : undefined;
+  const canShareWithNext =
+    !!myPrimary &&
+    (myPrimary.shareFrac ?? 1) === 1 &&
+    !!nextPrimary &&
+    nextPrimary.operatorId !== myPrimary.operatorId;
+
+  // Summarise the assignment mix in one line — "6 rotators", "primary + 2 helpers",
+  // "shared 50/50", etc. — so the user reads the staffing model before they
+  // need to scan individual rows.
+  const summary = (() => {
+    if (rows.length === 0) return 'uncovered';
+    const byRole = new Map<string, number>();
+    for (const a of rows) byRole.set(a.role, (byRole.get(a.role) ?? 0) + 1);
+    const sharedRows = rows.filter((a) => (a.shareFrac ?? 1) < 1 && a.role !== 'rotation_member');
+    const parts: string[] = [];
+    if (byRole.get('rotation_member')) {
+      parts.push(`${byRole.get('rotation_member')} rotator${byRole.get('rotation_member') === 1 ? '' : 's'}`);
+    }
+    if (byRole.get('primary')) {
+      parts.push(`${byRole.get('primary')}× primary`);
+    }
+    if (byRole.get('helper')) {
+      parts.push(`${byRole.get('helper')}× helper`);
+    }
+    if (byRole.get('floater')) {
+      parts.push(`${byRole.get('floater')}× floater`);
+    }
+    if (sharedRows.length > 0) {
+      parts.push(`${sharedRows.length} shared`);
+    }
+    return parts.join(' · ') || 'uncovered';
+  })();
+
+  // Slowest non-rotation shareFrac wins — that's also what the engine reads
+  // in pml-engine `buildShareFactorMap`. Engine multiplies the nominal cycle
+  // by 1/shareFactor, so a shareFrac of 0.5 ≡ a 2× slowdown.
+  const stationShareFrac = (() => {
+    let min = 1;
+    for (const a of rows) {
+      if (a.role === 'rotation_member') continue;
+      const sf = a.shareFrac ?? 1;
+      if (sf >= 1) continue;
+      if (sf < min) min = sf;
+    }
+    return min;
+  })();
+  const cycleMultiplier = stationShareFrac > 0 ? 1 / stationShareFrac : 1;
+
+  return (
+    <div>
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline' }}>
+        <div style={sectionLabel}>Operators on this station</div>
+        <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: rows.length === 0 ? SW_COLORS.muted : SW_COLORS.brand }}>
+          {summary}
+        </div>
+      </div>
+      {stationShareFrac < 1 && (
+        <div
+          title={`This station shares its operator with ${Math.round(cycleMultiplier) - 1} other station${Math.round(cycleMultiplier) - 1 === 1 ? '' : 's'}. The simulation engine multiplies this station's cycle time by ${cycleMultiplier.toFixed(2)}× because the operator is only present ${Math.round(stationShareFrac * 100)}% of the shift.`}
+          style={{
+            marginTop: 6,
+            padding: '4px 8px',
+            border: `1px dashed ${SW_COLORS.alarm}`,
+            borderRadius: 4,
+            background: SW_COLORS.paper,
+            fontFamily: SW_FONTS.mono,
+            fontSize: 10,
+            fontWeight: 700,
+            color: SW_COLORS.alarm,
+            letterSpacing: '0.04em',
+            display: 'flex',
+            justifyContent: 'space-between',
+            alignItems: 'center',
+            gap: 8,
+          }}
+        >
+          <span>⚠ ENGINE CYCLE × {cycleMultiplier.toFixed(2)}</span>
+          <span style={{ fontWeight: 600, color: SW_COLORS.muted }}>operator @ {Math.round(stationShareFrac * 100)}%</span>
+        </div>
+      )}
+      {rows.length === 0 ? (
+        <div style={{ fontSize: 11, color: SW_COLORS.muted, fontFamily: SW_FONTS.body, padding: '4px 0' }}>
+          No operator is assigned to this workstation yet. Seeded twins
+          assign operators automatically — manually-placed stations need
+          an explicit Assignment row.
+        </div>
+      ) : (
+        <div style={{ display: 'flex', flexDirection: 'column', gap: 4, marginTop: 4 }}>
+          {rows.map((a) => {
+            const op = operatorsById.get(a.operatorId);
+            // Render shareFrac as a percentage so 0.5 ⇒ "50%". Defaults
+            // surface differently depending on role so users don't see a
+            // misleading "—" for the typical "primary @ 100%" case.
+            const sharePct =
+              a.shareFrac !== undefined
+                ? Math.round(a.shareFrac * 100)
+                : a.role === 'primary'
+                  ? 100
+                  : a.role === 'helper'
+                    ? 30
+                    : null;
+            const roleColor =
+              a.role === 'primary'
+                ? SW_COLORS.brand
+                : a.role === 'rotation_member'
+                  ? SW_COLORS.bobbin
+                  : a.role === 'helper'
+                    ? SW_COLORS.thread
+                    : SW_COLORS.muted;
+            return (
+              <div
+                key={a.id}
+                style={{
+                  display: 'grid',
+                  gridTemplateColumns: '1fr auto auto',
+                  gap: 8,
+                  alignItems: 'center',
+                  padding: '4px 6px',
+                  border: `1px solid ${SW_COLORS.line}`,
+                  borderLeft: `3px solid ${roleColor}`,
+                  borderRadius: 4,
+                  background: SW_COLORS.paper,
+                  fontSize: 11,
+                }}
+                title={`Assignment ${a.id} · operator ${a.operatorId}`}
+              >
+                <div style={{ fontWeight: 700, color: SW_COLORS.ink, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+                  {op?.name ?? '—'}
+                </div>
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 9,
+                    fontWeight: 800,
+                    letterSpacing: 0.6,
+                    color: roleColor,
+                    textTransform: 'uppercase',
+                  }}
+                >
+                  {a.role.replace('_', ' ')}
+                </span>
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 10,
+                    fontWeight: 700,
+                    color: sharePct !== null && sharePct < 100 ? SW_COLORS.alarm : SW_COLORS.steel,
+                    minWidth: 36,
+                    textAlign: 'right',
+                  }}
+                >
+                  {sharePct !== null ? `${sharePct}%` : '—'}
+                </span>
+              </div>
+            );
+          })}
+        </div>
+      )}
+      {canShareWithNext && nextEdge && myPrimary && (
+        <button
+          onClick={() =>
+            useTwin
+              .getState()
+              .shareOperatorsBetweenStations(ws.id, nextEdge.toWsId)
+          }
+          title="Take this station's operator and assign them to the next station too. The next station's operator is removed; both stations now share one operator at a halved shareFrac."
+          style={{
+            marginTop: 6,
+            padding: '5px 10px',
+            background: 'transparent',
+            border: `1px dashed ${SW_COLORS.brand}`,
+            color: SW_COLORS.brand,
+            fontFamily: SW_FONTS.display,
+            fontSize: 10,
+            fontWeight: 800,
+            letterSpacing: '0.08em',
+            borderRadius: 4,
+            cursor: 'pointer',
+            width: '100%',
+            textAlign: 'left',
+          }}
+        >
+          🔀 SHARE WITH NEXT STATION
+        </button>
+      )}
+      {/* Inverse gesture — visible only when this station's primary is
+          already shared. Peels the station off the shared operator and
+          grafts a fresh primary onto it. */}
+      {myPrimary && (myPrimary.shareFrac ?? 1) < 1 && myPrimary.role !== 'rotation_member' && (
+        <button
+          onClick={() => useTwin.getState().unshareWorkstation(ws.id)}
+          title="Restore a dedicated operator on this station. The shared operator now covers one fewer station, and the surviving assignments rebalance to 1 / (N - 1)."
+          style={{
+            marginTop: 6,
+            padding: '5px 10px',
+            background: 'transparent',
+            border: `1px dashed ${SW_COLORS.steel}`,
+            color: SW_COLORS.steel,
+            fontFamily: SW_FONTS.display,
+            fontSize: 10,
+            fontWeight: 800,
+            letterSpacing: '0.08em',
+            borderRadius: 4,
+            cursor: 'pointer',
+            width: '100%',
+            textAlign: 'left',
+          }}
+        >
+          ⇆ RESTORE OWN OPERATOR
+        </button>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Per-line POLICY editor — exposes the system-aware behaviour knobs that
+ * live on `SewingLine.policy`. Unset fields show their `defaultPolicyFor`
+ * value as a placeholder so the user sees what the engine will fall back
+ * to. Editing a field promotes it to a real override; clearing the input
+ * sends `undefined` and the line goes back to using the system default.
+ *
+ * Rendered inline inside each sewing-line card in the Department inspector.
+ * Collapsed by default to keep the line card compact.
+ */
+function LinePolicyEditor({
+  line,
+  onUpdateLine,
+}: {
+  line: SewingLine;
+  onUpdateLine: (
+    id: string,
+    patch: Partial<Omit<SewingLine, 'id' | 'deptId'>>,
+  ) => void;
+}) {
+  const [open, setOpen] = useState(false);
+  const defaults = defaultPolicyFor(line.productionSystem);
+  const p: LinePolicy = line.policy ?? {};
+
+  // Field is considered "overridden" if the user has set it explicitly.
+  // `pieceFlow` is a boolean, so we test for `undefined` separately.
+  const overrideCount =
+    (p.bundleSize !== undefined ? 1 : 0) +
+    (p.pieceFlow !== undefined ? 1 : 0) +
+    (p.taktSec !== undefined ? 1 : 0) +
+    (p.conveyorSpeed !== undefined ? 1 : 0) +
+    (p.rotationGroupSize !== undefined ? 1 : 0) +
+    (p.maxWipPerStation !== undefined ? 1 : 0) +
+    (p.helperMode !== undefined ? 1 : 0);
+
+  function patch(next: Partial<LinePolicy>) {
+    const merged: LinePolicy = { ...p, ...next };
+    // Strip keys whose value is undefined so a fully-cleared policy reverts
+    // to `undefined` (no overrides) instead of an empty object stranded on
+    // the line forever.
+    const cleaned: LinePolicy = {};
+    if (merged.bundleSize !== undefined) cleaned.bundleSize = merged.bundleSize;
+    if (merged.pieceFlow !== undefined) cleaned.pieceFlow = merged.pieceFlow;
+    if (merged.taktSec !== undefined) cleaned.taktSec = merged.taktSec;
+    if (merged.conveyorSpeed !== undefined) cleaned.conveyorSpeed = merged.conveyorSpeed;
+    if (merged.rotationGroupSize !== undefined) cleaned.rotationGroupSize = merged.rotationGroupSize;
+    if (merged.maxWipPerStation !== undefined) cleaned.maxWipPerStation = merged.maxWipPerStation;
+    if (merged.helperMode !== undefined) cleaned.helperMode = merged.helperMode;
+    onUpdateLine(line.id, {
+      policy: Object.keys(cleaned).length === 0 ? undefined : cleaned,
+    });
+  }
+
+  // Show only the knobs that are meaningful for this system. Hiding the
+  // dead fields keeps the editor honest — e.g. takt time has no role on a
+  // PBS line, so showing the field would just confuse the user.
+  const sys = line.productionSystem;
+  const showBundle = !defaults.pieceFlow;          // PBS — bundle is THE primitive
+  const showPieceFlow = true;                       // every system has a notion of this
+  const showTakt = sys === 'synchro';
+  const showConveyor = sys === 'synchro' || sys === 'UPS';
+  const showRotation = sys === 'modular';
+  const showWipCap = defaults.pieceFlow;            // piece-flow systems use WIP caps
+  const showHelper = true;
+
+  // Compact number-input renderer. Empty input ⇒ `undefined` so the field
+  // falls back to the system default.
+  function numField(
+    label: string,
+    value: number | undefined,
+    placeholder: number,
+    unit: string,
+    onChange: (v: number | undefined) => void,
+  ) {
+    return (
+      <div>
+        <label style={{ ...fieldLabel, marginTop: 0 }}>{label}</label>
+        <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
+          <input
+            type="number"
+            value={value ?? ''}
+            placeholder={String(placeholder)}
+            onChange={(e) => {
+              const raw = e.target.value;
+              onChange(raw === '' ? undefined : Number(raw));
+            }}
+            style={{ ...inputBase, padding: '3px 6px', fontSize: 11 }}
+          />
+          {unit && (
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
+              {unit}
+            </span>
+          )}
+        </div>
+      </div>
+    );
+  }
+
+  return (
+    <div style={{ marginTop: 8, borderTop: `1px dashed ${SW_COLORS.line}`, paddingTop: 6 }}>
+      <button
+        onClick={() => setOpen((v) => !v)}
+        style={{
+          ...btnSec,
+          padding: '3px 8px',
+          fontSize: 10,
+          background: 'transparent',
+          border: 'none',
+          color: overrideCount > 0 ? SW_COLORS.brand : SW_COLORS.steel,
+          display: 'flex',
+          alignItems: 'center',
+          gap: 6,
+        }}
+        title="System-specific behaviour knobs"
+      >
+        <span>{open ? '▾' : '▸'}</span>
+        <span>POLICY</span>
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
+          {overrideCount > 0
+            ? `${overrideCount} override${overrideCount === 1 ? '' : 's'}`
+            : `${line.productionSystem.toUpperCase()} defaults`}
+        </span>
+      </button>
+      {open && (
+        <div
+          style={{
+            display: 'grid',
+            gridTemplateColumns: '1fr 1fr',
+            gap: 6,
+            marginTop: 6,
+            paddingLeft: 14,
+          }}
+        >
+          {showBundle &&
+            numField(
+              'Bundle size',
+              p.bundleSize,
+              defaults.bundleSize,
+              'pcs',
+              (v) => patch({ bundleSize: v }),
+            )}
+          {showPieceFlow && (
+            <div>
+              <label style={{ ...fieldLabel, marginTop: 0 }}>Piece flow</label>
+              <select
+                value={
+                  p.pieceFlow === undefined
+                    ? 'default'
+                    : p.pieceFlow
+                      ? 'yes'
+                      : 'no'
+                }
+                onChange={(e) => {
+                  const v = e.target.value;
+                  patch({
+                    pieceFlow:
+                      v === 'default' ? undefined : v === 'yes' ? true : false,
+                  });
+                }}
+                style={{ ...inputBase, appearance: 'auto', padding: '3px 6px', fontSize: 11 }}
+              >
+                <option value="default">
+                  default · {defaults.pieceFlow ? 'piece' : 'bundle'}
+                </option>
+                <option value="yes">Piece-by-piece</option>
+                <option value="no">Batched (bundle)</option>
+              </select>
+            </div>
+          )}
+          {showTakt &&
+            numField('Takt time', p.taktSec, defaults.taktSec, 'sec', (v) =>
+              patch({ taktSec: v }),
+            )}
+          {showConveyor &&
+            numField(
+              'Conveyor speed',
+              p.conveyorSpeed,
+              defaults.conveyorSpeed,
+              'cells/min',
+              (v) => patch({ conveyorSpeed: v }),
+            )}
+          {showRotation &&
+            numField(
+              'Rotation cell',
+              p.rotationGroupSize,
+              defaults.rotationGroupSize,
+              'stations',
+              (v) => patch({ rotationGroupSize: v }),
+            )}
+          {showWipCap &&
+            numField(
+              'Max WIP/stn',
+              p.maxWipPerStation,
+              defaults.maxWipPerStation,
+              'pcs',
+              (v) => patch({ maxWipPerStation: v }),
+            )}
+          {showHelper && (
+            <div>
+              <label style={{ ...fieldLabel, marginTop: 0 }}>Helpers</label>
+              <select
+                value={p.helperMode ?? 'default'}
+                onChange={(e) => {
+                  const v = e.target.value;
+                  patch({
+                    helperMode:
+                      v === 'default'
+                        ? undefined
+                        : (v as NonNullable<LinePolicy['helperMode']>),
+                  });
+                }}
+                style={{ ...inputBase, appearance: 'auto', padding: '3px 6px', fontSize: 11 }}
+              >
+                <option value="default">default · {defaults.helperMode}</option>
+                <option value="none">none</option>
+                <option value="adjacent">adjacent</option>
+                <option value="pool">pool</option>
+              </select>
+            </div>
+          )}
+        </div>
+      )}
+    </div>
+  );
+}
+
 interface InspectorProps {
   twin: ReturnType<typeof selectActiveTwin>;
   selected: { kind: 'dept' | 'ws'; id: string } | null;
@@ -5240,11 +6198,17 @@ function Inspector(props: InspectorProps) {
                     <label style={{ ...fieldLabel, marginTop: 0 }}>System</label>
                     <select
                       value={line.productionSystem}
-                      onChange={(e) =>
+                      onChange={(e) => {
+                        const nextSystem = e.target.value as ProductionSystemKey;
+                        // Drop any per-field policy overrides when the system
+                        // changes so the new system's defaults take over.
+                        // Without this, switching PBS→synchro would strand a
+                        // 30-piece bundleSize on a takt-paced line.
                         props.onUpdateLine(line.id, {
-                          productionSystem: e.target.value as ProductionSystemKey,
-                        })
-                      }
+                          productionSystem: nextSystem,
+                          policy: undefined,
+                        });
+                      }}
                       style={{ ...inputBase, appearance: 'auto', padding: '3px 6px', fontSize: 11 }}
                     >
                       {(['PBS', 'modular', 'UPS', 'synchro', 'straight'] as const).map((sys) => (
@@ -5287,6 +6251,10 @@ function Inspector(props: InspectorProps) {
                     />
                   ))}
                 </div>
+                <LinePolicyEditor
+                  line={line}
+                  onUpdateLine={props.onUpdateLine}
+                />
               </div>
             );
           })}
@@ -5459,6 +6427,13 @@ function Inspector(props: InspectorProps) {
           step={0.1}
           value={ws.resources.powerKw ?? 0}
           onChange={(v) => props.onSetResources(ws.id, { powerKw: v })}
+        />
+        <div style={{ height: 12 }} />
+        <WorkstationAssignmentsView
+          ws={ws}
+          operators={props.twin.operators ?? []}
+          assignments={props.twin.assignments ?? []}
+          connectors={props.twin.connectors ?? []}
         />
       </LensSection>
 

@@ -28,7 +28,7 @@ import {
   getBlockParams,
   type PmlBlockKind,
 } from '../domain/pml';
-import { defaultDist, distFromOpNotes } from './distributions';
+import { defaultDist, distFromOpNotes, scaleServiceDist } from './distributions';
 import type { ServiceDist } from './distributions';
 import { analyticalKpis, classify, type AnalyticalKpis } from './queueing';
 import type {
@@ -115,6 +115,23 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     for (const op of garment.operations) opById.set(op.id, op);
   }
 
+  // Per-station share factor — mirrors pml-engine's buildShareFactorMap.
+  // Sum all assignments' shareFracs per ws, cap at 1 (single-server cell).
+  // Rotation members participate in the sum because each rotating operator
+  // contributes their time-fraction of presence; the cell-wide capacity
+  // = total operators / total rotation stations.
+  const shareFactorByWs = new Map<string, number>();
+  const wsSums = new Map<string, number>();
+  for (const a of twin.assignments ?? []) {
+    const sf = a.shareFrac ?? (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0);
+    if (sf <= 0) continue;
+    wsSums.set(a.wsId, (wsSums.get(a.wsId) ?? 0) + sf);
+  }
+  for (const [wsId, total] of wsSums) {
+    const capped = Math.min(1, total);
+    if (capped < 1) shareFactorByWs.set(wsId, capped);
+  }
+
   for (const ws of twin.workstations) {
     const spec = getBlockSpec(ws);
     if (NON_STATION_KINDS.has(spec.kind)) {
@@ -137,7 +154,12 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     // op.notes StatFit string → workstation cycle distribution → uniform around smv.
     const opDist = op?.serviceDistribution;
     const notesDist = distFromOpNotes(op?.notes) ?? undefined;
-    const serviceDist = opDist ?? notesDist ?? params.cycleDist ?? defaultDist(smv);
+    const nominalDist = opDist ?? notesDist ?? params.cycleDist ?? defaultDist(smv);
+    // Inflate the nominal service mean by 1/shareFactor so analytical KPIs
+    // see the same effective rate the engine cycles at when an operator is
+    // shared. shareFactor=1 ⇒ identity, no allocation churn.
+    const shareFactor = shareFactorByWs.get(ws.id) ?? 1;
+    const serviceDist = shareFactor < 1 ? scaleServiceDist(nominalDist, 1 / shareFactor) : nominalDist;
     const capacity = ws.block?.params?.capacity ?? Infinity;
 
     stations.push({
@@ -147,7 +169,7 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
       opCode,
       opName,
       machineCode,
-      smv,
+      smv: shareFactor < 1 ? smv / shareFactor : smv,
       serviceDist,
       capacity,
     });
@@ -169,11 +191,29 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     });
   }
 
+  // Seed operators — prefer the assignment count (distinct operators) when
+  // the twin carries assignments, otherwise fall back to the legacy
+  // `workersRequired` sum so older saves without operator/assignment
+  // records still simulate. This keeps the pool size honest after a
+  // SHARE gesture, where workersRequired stays 1 per station but the
+  // operator count goes down.
+  const distinctAssignedOps = (() => {
+    const wsSet = new Set(stations.map((s) => s.wsId));
+    const ops = new Set<string>();
+    for (const a of twin.assignments ?? []) {
+      if (wsSet.has(a.wsId)) ops.add(a.operatorId);
+    }
+    return ops.size;
+  })();
+  const seedOperators = distinctAssignedOps > 0
+    ? distinctAssignedOps
+    : stations.reduce((s, st) => s + (st.ws.resources?.workersRequired ?? 1), 0);
+
   const meta: BuildFromTwinMeta = {
     simulatedWsIds: stations.map((s) => s.wsId),
     skipped: [],
     infrastructure,
-    seedOperators: stations.reduce((s, st) => s + (st.ws.resources?.workersRequired ?? 1), 0),
+    seedOperators,
     seedBundleSize: 1,
     topologySource: 'connectors',
     stations: twinMetaStations,

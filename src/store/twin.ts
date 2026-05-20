@@ -41,6 +41,10 @@ import {
   type SewingLine,
   type ProductionSystemKey,
   type Order,
+  type Assignment,
+  type Operator,
+  newAssignmentId,
+  newOperatorId,
   emptyTwin,
   forkTwin,
   newDeptId,
@@ -122,6 +126,25 @@ export interface TwinState {
   removeLine: (id: string) => void;
   /** Bulk-assign / unassign workstations to a line. Pass `null` to clear. */
   setLineForWorkstations: (wsIds: string[], lineId: string | null) => void;
+
+  // ── Operator / Assignment mutations ─────────────────────────────────────
+  /** Merge the primary operators of two stations into a single shared
+   *  operator. The operator currently on `keepWsId` survives; the
+   *  operator on `dropWsId` is removed (along with all its assignments).
+   *  The keep operator's existing assignments + the new wsId assignment
+   *  are all rebalanced to `1 / N` shareFrac so the user can cascade
+   *  ("share station 4 with 5", then "share 5 with 6" — operator now
+   *  covers three stations at 33 % each). No-op when either station
+   *  lacks a primary assignment or when the two stations already share
+   *  the same operator. */
+  shareOperatorsBetweenStations: (keepWsId: string, dropWsId: string) => void;
+  /** Inverse of {@link shareOperatorsBetweenStations}: peel `wsId` off
+   *  the shared operator that currently covers it, and graft a freshly
+   *  minted primary operator onto it at `shareFrac: 1`. The remaining
+   *  stations the shared operator covered get their shareFrac
+   *  rebalanced to `1 / (N - 1)`. No-op when the station's primary
+   *  isn't shared. */
+  unshareWorkstation: (wsId: string) => void;
 
   // ── Workstation CRUD ─────────────────────────────────────────────────────
   addWorkstation: (input: {
@@ -472,6 +495,123 @@ export const useTwin = create<TwinState>()(
               wanted.has(w.id) ? { ...w, lineId: next } : w,
             ),
           })),
+        );
+      },
+
+      shareOperatorsBetweenStations: (keepWsId, dropWsId) => {
+        set((s) =>
+          updateActive(s, (twin) => {
+            const assignments = twin.assignments ?? [];
+            const operators = twin.operators ?? [];
+            const keepAsgn = assignments.find(
+              (a) => a.wsId === keepWsId && a.role === 'primary',
+            );
+            const dropAsgn = assignments.find(
+              (a) => a.wsId === dropWsId && a.role === 'primary',
+            );
+            // No-op when either station lacks a primary, or the two
+            // stations are already covered by the same operator.
+            if (!keepAsgn || !dropAsgn) return twin;
+            if (keepAsgn.operatorId === dropAsgn.operatorId) return twin;
+            const keepOpId = keepAsgn.operatorId;
+            const dropOpId = dropAsgn.operatorId;
+
+            // Drop the second operator entirely + all its assignments,
+            // then graft the dropWsId onto the keep operator. Recompute
+            // shareFrac as 1/N across every assignment the keep operator
+            // now holds so a cascading merge (share 4-5, then 5-6) yields
+            // 33 / 33 / 33 instead of stale 50 / 50 / 50 values.
+            const nextOperators = operators.filter((o) => o.id !== dropOpId);
+            const filtered = assignments.filter((a) => a.operatorId !== dropOpId);
+            const grafted: Assignment[] = [
+              ...filtered,
+              {
+                id: newAssignmentId(),
+                operatorId: keepOpId,
+                wsId: dropWsId,
+                role: 'primary',
+                shareFrac: 1,
+              },
+            ];
+            const myCount = grafted.filter((a) => a.operatorId === keepOpId).length;
+            const share = 1 / myCount;
+            const nextAssignments: Assignment[] = grafted.map((a) =>
+              a.operatorId === keepOpId ? { ...a, shareFrac: share } : a,
+            );
+
+            return {
+              ...twin,
+              operators: nextOperators,
+              assignments: nextAssignments,
+            };
+          }),
+        );
+      },
+
+      unshareWorkstation: (wsId) => {
+        set((s) =>
+          updateActive(s, (twin) => {
+            const assignments = twin.assignments ?? [];
+            const operators = twin.operators ?? [];
+            const myAsgn = assignments.find(
+              (a) => a.wsId === wsId && a.role === 'primary',
+            );
+            // No-op when the station has no primary assignment, or when
+            // that primary isn't actually shared.
+            if (!myAsgn || (myAsgn.shareFrac ?? 1) >= 1) return twin;
+            const sharedOpId = myAsgn.operatorId;
+            // Where else does the shared operator cover? After the peel,
+            // those siblings should rebalance to 1 / (N - 1) share each.
+            const otherAsgns = assignments.filter(
+              (a) => a.operatorId === sharedOpId && a.wsId !== wsId,
+            );
+            const remainingCount = otherAsgns.length;
+
+            // Mint a fresh primary operator for the peeled station. It
+            // inherits the shared operator's department + line + archetype
+            // so the canvas continues to render the same person tile
+            // category, but with a new id (and a clean shareFrac = 1).
+            const sharedOp = operators.find((o) => o.id === sharedOpId);
+            const freshOp: Operator = {
+              id: newOperatorId(),
+              deptId: sharedOp?.deptId ?? twin.workstations.find((w) => w.id === wsId)?.deptId ?? '',
+              lineId: sharedOp?.lineId,
+              name: `OPR-${operators.length + 1}`,
+              archetypeId: sharedOp?.archetypeId ?? 'sew_op',
+              // Skills are inherited so the new primary can actually run
+              // the op without a "no skill" warning. The user can prune
+              // them later in the (forthcoming) Resources editor.
+              skills: sharedOp?.skills.map((sk) => ({ ...sk })) ?? [],
+              multiplicity: 1,
+            };
+
+            const nextAssignments = assignments
+              // Drop the peeled station's old (shared) assignment.
+              .filter((a) => !(a.wsId === wsId && a.operatorId === sharedOpId))
+              // Rebalance the remaining shared assignments to 1 / (N - 1).
+              .map((a) =>
+                a.operatorId === sharedOpId
+                  ? {
+                      ...a,
+                      shareFrac: remainingCount > 0 ? 1 / remainingCount : 1,
+                    }
+                  : a,
+              )
+              // Add the fresh primary on the peeled station.
+              .concat({
+                id: newAssignmentId(),
+                operatorId: freshOp.id,
+                wsId,
+                role: 'primary',
+                shareFrac: 1,
+              });
+
+            return {
+              ...twin,
+              operators: [...operators, freshOp],
+              assignments: nextAssignments,
+            };
+          }),
         );
       },
 
