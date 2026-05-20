@@ -2139,19 +2139,72 @@ function DotGlyph({ color }: { color: string }) {
     </svg>
   );
 }
+/**
+ * IsoOperatorBody — standing-figure silhouette for the ISO 3D view.
+ *
+ * Mirrors the Builder's `operator()` iso drawer (domain/iso.ts) so the worker
+ * the user placed in Factory Builder reads as the *same* person once they
+ * step onto the simulation floor. Solid colours, no opacity stunts:
+ *
+ *   pants (legs + belt)   — dark `#1F2630`
+ *   shirt (torso + arms)  — brand-bobbin when working, alarm-red when hot,
+ *                           muted slate when idle; side-shade is a solid
+ *                           darker fill, not a translucent overlay
+ *   head                  — `#E8B98A` skin (same hex as Builder)
+ *   hair cap              — `#1B1B22` (same as Builder's HAIR)
+ *
+ * Drawn around origin (0,0) so callers can `<g transform="translate(x,y)">`
+ * the whole figure to any screen position. Total footprint ≈ 8×16 px, which
+ * lines up with the previous lollipop so layouts (slot offsets, walk anchors)
+ * don't need to move.
+ */
+function IsoOperatorBody({
+  working,
+  hot = false,
+}: {
+  working: boolean;
+  hot?: boolean;
+}) {
+  const shirt = working ? (hot ? SW_COLORS.alarm : SW_COLORS.bobbin) : '#3a4250';
+  const shirtDark = shade(shirt, -0.3);
+  const shirtLite = shade(shirt, 0.18);
+  const PANTS = '#1F2630';
+  const PANTS_LITE = '#2C3540';
+  const SKIN = '#E8B98A';
+  const HAIR = '#1B1B22';
+  return (
+    <g>
+      {/* Legs / pants — two stacked rects so feet read separately */}
+      <rect x={-2.4} y={-1.5} width={4.8} height={4.4} rx={0.6} fill={PANTS} />
+      <rect x={-2.4} y={-1.5} width={1.6} height={4.4} rx={0.6} fill={PANTS_LITE} />
+      <rect x={-0.4} y={-1.5} width={0.5} height={4.4} fill={SW_COLORS.ink} />
+      {/* Belt — thin contrast band where torso meets legs */}
+      <rect x={-2.6} y={-1.9} width={5.2} height={0.8} fill={SW_COLORS.ink} />
+      {/* Torso / shirt — main body block */}
+      <rect x={-3} y={-7} width={6} height={5.5} rx={0.9} fill={shirt} stroke="#0F1419" strokeWidth={0.5} />
+      {/* Solid side-shade on the left face of the torso (not opacity) */}
+      <rect x={-3} y={-7} width={1.7} height={5.5} rx={0.9} fill={shirtDark} />
+      {/* Collar V */}
+      <polygon points="-1.3,-7 1.3,-7 0,-5.3" fill={shirtDark} />
+      {/* Pocket — small light patch on the right face of the shirt */}
+      <rect x={0.6} y={-4.8} width={1.9} height={2.6} fill={shirtLite} stroke="#0F1419" strokeWidth={0.3} />
+      {/* Head (skin) */}
+      <circle cx={0} cy={-9.6} r={2.6} fill={SKIN} stroke="#0F1419" strokeWidth={0.5} />
+      {/* Hair cap — rounded dome over the head */}
+      <path d="M -2.4 -10 Q 0 -12.6 2.4 -10 L 2.4 -8.7 L -2.4 -8.7 Z" fill={HAIR} />
+    </g>
+  );
+}
+
 function OperatorGlyph({ working }: { working: boolean }) {
+  // Legend chip — same Builder-style standing figure as the floor worker,
+  // just scaled to fit the 20×24 viewBox used by other legend glyphs.
   return (
     <svg width={20} height={24} viewBox="0 0 20 24">
-      <ellipse cx={10} cy={20} rx={6} ry={1.8} fill="#0F141955" />
-      <circle
-        cx={10}
-        cy={13}
-        r={5}
-        fill={working ? SW_COLORS.bobbin : 'transparent'}
-        stroke={working ? '#fff' : '#ffffff60'}
-        strokeWidth={1.2}
-      />
-      <circle cx={10} cy={6} r={3} fill="#F0C49B" stroke="#0F1419" strokeWidth={0.6} />
+      <ellipse cx={10} cy={21} rx={6} ry={1.8} fill="#0F141955" />
+      <g transform="translate(10, 18) scale(1.35)">
+        <IsoOperatorBody working={working} />
+      </g>
     </svg>
   );
 }
@@ -2994,17 +3047,10 @@ function IsoSewingStation({
                 transform={`translate(${stride * 0.3}, 0)`}
               />
             )}
-            {/* Body */}
-            <circle
-              cx={0}
-              cy={-4}
-              r={5}
-              fill={isWorking ? (isHot ? SW_COLORS.alarm : SW_COLORS.bobbin) : '#ffffff30'}
-              stroke="#fff"
-              strokeWidth={1}
-            />
-            {/* Head */}
-            <circle cx={0} cy={-9} r={3} fill="#F0C49B" stroke="#0F1419" strokeWidth={0.6} />
+            {/* Standing-figure body — matches the Builder's iso operator
+                fixture so the worker the user placed on the floor in Factory
+                Builder reads as the same person once they step into the sim. */}
+            <IsoOperatorBody working={isWorking} hot={isHot} />
             {/* Working aura — visible only during the dwell-at-machine phase. */}
             {isWorking && walkPhase > 0.9 && (
               <circle
@@ -3071,6 +3117,17 @@ function IsoSewingStation({
  * family (`cat`) so a fabric rack reads differently from a press table
  * which reads differently from an inspect bench. Static — no live state.
  */
+// Per-fixture role code stamped on the badge over an operator-family ambient
+// block. Falls back to a generic "OPR" when the catalogId isn't a known
+// op_*. Mirrors the role taxonomy in domain/workers.ts.
+const OP_BADGE_CODE: Record<string, string> = {
+  op_sewer: 'SEW',
+  op_cutter: 'CUT',
+  op_helper: 'HLP',
+  op_super: 'SUP',
+  op_qc: 'QC',
+};
+
 function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number }) {
   const origin = isoProj(amb.gx, amb.gy);
 
@@ -3101,6 +3158,84 @@ function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number
   // sway around their post.
   const jitterX = amb.cat === 'op' ? Math.cos(simTime * 1.2 + amb.gx) * 0.08 : 0;
   const jitterY = amb.cat === 'op' ? Math.sin(simTime * 1.2 + amb.gy) * 0.08 : 0;
+
+  // ── Operator-family ambient blocks read as PEOPLE, not red cubes ─────────
+  //
+  // Every other `cat` (cut/fix/store/mh/buf/conv/zone/util/sew) is a piece
+  // of equipment — a fabric rack, a press table, a buffer bin — and the
+  // generic cuboid below renders fine. But `cat === 'op'` represents a
+  // human post (supervisor stand, helper, QC seat, etc.) and the Builder
+  // already has a rich isometric standing-figure for it via the catalog's
+  // own `draw()` function. Delegating to that same function keeps Sim and
+  // Builder visually identical: whatever silhouette the user sees when
+  // they drop an `op_super` block in Builder is exactly what they see on
+  // the simulation floor.
+  if (amb.cat === 'op') {
+    const fixture = ISO_FIXTURE_CATALOG.find((f) => f.id === amb.catalogId);
+    const figH = fixture?.h ?? 2.4;
+    const j = isoProj(jitterX, jitterY, 0);
+    const o = isoProj(0, 0, 0);
+    const badgeCode = OP_BADGE_CODE[amb.catalogId] ?? 'OPR';
+    return (
+      <g transform={`translate(${origin.sx}, ${origin.sy})`} pointerEvents="none">
+        {/* Foot shadow — tight ellipse under the figure (smaller than the
+            generic cuboid shadow because a person has a tighter footprint
+            than a fabric rack). */}
+        {(() => {
+          const c = isoProj(amb.w / 2 + jitterX, amb.d / 2 + jitterY, 0);
+          return (
+            <ellipse
+              cx={c.sx - o.sx}
+              cy={c.sy - o.sy + 3}
+              rx={amb.w * 9}
+              ry={amb.d * 4}
+              fill="#0F141955"
+            />
+          );
+        })()}
+        {/* The figure itself — Builder catalog's draw(), called with this
+            block's footprint and rotation. If the fixture lookup fails for
+            any reason, we still keep the scene populated by falling back
+            to the small IsoOperatorBody silhouette used by the walking
+            sewing crew. */}
+        <g transform={`translate(${j.sx - o.sx}, ${j.sy - o.sy})`}>
+          {fixture
+            ? fixture.draw({ w: amb.w, d: amb.d, h: figH, r: amb.rotation })
+            : (() => {
+                const c = isoProj(amb.w / 2, amb.d / 2, 0);
+                return (
+                  <g transform={`translate(${c.sx - o.sx}, ${c.sy - o.sy})`}>
+                    <IsoOperatorBody working={false} />
+                  </g>
+                );
+              })()}
+        </g>
+        {/* Role badge — sits above the figure's head, encoding the specific
+            op role (SUP / QC / HLP / SEW / CUT) so the user can scan the
+            floor and tell a supervisor stand from a QC seat at a glance. */}
+        {(() => {
+          const p = isoProj(amb.w / 2 + jitterX, amb.d / 2 + jitterY, figH + 0.25);
+          return (
+            <g transform={`translate(${p.sx - o.sx}, ${p.sy - o.sy})`}>
+              <rect x={-12} y={-9} width={24} height={10} rx={2} fill="#0a0d12cc" stroke={amb.deptColor} strokeWidth={0.8} />
+              <text
+                x={0}
+                y={-2}
+                textAnchor="middle"
+                fontFamily={SW_FONTS.mono}
+                fontSize={6}
+                fontWeight={900}
+                fill={amb.deptColor}
+                letterSpacing="0.1em"
+              >
+                {badgeCode}
+              </text>
+            </g>
+          );
+        })()}
+      </g>
+    );
+  }
 
   return (
     <g transform={`translate(${origin.sx}, ${origin.sy})`} opacity={0.78} pointerEvents="none">

@@ -1,6 +1,6 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, TimeChip } from '../components';
-import { Fragment, useState, useMemo } from 'react';
+import { Fragment, useRef, useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   ALL_WORKER_ARCHETYPES,
@@ -24,6 +24,14 @@ import type {
 import { useProject, useGarments, type EffectiveGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { AssetsGalleryPage } from './AssetsGallery';
+import { parseGarmentXlsx, type ImportedGarment } from '../lib/import-garment-xlsx';
+import {
+  parseFloorXlsx,
+  placeLayoutStations,
+  commitFloorImport,
+  type ImportedFloor,
+  type LayoutPlacement,
+} from '../lib/import-floor-xlsx';
 
 /**
  * Resources page — operators, machines and roster.
@@ -358,6 +366,140 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
       ? initialGarmentId
       : project.selectedGarmentId,
   );
+  // Excel import state — `importBatch` is a queue of parsed previews (one
+  // per selected file). Each entry is tagged with its `kind`: garment OBs
+  // commit into the project library; floor layouts commit a new Department
+  // + SewingLine + Workstations into the canonical Twin. The preview modal
+  // pages through the batch one entry at a time.
+  type ImportEntry =
+    | { kind: 'garment'; preview: ImportedGarment }
+    | { kind: 'layout'; preview: ImportedFloor; placement: LayoutPlacement };
+  const [importBatch, setImportBatch] = useState<ImportEntry[]>([]);
+  const [importBatchIndex, setImportBatchIndex] = useState(0);
+  const [importFailures, setImportFailures] = useState<{ file: string; reason: string }[]>([]);
+  const [importError, setImportError] = useState<string | null>(null);
+  const [importing, setImporting] = useState(false);
+  const [importSummary, setImportSummary] = useState<string | null>(null);
+  const importInputRef = useRef<HTMLInputElement | null>(null);
+
+  const handleImportPick = (files: FileList | null) => {
+    if (!files || files.length === 0) return;
+    setImporting(true);
+    setImportError(null);
+    setImportSummary(null);
+    const fileList = Array.from(files);
+    const reads = fileList.map(
+      (file) =>
+        new Promise<{ ok: true; entry: ImportEntry | ImportEntry[] } | { ok: false; file: string; reason: string }>((resolve) => {
+          const reader = new FileReader();
+          reader.onload = () => {
+            const buf = reader.result as ArrayBuffer;
+            // Try OB first — operation breakdowns are the common case and
+            // succeed quickly when the sheet matches. Only fall back to the
+            // layout parser when no OB header is found.
+            // Try OB first — operation breakdowns are the common case and
+            // succeed quickly when the sheet matches.
+            try {
+              const preview = parseGarmentXlsx(buf, file.name);
+              return resolve({ ok: true, entry: { kind: 'garment', preview } });
+            } catch (eOb) {
+              // Fall back to layout parser. Returns every layout sheet in
+              // the workbook (some files genuinely hold more than one);
+              // we expand them into individual batch entries.
+              try {
+                const floors = parseFloorXlsx(buf, file.name);
+                const entries: ImportEntry[] = floors.map((floor) => ({
+                  kind: 'layout',
+                  preview: floor,
+                  placement: placeLayoutStations(floor),
+                }));
+                return resolve({ ok: true, entry: entries });
+              } catch (eLayout) {
+                const ob = eOb instanceof Error ? eOb.message : String(eOb);
+                const lay = eLayout instanceof Error ? eLayout.message : String(eLayout);
+                return resolve({
+                  ok: false,
+                  file: file.name,
+                  reason: `Not an OB (${ob}) and not a Machine Layout (${lay}).`,
+                });
+              }
+            }
+          };
+          reader.onerror = () => resolve({ ok: false, file: file.name, reason: 'Could not read the file.' });
+          reader.readAsArrayBuffer(file);
+        }),
+    );
+    Promise.all(reads).then((results) => {
+      const successes: ImportEntry[] = [];
+      const failures: { file: string; reason: string }[] = [];
+      for (const r of results) {
+        if (r.ok) {
+          if (Array.isArray(r.entry)) successes.push(...r.entry);
+          else successes.push(r.entry);
+        } else failures.push({ file: r.file, reason: r.reason });
+      }
+      // Garments first, then layouts — feels natural in the preview flow:
+      // user reviews data first, then physical line placements.
+      successes.sort((a, b) => (a.kind === b.kind ? 0 : a.kind === 'garment' ? -1 : 1));
+      setImportBatch(successes);
+      setImportBatchIndex(0);
+      setImportFailures(failures);
+      if (successes.length === 0 && failures.length > 0) {
+        setImportError(`${failures.length} file${failures.length === 1 ? '' : 's'} failed to parse — see details below.`);
+      }
+      setImporting(false);
+    });
+  };
+
+  const importPreview = importBatch[importBatchIndex] ?? null;
+
+  const commitEntry = (entry: ImportEntry): string => {
+    if (entry.kind === 'garment') {
+      const g = entry.preview.garment;
+      project.setGarmentEdit(g.id, g);
+      setGarmentId(g.id);
+      return `${g.name} (${g.operations.length} ops)`;
+    }
+    const twinStore = useTwin.getState();
+    const result = commitFloorImport(twinStore, entry.preview, entry.placement);
+    return `${entry.placement.lineName} (${result.workstationCount} stations)`;
+  };
+
+  const commitImport = () => {
+    if (!importPreview) return;
+    commitEntry(importPreview);
+    if (importBatchIndex + 1 < importBatch.length) {
+      setImportBatchIndex(importBatchIndex + 1);
+    } else {
+      setImportBatch([]);
+      setImportBatchIndex(0);
+    }
+  };
+
+  const commitAllImports = () => {
+    if (importBatch.length === 0) return;
+    const labels: string[] = [];
+    for (const item of importBatch) {
+      labels.push(commitEntry(item));
+    }
+    setImportBatch([]);
+    setImportBatchIndex(0);
+    setImportSummary(`Imported ${labels.length} item${labels.length === 1 ? '' : 's'}: ${labels.join('; ')}.`);
+  };
+
+  const skipImport = () => {
+    if (importBatchIndex + 1 < importBatch.length) {
+      setImportBatchIndex(importBatchIndex + 1);
+    } else {
+      setImportBatch([]);
+      setImportBatchIndex(0);
+    }
+  };
+
+  const cancelImport = () => {
+    setImportBatch([]);
+    setImportBatchIndex(0);
+  };
   const garment = garments.byId[garmentId] ?? garments.all[0];
   const builtIn = GARMENT_TEMPLATES[garmentId];
   const isEdited = project.garmentEdits[garmentId] !== undefined;
@@ -419,6 +561,30 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
           />
           <div style={{ flex: 1 }}/>
           <Button variant="secondary" size="sm" icon="+" onClick={newCustomGarment}>New garment</Button>
+          {/* Import from Excel — feeds an industry operation-breakdown sheet
+              (Modelama / Brandix / generic ERP export) through
+              `parseGarmentXlsx` and previews the result in a confirm modal.
+              Hidden <input> + button click forwards via ref. */}
+          <input
+            ref={importInputRef}
+            type="file"
+            multiple
+            accept=".xlsx,.xls,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet,application/vnd.ms-excel"
+            style={{ display: 'none' }}
+            onChange={(e) => {
+              handleImportPick(e.target.files);
+              e.target.value = '';
+            }}
+          />
+          <Button
+            variant="secondary"
+            size="sm"
+            icon="⇣"
+            onClick={() => importInputRef.current?.click()}
+            disabled={importing}
+          >
+            {importing ? 'Reading…' : 'Import Excel'}
+          </Button>
           {/* Built-in edited rows expose a Reset that drops the override but
               keeps the garment in the picker — separate from the delete
               action, which removes it from the library entirely. */}
@@ -629,8 +795,494 @@ function OperationsPanel({ garments, initialGarmentId }: OperationsPanelProps) {
         <strong style={{ color: SW_COLORS.ink }}> Factory Twin's run-line</strong>, and the <strong style={{ color: SW_COLORS.ink }}>skill matrix</strong>. Total SAM auto-recomputes on every change.
         Built-in garments restore their defaults via <em>Reset to built-in</em>; custom garments live entirely in your project file.
       </div>
+
+      {importError && (
+        <div
+          style={{
+            padding: 12,
+            background: SW_COLORS.paper,
+            border: `1px solid ${SW_COLORS.alarm}`,
+            borderRadius: SW_RADIUS.sm,
+            fontSize: 12,
+            color: SW_COLORS.alarm,
+            display: 'flex', alignItems: 'center', gap: 10, justifyContent: 'space-between',
+          }}
+        >
+          <span><strong>Excel import failed:</strong> {importError}</span>
+          <Button variant="ghost" size="sm" onClick={() => setImportError(null)}>Dismiss</Button>
+        </div>
+      )}
+
+      {importFailures.length > 0 && (
+        <div
+          style={{
+            padding: 12,
+            background: SW_COLORS.paper,
+            border: `1px solid ${SW_COLORS.warn}`,
+            borderRadius: SW_RADIUS.sm,
+            fontSize: 12,
+            color: SW_COLORS.ink,
+          }}
+        >
+          <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', marginBottom: 6 }}>
+            <strong style={{ color: SW_COLORS.warn }}>
+              {importFailures.length} file{importFailures.length === 1 ? '' : 's'} skipped during import
+            </strong>
+            <Button variant="ghost" size="sm" onClick={() => setImportFailures([])}>Dismiss</Button>
+          </div>
+          <ul style={{ margin: 0, paddingLeft: 18, color: SW_COLORS.muted, fontSize: 11, lineHeight: 1.6 }}>
+            {importFailures.map((f) => (
+              <li key={f.file}><strong style={{ color: SW_COLORS.ink }}>{f.file}</strong> — {f.reason}</li>
+            ))}
+          </ul>
+        </div>
+      )}
+
+      {importSummary && (
+        <div
+          style={{
+            padding: 12,
+            background: SW_COLORS.paper,
+            border: `1px solid ${SW_COLORS.ok}`,
+            borderRadius: SW_RADIUS.sm,
+            fontSize: 12,
+            color: SW_COLORS.ink,
+            display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10,
+          }}
+        >
+          <span><strong style={{ color: SW_COLORS.ok }}>✓ Import complete</strong> — {importSummary}</span>
+          <Button variant="ghost" size="sm" onClick={() => setImportSummary(null)}>Dismiss</Button>
+        </div>
+      )}
+
+      {importPreview?.kind === 'garment' && (
+        <ImportPreviewModal
+          preview={importPreview.preview}
+          batchIndex={importBatchIndex}
+          batchTotal={importBatch.length}
+          onCancel={cancelImport}
+          onConfirm={commitImport}
+          onSkip={skipImport}
+          onConfirmAll={importBatch.length > 1 ? commitAllImports : undefined}
+        />
+      )}
+      {importPreview?.kind === 'layout' && (
+        <LayoutPreviewModal
+          preview={importPreview.preview}
+          placement={importPreview.placement}
+          batchIndex={importBatchIndex}
+          batchTotal={importBatch.length}
+          onCancel={cancelImport}
+          onConfirm={commitImport}
+          onSkip={skipImport}
+          onConfirmAll={importBatch.length > 1 ? commitAllImports : undefined}
+        />
+      )}
     </div>
   );
+}
+
+// ── Excel import preview modal ───────────────────────────────────────────
+/**
+ * Confirm-before-commit modal for the Excel importer. Lists every parsed
+ * operation with its mapped MachineCode + skill so the user can spot bad
+ * machine inferences before the garment lands in the library.
+ */
+function ImportPreviewModal({
+  preview,
+  onCancel,
+  onConfirm,
+  onSkip,
+  onConfirmAll,
+  batchIndex,
+  batchTotal,
+}: {
+  preview: ImportedGarment;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onSkip?: () => void;
+  onConfirmAll?: () => void;
+  batchIndex: number;
+  batchTotal: number;
+}) {
+  const g = preview.garment;
+  const totalCount = g.operations.length;
+  const machineBreakdown = useMemo(() => {
+    const byCode = new Map<string, number>();
+    for (const op of g.operations) byCode.set(op.machineCode, (byCode.get(op.machineCode) ?? 0) + 1);
+    return Array.from(byCode.entries()).sort((a, b) => b[1] - a[1]);
+  }, [g.operations]);
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 100,
+        background: 'rgba(15,20,25,0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(960px, 96vw)',
+          maxHeight: '88vh',
+          background: SW_COLORS.paper,
+          border: `1px solid ${SW_COLORS.line}`,
+          borderRadius: SW_RADIUS.md,
+          boxShadow: '0 24px 60px rgba(15,20,25,0.35)',
+          display: 'flex', flexDirection: 'column',
+        }}
+      >
+        <div style={{ padding: '14px 18px', borderBottom: `1px solid ${SW_COLORS.line}`, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1.5, color: SW_COLORS.muted }}>
+              Import preview
+              {batchTotal > 1 && (
+                <span style={{ marginLeft: 8, color: SW_COLORS.brand }}>
+                  · {batchIndex + 1} of {batchTotal}
+                </span>
+              )}
+            </div>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize: 20, fontWeight: 800, color: SW_COLORS.ink, marginTop: 2 }}>{g.name}</div>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            aria-label="Close"
+            style={{ border: 'none', background: 'transparent', fontSize: 22, color: SW_COLORS.muted, cursor: 'pointer' }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={{ padding: '12px 18px', borderBottom: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+          <Stat label="Operations" value={totalCount.toString()} />
+          <Stat label="Total SAM" value={`${g.totalSmv.toFixed(3)} min`} />
+          <Stat label="Target / hr @100%" value={`${g.hourlyTarget100}`} />
+          <Stat label="Class" value={g.class} />
+        </div>
+
+        <div style={{ padding: '8px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paper }}>
+          {preview.source.style && <Tag>{`Style: ${preview.source.style}`}</Tag>}
+          {preview.source.customer && <Tag>{`Customer: ${preview.source.customer}`}</Tag>}
+          {preview.source.declaredSmv !== undefined && (
+            <Tag>{`Declared SMV: ${preview.source.declaredSmv}`}</Tag>
+          )}
+          {preview.source.declaredManpower !== undefined && (
+            <Tag>{`Declared manpower: ${preview.source.declaredManpower.toFixed(1)}`}</Tag>
+          )}
+          <Tag>{`File: ${preview.source.fileName}`}</Tag>
+        </div>
+
+        {machineBreakdown.length > 0 && (
+          <div style={{ padding: '8px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: `1px solid ${SW_COLORS.line}` }}>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, marginRight: 6, alignSelf: 'center', letterSpacing: '0.5px' }}>MIX</span>
+            {machineBreakdown.map(([code, n]) => (
+              <Tag key={code}>{`${code} · ${n}`}</Tag>
+            ))}
+          </div>
+        )}
+
+        {preview.warnings.length > 0 && (
+          <div style={{ padding: '8px 18px 0', display: 'flex', flexDirection: 'column', gap: 4 }}>
+            {preview.warnings.map((w, i) => (
+              <div key={i} style={{ fontSize: 11, color: SW_COLORS.warn }}>⚠ {w}</div>
+            ))}
+          </div>
+        )}
+
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px 18px' }}>
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.body, fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: SW_COLORS.paperDeep }}>
+                {['#', 'Code', 'Name', 'SMV', 'Machine', 'Skill', 'Category', 'Notes'].map((h) => (
+                  <th
+                    key={h}
+                    style={{
+                      padding: '6px 8px', textAlign: 'left',
+                      fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700,
+                      color: SW_COLORS.muted, letterSpacing: '0.5px',
+                      borderBottom: `1px solid ${SW_COLORS.line}`,
+                      position: 'sticky', top: 0, background: SW_COLORS.paperDeep,
+                    }}
+                  >
+                    {h}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {g.operations.map((op, i) => (
+                <tr key={op.id} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, width: 28 }}>{i + 1}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{op.code ?? ''}</td>
+                  <td style={{ padding: '4px 8px' }}>{op.name}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11, textAlign: 'right' }}>{op.smv.toFixed(3)}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{op.machineCode}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{op.skill}</td>
+                  <td style={{ padding: '4px 8px', fontSize: 11, color: SW_COLORS.muted }}>{op.category}</td>
+                  <td style={{ padding: '4px 8px', fontSize: 11, color: SW_COLORS.muted, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={op.notes ?? ''}>{op.notes ?? ''}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ padding: '12px 18px', borderTop: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div style={{ fontSize: 11, color: SW_COLORS.muted, maxWidth: 380 }}>
+            Confirming creates a new custom garment in your library. You can edit operations, SMVs, and machine codes afterward.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button variant="secondary" size="sm" onClick={onCancel}>Cancel</Button>
+            {onSkip && batchTotal > 1 && (
+              <Button variant="ghost" size="sm" onClick={onSkip}>Skip this one</Button>
+            )}
+            {onConfirmAll && (
+              <Button variant="secondary" size="sm" onClick={onConfirmAll}>
+                Add all ({batchTotal})
+              </Button>
+            )}
+            <Button variant="primary" size="sm" onClick={onConfirm}>
+              {batchTotal > 1 ? `Add & next` : `Add to garment library`}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+// ── Machine-Layout preview modal ────────────────────────────────────────
+/**
+ * Sibling of `ImportPreviewModal` that handles Modelama-style Machine
+ * Layout files. The body summarises the line (station count, machine
+ * mix, source meta) and shows a simple top-down schematic of the two
+ * facing rows so the user can sanity-check placement before the new
+ * Department + SewingLine + Workstations are dropped into the Twin.
+ */
+function LayoutPreviewModal({
+  preview,
+  placement,
+  onCancel,
+  onConfirm,
+  onSkip,
+  onConfirmAll,
+  batchIndex,
+  batchTotal,
+}: {
+  preview: ImportedFloor;
+  placement: LayoutPlacement;
+  onCancel: () => void;
+  onConfirm: () => void;
+  onSkip?: () => void;
+  onConfirmAll?: () => void;
+  batchIndex: number;
+  batchTotal: number;
+}) {
+  const counts = useMemo(() => {
+    const byCat = new Map<string, number>();
+    for (const s of placement.stations) byCat.set(s.catalogId, (byCat.get(s.catalogId) ?? 0) + 1);
+    return Array.from(byCat.entries()).sort((a, b) => b[1] - a[1]);
+  }, [placement.stations]);
+
+  // Schematic dimensions
+  const cellPx = 18;
+  const padPx = 12;
+  const schematicW = placement.widthCells * cellPx + padPx * 2;
+  const schematicH = placement.depthCells * cellPx + padPx * 2;
+
+  return (
+    <div
+      onClick={onCancel}
+      style={{
+        position: 'fixed', inset: 0, zIndex: 100,
+        background: 'rgba(15,20,25,0.55)',
+        display: 'flex', alignItems: 'center', justifyContent: 'center',
+        padding: 24,
+      }}
+    >
+      <div
+        onClick={(e) => e.stopPropagation()}
+        style={{
+          width: 'min(960px, 96vw)',
+          maxHeight: '88vh',
+          background: SW_COLORS.paper,
+          border: `1px solid ${SW_COLORS.line}`,
+          borderRadius: SW_RADIUS.md,
+          boxShadow: '0 24px 60px rgba(15,20,25,0.35)',
+          display: 'flex', flexDirection: 'column',
+        }}
+      >
+        <div style={{ padding: '14px 18px', borderBottom: `1px solid ${SW_COLORS.line}`, display: 'flex', alignItems: 'baseline', justifyContent: 'space-between', gap: 12 }}>
+          <div>
+            <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, textTransform: 'uppercase', letterSpacing: 1.5, color: SW_COLORS.muted }}>
+              Layout preview
+              {batchTotal > 1 && (
+                <span style={{ marginLeft: 8, color: SW_COLORS.brand }}>
+                  · {batchIndex + 1} of {batchTotal}
+                </span>
+              )}
+            </div>
+            <div style={{ fontFamily: SW_FONTS.display, fontSize: 20, fontWeight: 800, color: SW_COLORS.ink, marginTop: 2 }}>
+              {placement.lineName}
+            </div>
+          </div>
+          <button
+            type="button"
+            onClick={onCancel}
+            aria-label="Close"
+            style={{ border: 'none', background: 'transparent', fontSize: 22, color: SW_COLORS.muted, cursor: 'pointer' }}
+          >
+            ×
+          </button>
+        </div>
+
+        <div style={{ padding: '12px 18px', borderBottom: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+          <Stat label="Stations" value={placement.stations.length.toString()} />
+          <Stat label="Declared M/C" value={(preview.source.machineCount ?? '—').toString()} />
+          <Stat label="Declared W/S" value={(preview.source.workstationCount ?? '—').toString()} />
+          <Stat label="Machine SMV" value={preview.source.machineSmv != null ? `${preview.source.machineSmv} min` : '—'} />
+        </div>
+
+        <div style={{ padding: '8px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paper }}>
+          {preview.source.style && <Tag>{`Style: ${preview.source.style}`}</Tag>}
+          {preview.source.buyer && <Tag>{`Buyer: ${preview.source.buyer}`}</Tag>}
+          {preview.source.description && <Tag>{preview.source.description}</Tag>}
+          {preview.source.lineNo != null && <Tag>{`Line ${preview.source.lineNo}`}</Tag>}
+          {preview.source.target != null && <Tag>{`Target ${Math.round(preview.source.target)}/8h`}</Tag>}
+          <Tag>{`File: ${preview.source.fileName}`}</Tag>
+        </div>
+
+        {counts.length > 0 && (
+          <div style={{ padding: '8px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: `1px solid ${SW_COLORS.line}` }}>
+            <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, marginRight: 6, alignSelf: 'center', letterSpacing: '0.5px' }}>MIX</span>
+            {counts.map(([id, n]) => (
+              <Tag key={id}>{`${id.replace(/^a_/, '')} · ${n}`}</Tag>
+            ))}
+          </div>
+        )}
+
+        {preview.warnings.length > 0 && (
+          <div style={{ padding: '8px 18px 0', display: 'flex', flexDirection: 'column', gap: 4, maxHeight: 80, overflow: 'auto' }}>
+            {preview.warnings.slice(0, 6).map((w, i) => (
+              <div key={i} style={{ fontSize: 11, color: SW_COLORS.warn }}>⚠ {w}</div>
+            ))}
+            {preview.warnings.length > 6 && (
+              <div style={{ fontSize: 11, color: SW_COLORS.muted }}>… and {preview.warnings.length - 6} more</div>
+            )}
+          </div>
+        )}
+
+        <div style={{ flex: 1, overflow: 'auto', padding: '12px 18px' }}>
+          {/* Top-down schematic of the two facing rows */}
+          <div style={{ marginBottom: 12, fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>
+            SCHEMATIC · {placement.widthCells}×{placement.depthCells} cells
+          </div>
+          <div style={{
+            background: SW_COLORS.paperDeep,
+            border: `1px solid ${SW_COLORS.line}`,
+            borderRadius: SW_RADIUS.sm,
+            overflow: 'auto',
+            marginBottom: 16,
+          }}>
+            <svg width={schematicW} height={schematicH} style={{ display: 'block' }}>
+              {/* aisle band */}
+              <rect
+                x={padPx} y={padPx + cellPx * 2}
+                width={placement.widthCells * cellPx} height={cellPx * 2}
+                fill={SW_COLORS.paper} opacity={0.6}
+              />
+              {placement.stations.map((s, i) => (
+                <g key={i} transform={`translate(${padPx + s.x * cellPx}, ${padPx + s.y * cellPx})`}>
+                  <rect
+                    width={cellPx * 2 - 2} height={cellPx * 2 - 2}
+                    rx={2}
+                    fill={catalogColor(s.catalogId)}
+                    stroke={SW_COLORS.line}
+                    strokeWidth={0.5}
+                  />
+                  <text
+                    x={cellPx} y={cellPx + 3}
+                    textAnchor="middle"
+                    fontSize={9}
+                    fontFamily={SW_FONTS.mono}
+                    fontWeight={700}
+                    fill={SW_COLORS.paper}
+                  >
+                    {s.catalogId.replace(/^a_/, '').slice(0, 4).toUpperCase()}
+                  </text>
+                </g>
+              ))}
+            </svg>
+          </div>
+
+          {/* Station list as a table */}
+          <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.body, fontSize: 12 }}>
+            <thead>
+              <tr style={{ background: SW_COLORS.paperDeep }}>
+                {['Seq', 'Code', 'Name', 'Raw M/C', 'Mapped', 'Side'].map((h) => (
+                  <th key={h} style={{
+                    padding: '6px 8px', textAlign: 'left',
+                    fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700,
+                    color: SW_COLORS.muted, letterSpacing: '0.5px',
+                    borderBottom: `1px solid ${SW_COLORS.line}`,
+                    position: 'sticky', top: 0, background: SW_COLORS.paperDeep,
+                  }}>{h}</th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {placement.stations.map((s) => (
+                <tr key={s.seq} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, width: 32 }}>{s.seq + 1}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{s.codeNo ?? ''}</td>
+                  <td style={{ padding: '4px 8px' }}>{s.name}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>{s.rawMachine}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{s.catalogId}</td>
+                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>{s.side}</td>
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>
+
+        <div style={{ padding: '12px 18px', borderTop: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+          <div style={{ fontSize: 11, color: SW_COLORS.muted, maxWidth: 420 }}>
+            Confirming adds a new Department + SewingLine + {placement.stations.length} workstations to the canonical Twin, placed to the right of existing departments.
+          </div>
+          <div style={{ display: 'flex', gap: 8 }}>
+            <Button variant="secondary" size="sm" onClick={onCancel}>Cancel</Button>
+            {onSkip && batchTotal > 1 && (
+              <Button variant="ghost" size="sm" onClick={onSkip}>Skip this one</Button>
+            )}
+            {onConfirmAll && (
+              <Button variant="secondary" size="sm" onClick={onConfirmAll}>
+                Add all ({batchTotal})
+              </Button>
+            )}
+            <Button variant="primary" size="sm" onClick={onConfirm}>
+              {batchTotal > 1 ? 'Add & next' : 'Add line to Twin'}
+            </Button>
+          </div>
+        </div>
+      </div>
+    </div>
+  );
+}
+
+/** Pick a category-flavoured tint for the layout schematic blocks. The
+ *  Builder uses richer SVG, but for the preview a flat colour per
+ *  fixture-family reads clearly at small sizes. */
+function catalogColor(catalogId: string): string {
+  if (catalogId.startsWith('a_5ol') || catalogId.startsWith('a_4ol')) return SW_COLORS.bobbin;
+  if (catalogId.startsWith('a_iron') || catalogId.includes('press')) return SW_COLORS.press;
+  if (catalogId.startsWith('a_inspect') || catalogId.includes('table')) return SW_COLORS.muted;
+  if (catalogId.startsWith('a_op')) return SW_COLORS.thread;
+  if (catalogId.startsWith('a_bart') || catalogId.startsWith('a_button')) return SW_COLORS.alarm;
+  if (catalogId.startsWith('a_kn') || catalogId.startsWith('a_cnc') || catalogId.startsWith('a_spread')) return SW_COLORS.steel;
+  return SW_COLORS.brand;
 }
 
 function miniBtn(disabled: boolean): React.CSSProperties {
