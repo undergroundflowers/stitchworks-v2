@@ -11,6 +11,7 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 import { GARMENT_TEMPLATES, type GarmentTemplate, type Operation, type ProductionSystem } from '../domain';
+import { quotaAwareLocalStorage } from './persist-storage';
 import type { MachineCode, MachineSpec } from '../domain/machines';
 import type { WorkerArchetype } from '../domain/workers';
 import type { ProductKind } from '../assets';
@@ -1407,7 +1408,10 @@ export const useProject = create<ProjectState>()(
     {
       name: 'stitchworks.project.v1',
       version: PROJECT_SCHEMA_VERSION,
-      storage: createJSONStorage(() => localStorage),
+      // Quota-aware storage — when the library + twin writes have eaten
+      // the budget and project.scenarios can't fit, we want a loud
+      // console.error instead of a silently dropped scenarios array.
+      storage: createJSONStorage(() => quotaAwareLocalStorage()),
       // Persist data only — don't try to serialise functions.
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
