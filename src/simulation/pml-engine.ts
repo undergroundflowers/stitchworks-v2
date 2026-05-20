@@ -312,6 +312,12 @@ export interface PmlSimSample {
   /** Workstation id with the largest live queue at sample time, or null
    *  when nothing is queued. Live — recomputed each sample. */
   bottleneckWsId: string | null;
+  /** Rotation cell markers — keyed by the canonical wsId-join of the cell,
+   *  value is the wsId where the rotation marker currently sits. Empty
+   *  when the twin has no rotation cells. Drives the canvas rotation
+   *  overlay (`RotationTether`) so the marker hops between cells in time
+   *  with service completions. */
+  rotationPointers: Record<string, string>;
 }
 
 export interface BlockObserved {
@@ -518,10 +524,16 @@ interface BlockState {
  *       machine), which makes Line 1 and Line 2 run at identical tempo
  *       regardless of which garment they're stitching.
  *    3. Catalog `cycle_s` / `capacity_per_hr` / 30s hard default.
+ *
+ *  Finally we apply `shareFactor` — when one operator is shared across N
+ *  stations, each station only sees the operator (1/N)·shift, so its
+ *  effective cycle time is multiplied by N (i.e. divided by shareFactor).
+ *  A station with no shared assignment gets shareFactor=1, no-op.
  */
 function cycleMinFor(
   ws: Workstation,
   opEfficiency?: Record<string, number>,
+  shareFactor: number = 1,
 ): number {
   // P2: skill efficiency applies at every cycle source, not just the
   // op-derived path. Pilot factories author block.params.cycleS directly
@@ -530,16 +542,136 @@ function cycleMinFor(
   const opId = ws.operation?.opId;
   const raw = opId ? opEfficiency?.[opId] : undefined;
   const eff = clampSkillEfficiency(raw);
+  const share = clampShareFactor(shareFactor);
   const overrideCycleS = ws.block?.params?.cycleS;
   if (overrideCycleS != null && overrideCycleS > 0) {
-    return (overrideCycleS / 60) / eff;
+    return (overrideCycleS / 60) / eff / share;
   }
   const opCycleMin = opCycleMinFor(ws);
   if (opCycleMin != null) {
-    return opCycleMin / eff;
+    return opCycleMin / eff / share;
   }
   const r = getBlockParams(ws);
-  return Math.max(0, r.cycleS) / 60 / eff;
+  return Math.max(0, r.cycleS) / 60 / eff / share;
+}
+
+/** Clamp the share-factor to (0, 1]. A station that hasn't been shared
+ *  reports 1 (full attention). 0 would mean the operator is never there —
+ *  treat as a no-op rather than dividing by zero. */
+function clampShareFactor(raw: number | undefined): number {
+  if (raw == null || !Number.isFinite(raw) || raw <= 0) return 1;
+  return Math.min(1, raw);
+}
+
+/**
+ * Per-workstation share factor derived from `twin.assignments[]`.
+ *
+ * For each ws we look at non-rotation assignments (primary / helper —
+ * rotation_member rotates by piece so its long-run station capacity is
+ * driven by group size, not shareFrac). If any of them carry shareFrac < 1,
+ * we take the **minimum** — i.e. the worst-attended slot wins, because
+ * service rate is bounded by the most absent operator. No assignment ⇒
+ * shareFactor = 1 (engine matches today's behaviour for un-staffed twins).
+ */
+function buildShareFactorMap(twin: Twin): Map<string, number> {
+  // Sum shareFracs across all assignments at each ws, then cap at 1
+  // because the station's max throughput is bounded by "one operator
+  // serving one piece at a time" on a single-server cell. For a station
+  // with one operator at 50%, capacity = 0.5 → engine cycle 2×. For a
+  // modular cell where 6 operators each spend 1/27 of time here,
+  // capacity = 6/27 → engine cycle 27/6 ≈ 4.5×.
+  const sums = new Map<string, number>();
+  for (const a of twin.assignments ?? []) {
+    const sf = a.shareFrac ?? (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0);
+    if (sf <= 0) continue;
+    sums.set(a.wsId, (sums.get(a.wsId) ?? 0) + sf);
+  }
+  const out = new Map<string, number>();
+  for (const [wsId, total] of sums) {
+    const capped = Math.min(1, total);
+    if (capped < 1) out.set(wsId, capped);
+  }
+  return out;
+}
+
+/**
+ * A rotation cell — a group of stations all served by the same pool of
+ * rotating operators. Models modular / TSS cells: N operators, M
+ * stations, operators hop one station forward after completing each
+ * piece. Tokens (count per station index) track where each operator
+ * currently is; tryStartService decrements the count when work begins,
+ * serviceEnd increments the count at the next station.
+ *
+ * Operators are fungible within a cell — we don't track per-operator
+ * pointers because the long-run KPIs are identical and the count form is
+ * simpler. Initial token placement is staggered (one operator per
+ * floor(M/N) stations) so the cell doesn't bunch up at station 0 on
+ * sim start.
+ */
+interface RotationCell {
+  /** Workstation ids in rotation order. */
+  wsIds: string[];
+  /** Index map: wsId → position in `wsIds`. Precomputed for O(1) lookup. */
+  wsIndex: Map<string, number>;
+  /** Operator-count per station index, retained for diagnostics / a future
+   *  per-piece rotation mode. Not consulted by the time-fraction engine. */
+  free: number[];
+  /** Visual pointer used by `PmlSimSample.rotationPointers` to animate
+   *  the rotation marker on the canvas. Advances each time a station in
+   *  this cell completes a service. */
+  pointerIdx: number;
+}
+
+/**
+ * Build rotation cells from `twin.assignments`. Operators with ≥2
+ * `rotation_member` assignments and a shared ws-id set form one cell with
+ * a shared free-operator pool. Single-station rotation members are
+ * treated as fixed (no rotation effect).
+ */
+function buildRotationCells(twin: Twin): {
+  cells: RotationCell[];
+  byWsId: Map<string, RotationCell>;
+} {
+  const byOp = new Map<string, { wsId: string; rotationOrder: number }[]>();
+  for (const a of twin.assignments ?? []) {
+    if (a.role !== 'rotation_member') continue;
+    const arr = byOp.get(a.operatorId) ?? [];
+    arr.push({ wsId: a.wsId, rotationOrder: a.rotationOrder ?? arr.length });
+    byOp.set(a.operatorId, arr);
+  }
+  const opsByCellKey = new Map<string, { wsIds: string[]; opIds: string[] }>();
+  for (const [operatorId, members] of byOp) {
+    if (members.length < 2) continue;
+    members.sort((a, b) => a.rotationOrder - b.rotationOrder);
+    const wsIds = members.map((m) => m.wsId);
+    const key = wsIds.join('|');
+    const entry = opsByCellKey.get(key) ?? { wsIds, opIds: [] };
+    entry.opIds.push(operatorId);
+    opsByCellKey.set(key, entry);
+  }
+  const cells: RotationCell[] = [];
+  const byWsId = new Map<string, RotationCell>();
+  for (const [_, { wsIds, opIds }] of opsByCellKey) {
+    const n = wsIds.length;
+    const opCount = opIds.length;
+    // Distribute opCount operators across n station slots — stagger so
+    // each station starts with floor(opCount/n) operators (plus 1 for the
+    // first opCount % n stations).
+    const free = new Array<number>(n).fill(0);
+    for (let i = 0; i < opCount; i++) {
+      const slot = Math.floor((i * n) / opCount);
+      free[slot] += 1;
+    }
+    const cell: RotationCell = {
+      wsIds,
+      wsIndex: new Map(wsIds.map((id, i) => [id, i])),
+      free,
+      pointerIdx: 0,
+    };
+    cells.push(cell);
+    for (const wsId of wsIds) byWsId.set(wsId, cell);
+  }
+  return { cells, byWsId };
 }
 
 /** Skill efficiency multiplier — clamp to [0.5, 1.5] so a stale or wild
@@ -623,9 +755,19 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   let hitAgentCap = false;
 
   // ── Build block states ─────────────────────────────────────────────────────
+  // shareFactorMap captures the engine-visible slowdown for each shared
+  // workstation. Computed once up front so cycleMinFor can be a pure
+  // function of (ws, efficiency, shareFactor) without re-scanning assignments.
+  const shareFactorMap = buildShareFactorMap(twin);
+  // Rotation cells — modular/TSS cells where N operators time-share
+  // across M stations. KPIs are derived from the time-fraction model via
+  // shareFactor; this structure drives the visual rotation pointer in
+  // `PmlSimSample.rotationPointers` so the canvas can animate the marker.
+  const { cells: rotationCells, byWsId: rotationCellByWsId } = buildRotationCells(twin);
   const blocks = new Map<string, BlockState>();
   for (const ws of twin.workstations) {
     const spec = getBlockSpec(ws);
+    const shareFactor = shareFactorMap.get(ws.id) ?? 1;
     blocks.set(ws.id, {
       ws,
       kind: spec.kind,
@@ -637,7 +779,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       inflowPieces: 0,
       busyMin: 0,
       inService: 0,
-      cycleMin: cycleMinFor(ws, opts.opEfficiency),
+      cycleMin: cycleMinFor(ws, opts.opEfficiency, shareFactor),
       cycleDist: cycleDistFor(ws),
       arrivalIntervalMin: arrivalIntervalFor(ws),
       arrivalDist: arrivalDistFor(ws),
@@ -895,6 +1037,15 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         serversTotal: b.servers,
       });
     }
+    // Snapshot rotation pointers for the canvas overlay. Key by the cell's
+    // canonical wsId-join so two cells with the same ws-set (rare — same
+    // operator twin-loaded twice) don't collide. Value is the ws where
+    // the pointer currently sits.
+    const rotationPointers: Record<string, string> = {};
+    for (const cell of rotationCells) {
+      const key = cell.wsIds.join('|');
+      rotationPointers[key] = cell.wsIds[cell.pointerIdx];
+    }
     samples.push({
       time: t,
       blocks: m,
@@ -902,6 +1053,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       produced: totalProduced,
       meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
       bottleneckWsId: liveBottleneckWsId,
+      rotationPointers,
     });
   }
   // Initial sample at t=0 so the timeline doesn't start empty.
@@ -953,6 +1105,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     // one server" semantics — without this, the pool acts as a shared
     // pool of mobile operators that float between stations.
     if (b.inService >= b.servers) return false;
+    // Rotation cells are accounted for via shareFactor (1/cellSize) so
+    // long-run KPIs are stable. The visual rotation pointer is advanced
+    // separately for the canvas overlay — see `rotationCells` /
+    // `advanceRotationPointer` below.
     const pool = deptPools.get(b.ws.deptId);
     if (pool) {
       if (pool.busy >= pool.capacity) return false; // no free unit
@@ -1436,6 +1592,15 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
           // routed back upstream instead of forwarded. maybeRework consumes
           // the agent in that case; only forward when it returns false.
           if (!maybeRework(b, a, now)) emitOnFirstOutput(b, a, now);
+        }
+        // Advance the rotation pointer for the visual overlay — the
+        // engine KPIs use the shareFactor approximation, so this is
+        // purely a UI hook for `PmlSimSample.rotationPointers` so the
+        // canvas can hop the rotation marker between cells in time with
+        // service completions on this cell.
+        const rotCell = rotationCellByWsId.get(b.ws.id);
+        if (rotCell) {
+          rotCell.pointerIdx = ((rotCell.pointerIdx ?? 0) + 1) % rotCell.wsIds.length;
         }
         tryStartService(b, now);
       } else if (b.kind === 'Delay' || b.kind === 'MoveTo' || b.kind === 'Conveyor') {

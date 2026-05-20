@@ -40,7 +40,7 @@ import {
 // SCHEMA
 // ============================================================================
 
-export const TWIN_SCHEMA_VERSION = 8 as const;
+export const TWIN_SCHEMA_VERSION = 9 as const;
 export type TwinSchemaVersion = typeof TWIN_SCHEMA_VERSION;
 
 // ============================================================================
@@ -109,6 +109,101 @@ export type ProductionSystemKey =
   | 'straight'; // Straight line (no batching)
 
 /**
+ * System-specific behaviour knobs that live on a SewingLine. Seeded with
+ * sensible defaults from `defaultPolicyFor(system)` at line-creation time;
+ * the user can override any field in the Inspector. The simulation engine,
+ * Builder canvas and Line-Balance modes all read this block to choose
+ * dispatch policy, render carriers, and pick the balancing algorithm.
+ *
+ * Every field is optional so older twins (v8 and earlier) round-trip
+ * cleanly — a missing policy means "use the system's defaults at runtime."
+ */
+export interface LinePolicy {
+  /** Pieces per bundle when `pieceFlow` is false. PBS/Bundle: typically 20–30.
+   *  Ignored for piece-flow systems. */
+  bundleSize?: number;
+  /** True ⇒ pieces flow one at a time, no bundle batching.
+   *  Default by system: modular/UPS/synchro/straight = true, PBS = false. */
+  pieceFlow?: boolean;
+  /** Takt time in seconds. Only used when the system is `synchro`. */
+  taktSec?: number;
+  /** Conveyor / overhead-rail speed in cells per minute. Used by UPS, UHS
+   *  and synchro to visualise material movement. */
+  conveyorSpeed?: number;
+  /** Number of stations one rotation group spans. Drives modular/clump
+   *  cell sizing; ignored for fixed-station systems. */
+  rotationGroupSize?: number;
+  /** Maximum WIP units allowed at any one station before its upstream
+   *  feeder blocks. Implements CONWIP / kanban for piece-flow lines. */
+  maxWipPerStation?: number;
+  /** How floater operators are deployed when a station starves.
+   *   • 'none' — no helpers; station idles.
+   *   • 'adjacent' — pull from the operator one station upstream/downstream.
+   *   • 'pool' — pull from the line-level floater pool. */
+  helperMode?: 'none' | 'adjacent' | 'pool';
+}
+
+/**
+ * Best-effort defaults for a production system. Used when a line is created
+ * (Build-in-Builder seed, palette drop) and when the Inspector renders the
+ * policy panel and needs a placeholder for unset fields.
+ */
+export function defaultPolicyFor(system: ProductionSystemKey): Required<LinePolicy> {
+  switch (system) {
+    case 'PBS':
+      return {
+        bundleSize: 30,
+        pieceFlow: false,
+        taktSec: 0,
+        conveyorSpeed: 0,
+        rotationGroupSize: 0,
+        maxWipPerStation: 0,
+        helperMode: 'adjacent',
+      };
+    case 'modular':
+      return {
+        bundleSize: 1,
+        pieceFlow: true,
+        taktSec: 0,
+        conveyorSpeed: 0,
+        rotationGroupSize: 6,
+        maxWipPerStation: 2,
+        helperMode: 'pool',
+      };
+    case 'UPS':
+      return {
+        bundleSize: 1,
+        pieceFlow: true,
+        taktSec: 0,
+        conveyorSpeed: 6,
+        rotationGroupSize: 0,
+        maxWipPerStation: 3,
+        helperMode: 'adjacent',
+      };
+    case 'synchro':
+      return {
+        bundleSize: 1,
+        pieceFlow: true,
+        taktSec: 60,
+        conveyorSpeed: 4,
+        rotationGroupSize: 0,
+        maxWipPerStation: 1,
+        helperMode: 'none',
+      };
+    case 'straight':
+      return {
+        bundleSize: 1,
+        pieceFlow: true,
+        taktSec: 0,
+        conveyorSpeed: 0,
+        rotationGroupSize: 0,
+        maxWipPerStation: 2,
+        helperMode: 'none',
+      };
+  }
+}
+
+/**
  * A SewingLine is a named group of workstations inside one department.
  * One department can hold several lines, each manufacturing a particular
  * product (garmentId) under a particular production system. Lines do NOT
@@ -137,6 +232,9 @@ export interface SewingLine {
    *  CHANGEOVER_BEGIN between consecutive orders whose garmentIds differ.
    *  Empty / missing ⇒ legacy infinite Source behaviour using `garmentId`. */
   orderSequence?: string[];
+  /** System-specific behaviour knobs (bundle size, takt, conveyor, helper
+   *  policy, …). Missing ⇒ engine + UI fall back to `defaultPolicyFor`. */
+  policy?: LinePolicy;
   notes?: string;
 }
 
@@ -210,6 +308,21 @@ export interface KpiObservedAttrs {
  *   • material  — feeder/raw-material supply path. */
 export type ConnectorKind = 'flow' | 'operator' | 'material';
 
+/**
+ * How material moves along a flow connector. Decoupled from
+ * `ConnectorKind` so an existing `kind: 'flow'` connector can describe
+ * either a bundle handoff (PBS), a single piece on a table (straight,
+ * modular), a hanger on an overhead rail (UPS, UHS), or one slot on a
+ * takt-paced belt (synchro). Renderers tint the wire and the engine
+ * picks dispatch logic from this field.
+ */
+export interface MaterialFlow {
+  carrier: 'bundle' | 'piece' | 'hanger' | 'takt';
+  /** Pieces per move. Meaningful only for `bundle`; defaults to 1 for the
+   *  three piece-shaped carriers. */
+  bundleSize?: number;
+}
+
 export interface Connector {
   id: string;
   kind: ConnectorKind;
@@ -227,6 +340,117 @@ export interface Connector {
    *  (e.g. `'in'`, `'in1'`). When omitted, falls back to the target
    *  block's first input port. */
   toPort?: string;
+  /** How material moves along this edge. Meaningful only when
+   *  `kind === 'flow'`; ignored for operator/material kinds. Missing ⇒
+   *  fall back to the parent line's policy (`pieceFlow` ⇒ piece, else
+   *  bundle). */
+  flow?: MaterialFlow;
+}
+
+// ============================================================================
+// OPERATOR — a person on the floor (not a workstation)
+// ============================================================================
+
+/**
+ * Per-skill efficiency for one operator. `efficiency` is the fraction of an
+ * on-standard cycle this operator achieves on that skill (1.0 = on standard,
+ * < 1 = still learning, > 1 = consistently faster than the SAM). The skill
+ * key is a `SkillId` from `domain/workers.ts`; we type it as `string` here
+ * to keep this module free of cross-domain imports.
+ */
+export interface OperatorSkill {
+  /** SkillId from `domain/workers.ts`. */
+  skillId: string;
+  efficiency: number;
+}
+
+/**
+ * An Operator is a *person*, distinct from a Workstation (a machine or
+ * fixed station the person works at). Operators are the entity that the
+ * Resources tab edits, that the Line-Balance tab assigns to stations, and
+ * that the simulation engine moves between stations for TSS rotations,
+ * helper pulls and the "one operator shares two adjacent machines" case.
+ *
+ * Multiple operators per station, multiple stations per operator and
+ * unassigned floaters are all expressible via the separate `Assignment`
+ * table — `Operator` carries no station references directly. The canvas
+ * representation of an operator (a person-shaped tile) lives on a
+ * Workstation with `catalogId: 'op_*'`; that visual tile and this Operator
+ * record are intentionally decoupled so the same Operator can appear at
+ * different positions over time (rotation, walking).
+ */
+export interface Operator {
+  id: string;
+  /** Parent department — operators belong to a department even when they
+   *  float between lines inside it. */
+  deptId: string;
+  /** Parent sewing line, when the operator is line-resident. Operators
+   *  without a `lineId` are department-level floaters that can be pulled
+   *  to any line whose policy is `helperMode: 'pool'`. */
+  lineId?: string;
+  /** Display name (e.g. "OPR-01 · Lakshmi"). */
+  name: string;
+  /** Worker archetype id (catalog ref) — drives the canvas sprite and the
+   *  default skill set. Mirrors `ResourceAttrs.workerArchetypeId` on a
+   *  Workstation but lives here so an Operator entity is meaningful even
+   *  before the user places the person tile on the canvas. */
+  archetypeId?: string;
+  /** Per-skill efficiencies. An operator who isn't listed against a skill
+   *  is assumed to lack it. */
+  skills: OperatorSkill[];
+  /** `true` ⇒ this operator is a floater / helper, eligible for the
+   *  helper-pool when stations starve. Floaters don't need a primary
+   *  Assignment row to be useful. */
+  floats?: boolean;
+  /** Headcount this Operator record represents. Defaults to 1; values > 1
+   *  let a single record stand for a group of identical-skill operators
+   *  (e.g. "5 trainee overlockers"). Useful when modelling a TSS cell
+   *  without naming every person. */
+  multiplicity?: number;
+  notes?: string;
+}
+
+// ============================================================================
+// ASSIGNMENT — many-to-many operator ↔ workstation
+// ============================================================================
+
+/**
+ * Role an operator plays at a station.
+ *   • primary          — owns the station; runs it for the whole shift.
+ *   • helper           — secondary; assists when the primary is loaded.
+ *   • floater          — un-pinned; pulled in dynamically by the engine.
+ *   • rotation_member  — part of a modular/clump rotation across N stations.
+ */
+export type AssignmentRole =
+  | 'primary'
+  | 'helper'
+  | 'floater'
+  | 'rotation_member';
+
+/**
+ * One row in the operator-station incidence table. The same operator can
+ * have multiple rows (one per station, e.g. shared between two adjacent
+ * machines) and the same station can have multiple rows (one per
+ * operator, e.g. a primary + a helper). `shareFrac` is the fraction of
+ * shift time this operator spends at this station; summing `shareFrac`
+ * across all rows for one operator should be ≤ 1.0 (the validator warns
+ * when it is not).
+ */
+export interface Assignment {
+  id: string;
+  operatorId: string;
+  wsId: string;
+  role: AssignmentRole;
+  /** Fraction of the operator's shift spent at this station, 0..1. For a
+   *  fixed primary `shareFrac` is typically 1; for a shared operator on
+   *  two machines, 0.5 each. Optional — missing ⇒ infer from role
+   *  (primary=1, helper=0.3, rotation=1/group_size). */
+  shareFrac?: number;
+  /** Position in a rotation. Only used when `role === 'rotation_member'`;
+   *  the engine cycles the operator through stations in increasing
+   *  `rotationOrder`. */
+  rotationOrder?: number;
+  notes?: string;
 }
 
 // ============================================================================
@@ -306,11 +530,90 @@ export interface Twin {
    *  is computed from the source + target workstation footprints; this list
    *  stores only the topology. */
   connectors: Connector[];
+  /** People on the floor. Independent of the `op_*` Workstation tiles that
+   *  represent them visually — see `Operator` for the rationale. Optional
+   *  on the wire format so v8 saves keep loading; absent ⇒ treated as
+   *  `[]` and the existing op_* workstation tiles continue to be the
+   *  authoritative "operator" representation. */
+  operators?: Operator[];
+  /** Operator ↔ Workstation incidence rows. Empty / missing ⇒ each
+   *  workstation is assumed to be tended by whatever `op_*` tile is
+   *  nearest to it (legacy implicit-assignment behaviour). */
+  assignments?: Assignment[];
   /** Production orders this twin can run. Each line's `orderSequence`
    *  references entries here by id. Empty / missing ⇒ legacy single-
    *  garment-per-line behaviour. */
   orders?: Order[];
   notes?: string;
+}
+
+/**
+ * Compact "system · key knob" badge for a sewing line. Picks the single
+ * most-characteristic policy field per system (bundle size for PBS,
+ * rotator count for modular, takt for synchro, etc.) so callers can
+ * surface the production system in dense UI surfaces — the canvas line
+ * band, the Reports header, the Resources line strip — without having to
+ * spell out the full policy object.
+ *
+ * Counts real `Operator` rows whose `lineId` matches when computing the
+ * modular rotator count, so an over-seeded cell reads `8 ROTATORS` instead
+ * of the policy-default `CELL 6`.
+ */
+/**
+ * Roll up the share debt for one line: count distinct workstations on the
+ * line whose non-rotation assignments carry shareFrac < 1, and sum
+ * (1 - shareFrac) for an operator-equivalents-saved estimate. Same rule the
+ * PML engine's `buildShareFactorMap` uses to inflate cycleMin, so the chip
+ * the user sees matches the engine slowdown they'll observe in LiveSim.
+ *
+ * `stations`     — distinct workstation count with a shared assignment.
+ * `savings`      — sum of (1 - shareFrac), i.e. operator-equivalents saved.
+ *
+ * `lineId === null` means "whole twin" — used by Reports BY SYSTEM cards.
+ */
+export function shareDebtForLine(
+  twin: Twin,
+  lineId: string | null,
+): { stations: number; savings: number } {
+  let stations = 0;
+  let savings = 0;
+  const memberWsIds = new Set<string>();
+  for (const w of twin.workstations) {
+    if (lineId == null || w.lineId === lineId) memberWsIds.add(w.id);
+  }
+  const seen = new Set<string>();
+  for (const a of twin.assignments ?? []) {
+    if (a.role === 'rotation_member') continue;
+    if (!memberWsIds.has(a.wsId)) continue;
+    const sf = a.shareFrac ?? 1;
+    if (sf >= 1) continue;
+    if (!seen.has(a.wsId)) {
+      stations += 1;
+      seen.add(a.wsId);
+    }
+    savings += 1 - sf;
+  }
+  return { stations, savings };
+}
+
+export function lineSystemBadge(line: SewingLine, twin: Twin): string {
+  const policy = { ...defaultPolicyFor(line.productionSystem), ...(line.policy ?? {}) };
+  switch (line.productionSystem) {
+    case 'PBS':
+      return `PBS · BUNDLE ${policy.bundleSize}`;
+    case 'modular': {
+      const rotators = (twin.operators ?? []).filter((o) => o.lineId === line.id).length;
+      return rotators > 0
+        ? `TSS · ${rotators} ROTATOR${rotators === 1 ? '' : 'S'}`
+        : `TSS · CELL ${policy.rotationGroupSize || 6}`;
+    }
+    case 'UPS':
+      return 'UPS · HANGER RAIL';
+    case 'synchro':
+      return `SYNCHRO · TAKT ${policy.taktSec}s`;
+    case 'straight':
+      return 'STRAIGHT · PIECE FLOW';
+  }
 }
 
 /**
@@ -451,6 +754,8 @@ export const newTwinId = () => newId('twin');
 export const newScenarioId = () => newId('scn');
 export const newRunId = () => newId('run');
 export const newConnectorId = () => newId('cn');
+export const newOperatorId = () => newId('opr');
+export const newAssignmentId = () => newId('asgn');
 
 // ============================================================================
 // FACTORIES
@@ -475,6 +780,8 @@ export function emptyTwin(name: string = 'Untitled factory'): Twin {
     lines: [],
     workstations: [],
     connectors: [],
+    operators: [],
+    assignments: [],
   };
 }
 
@@ -499,6 +806,9 @@ export function normalizeTwin(input: unknown): Twin {
     lines: (t.lines as SewingLine[] | undefined) ?? [],
     workstations: t.workstations ?? [],
     connectors: t.connectors ?? [],
+    operators: (t.operators as Operator[] | undefined) ?? [],
+    assignments: (t.assignments as Assignment[] | undefined) ?? [],
+    orders: t.orders as Order[] | undefined,
     notes: t.notes,
   };
 }
@@ -658,6 +968,8 @@ export function buildDemoTwin(name: string = 'Demo Apparel Co.'): Twin {
     lines,
     workstations,
     connectors: [],
+    operators: [],
+    assignments: [],
     notes: 'Demo factory — T-shirt line, PBS, single shift. Use as a starting point.',
   };
 }
@@ -804,6 +1116,33 @@ export function forkTwin(
       id: newConnectorId(),
       fromWsId: wsIdMap.get(c.fromWsId)!,
       toWsId: wsIdMap.get(c.toWsId)!,
+      flow: c.flow ? { ...c.flow } : undefined,
+    }));
+
+  // Remap operators (id, deptId, lineId) and assignments (id, operatorId,
+  // wsId) so the fork is internally consistent. Drop assignments whose
+  // operator or workstation didn't survive — same defensive policy as
+  // connectors above.
+  const operatorIdMap = new Map<string, string>();
+  const operators: Operator[] = (source.operators ?? []).map((op) => {
+    const newOpId = newOperatorId();
+    operatorIdMap.set(op.id, newOpId);
+    return {
+      ...op,
+      id: newOpId,
+      deptId: deptIdMap.get(op.deptId) ?? op.deptId,
+      lineId: op.lineId ? lineIdMap.get(op.lineId) ?? undefined : undefined,
+      skills: op.skills.map((s) => ({ ...s })),
+    };
+  });
+
+  const assignments: Assignment[] = (source.assignments ?? [])
+    .filter((a) => operatorIdMap.has(a.operatorId) && wsIdMap.has(a.wsId))
+    .map((a) => ({
+      ...a,
+      id: newAssignmentId(),
+      operatorId: operatorIdMap.get(a.operatorId)!,
+      wsId: wsIdMap.get(a.wsId)!,
     }));
 
   return {
@@ -820,6 +1159,8 @@ export function forkTwin(
     lines,
     workstations,
     connectors,
+    operators,
+    assignments,
     notes: options.notes,
   };
 }
@@ -855,9 +1196,9 @@ export function validateTwin(twin: Twin): string[] {
   // time. Cast to number so the union-narrowed literal type doesn't make
   // the equality check tautological at compile time.
   const ver = twin.schemaVersion as number;
-  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== 4 && ver !== 5 && ver !== 6 && ver !== 7 && ver !== (TWIN_SCHEMA_VERSION as number)) {
+  if (ver !== 1 && ver !== 2 && ver !== 3 && ver !== 4 && ver !== 5 && ver !== 6 && ver !== 7 && ver !== 8 && ver !== (TWIN_SCHEMA_VERSION as number)) {
     errs.push(
-      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, 6, 7, or ${TWIN_SCHEMA_VERSION}`,
+      `Unknown twin schemaVersion ${twin.schemaVersion}; expected 1, 2, 3, 4, 5, 6, 7, 8, or ${TWIN_SCHEMA_VERSION}`,
     );
   }
   const deptIds = new Set(twin.departments.map((d) => d.id));
@@ -894,7 +1235,62 @@ export function validateTwin(twin: Twin): string[] {
       errs.push(`Connector ${c.id} references missing target workstation ${c.toWsId}`);
     }
   }
+  const operatorIds = new Set((twin.operators ?? []).map((o) => o.id));
+  for (const op of twin.operators ?? []) {
+    if (!deptIds.has(op.deptId)) {
+      errs.push(`Operator ${op.id} references missing department ${op.deptId}`);
+    }
+    if (op.lineId && !lineIds.has(op.lineId)) {
+      errs.push(`Operator ${op.id} references missing line ${op.lineId}`);
+    }
+  }
+  for (const a of twin.assignments ?? []) {
+    if (!operatorIds.has(a.operatorId)) {
+      errs.push(`Assignment ${a.id} references missing operator ${a.operatorId}`);
+    }
+    if (!wsIds.has(a.wsId)) {
+      errs.push(`Assignment ${a.id} references missing workstation ${a.wsId}`);
+    }
+  }
   return errs;
+}
+
+/**
+ * Soft validation: returns non-fatal warnings that hint at staffing or
+ * configuration issues without blocking load. Today: operator-allocation
+ * sums (one operator shouldn't sum to > 1.0 shareFrac across stations,
+ * because then the engine can't deliver the work). Separate return so
+ * callers can show warnings in UI while still treating structural errors
+ * from `validateTwin` as hard failures.
+ */
+export function validateTwinWarnings(twin: Twin): string[] {
+  const warnings: string[] = [];
+  const operatorsById = new Map((twin.operators ?? []).map((o) => [o.id, o]));
+  // Per-operator non-rotation shareFrac sum. Defaults match the Inspector
+  // rendering: primary=1, helper=0.3, floater=0. Rotation members are
+  // expected to time-share by design and don't count toward over-allocation.
+  const sums = new Map<string, number>();
+  for (const a of twin.assignments ?? []) {
+    if (a.role === 'rotation_member') continue;
+    const sf =
+      a.shareFrac ??
+      (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0);
+    sums.set(a.operatorId, (sums.get(a.operatorId) ?? 0) + sf);
+  }
+  for (const [opId, sum] of sums) {
+    const op = operatorsById.get(opId);
+    const name = op?.name ?? opId;
+    if (sum > 1.001) {
+      warnings.push(
+        `Operator ${name} is over-allocated (Σ shareFrac = ${sum.toFixed(2)} > 1.0) — engine will treat the most absent station as the bottleneck.`,
+      );
+    } else if (sum < 0.5 && op && !op.floats) {
+      warnings.push(
+        `Operator ${name} is under-allocated (Σ shareFrac = ${sum.toFixed(2)} < 0.5) — they may sit idle most of the shift.`,
+      );
+    }
+  }
+  return warnings;
 }
 
 // ============================================================================
@@ -1009,6 +1405,8 @@ export function migrateLegacyFactoryToTwin(
     lines: [],
     workstations,
     connectors: [],
+    operators: [],
+    assignments: [],
     notes: 'Auto-migrated from legacy floors+lines structure',
   };
 }

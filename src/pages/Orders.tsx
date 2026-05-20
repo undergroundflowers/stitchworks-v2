@@ -7,7 +7,8 @@ import {
   PRODUCTION_SYSTEMS,
   type ProductionSystem,
   pitchTime,
-  labourRequired,
+  crewSizeFor,
+  systemFeasibilityHint,
 } from '../domain';
 import type { GarmentTemplate, GarmentClass } from '../domain/garments';
 import type { Operation, OperationCategory } from '../domain/operations';
@@ -15,35 +16,8 @@ import type { MachineCode } from '../domain/machines';
 import type { SkillId } from '../domain/workers';
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import type { ProductionSystemKey } from '../domain/twin';
-import { buildSeededDraftTwin } from '../lib/build-draft-twin';
-
-/**
- * Map the rich `ProductionSystem` set used by the Orders wizard onto the
- * narrower `ProductionSystemKey` the Builder's SewingLine accepts. Anything
- * outside the canonical five falls back to its closest cousin so the line
- * still receives a sensible default.
- */
-function mapToLineSystem(sys: ProductionSystem): ProductionSystemKey {
-  switch (sys) {
-    case 'PBS':
-    case 'modular':
-    case 'UPS':
-    case 'synchro':
-    case 'straight':
-      return sys;
-    case 'make_through':
-      return 'straight';
-    case 'clump':
-      return 'modular';
-    case 'bundle':
-      return 'PBS';
-    case 'unit_handle':
-      return 'UPS';
-    default:
-      return 'PBS';
-  }
-}
+import { shareDebtForLine } from '../domain/twin';
+import { buildSeededDraftTwin, mapToLineSystem } from '../lib/build-draft-twin';
 
 interface OrderState {
   po: string;
@@ -207,18 +181,65 @@ export function OrdersPage() {
 
   // Pitch time + crew size based on the chosen template's SAM and an
   // 8-hour shift target = qty / deadline_days / 8 = pcs/hour demand.
+  // Crew size now branches on the chosen production system so picking
+  // modular yields a 6-operator rotation cell instead of a 25-operator
+  // PBS line for the same garment.
   const demandPerHour = order.qty / Math.max(1, order.deadlineDays) / 8;
-  const crewSize = Math.ceil(
-    labourRequired({
-      sam: template.totalSmv,
-      demandPerHour,
-      attendancePct: 90,
-      utilisationPct: 80,
-      bsiPct: 95,
-    }),
-  );
+  const crewSize = crewSizeFor({
+    productionSystem: system,
+    sam: template.totalSmv,
+    opCount: template.operations.length,
+    demandPerHour,
+  });
   const pitchSec = pitchTime({ sam: template.totalSmv, operators: crewSize });
   const cycleDays = Math.ceil((order.qty * template.totalSmv) / (60 * 8 * crewSize));
+  const feasibility = systemFeasibilityHint({
+    productionSystem: system,
+    qty: order.qty,
+    days: order.deadlineDays,
+    opCount: template.operations.length,
+  });
+  // ── Active-twin share-debt hint ──────────────────────────────────────
+  // If a line on the active twin already runs the selected system, surface
+  // the share debt the user has authored there. A line claiming "−2 OPR
+  // saved" with "4 stations slowed 2×" is a meaningful caveat on the
+  // feasibility math — without it, the user sees the same crew-size
+  // recommendation as a fresh, fully-staffed line.
+  const activeTwin = useTwin(selectActiveTwin);
+  const mappedSystem = mapToLineSystem(system);
+  const matchedLine = activeTwin?.lines?.find(
+    (l) => l.productionSystem === mappedSystem,
+  );
+  const shareDebt = matchedLine
+    ? shareDebtForLine(activeTwin, matchedLine.id)
+    : { stations: 0, savings: 0 };
+  // Crew the line actually has after sharing (assignments save labour) — used
+  // for a fairer comparison than the abstract crewSize recommendation.
+  const recommendedCrewAfterShare = Math.max(
+    1,
+    Math.round(crewSize - shareDebt.savings),
+  );
+  // Side-by-side mini-comparison: how would this same order look under
+  // each of the five canonical systems? Drives the "Compare" table the
+  // user can scan to understand why the recommendation is what it is.
+  const COMPARISON_SYSTEMS: ProductionSystem[] = [
+    'PBS',
+    'modular',
+    'synchro',
+    'UPS',
+    'make_through',
+  ];
+  const comparison = COMPARISON_SYSTEMS.map((sys) => {
+    const crew = crewSizeFor({
+      productionSystem: sys,
+      sam: template.totalSmv,
+      opCount: template.operations.length,
+      demandPerHour,
+    });
+    const days = Math.ceil((order.qty * template.totalSmv) / (60 * 8 * Math.max(1, crew)));
+    const pitch = pitchTime({ sam: template.totalSmv, operators: crew });
+    return { sys, def: PRODUCTION_SYSTEMS[sys], crew, days, pitch };
+  });
 
   return (
     <div style={{ width:'100%', height:'100%', overflow:'auto', padding: 32, background: SW_COLORS.paperDeep }}>
@@ -426,6 +447,164 @@ export function OrdersPage() {
               <Stat label="PITCH TIME" value={pitchSec.toFixed(1)} unit="sec" color={SW_COLORS.brand}/>
               <Stat label="EST. CYCLE" value={`${cycleDays}d`} color={SW_COLORS.thread}/>
               <Stat label="CREW NEEDED" value={crewSize} unit="operators" color={SW_COLORS.ok}/>
+            </div>
+            {feasibility && (
+              <div
+                role="alert"
+                style={{
+                  marginTop: 12,
+                  padding: '10px 12px',
+                  borderRadius: 6,
+                  background:
+                    feasibility.severity === 'error'
+                      ? `${SW_COLORS.alarm}14`
+                      : `${SW_COLORS.thread}1f`,
+                  border: `1px solid ${feasibility.severity === 'error' ? SW_COLORS.alarm : SW_COLORS.thread}`,
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: SW_COLORS.ink,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 10,
+                    fontWeight: 800,
+                    color: feasibility.severity === 'error' ? SW_COLORS.alarm : SW_COLORS.thread,
+                    letterSpacing: '1px',
+                  }}
+                >
+                  {feasibility.severity === 'error' ? '⨯ MISFIT' : '⚠ HINT'}
+                </span>
+                <span style={{ flex: 1, lineHeight: 1.4 }}>{feasibility.message}</span>
+              </div>
+            )}
+            {shareDebt.stations > 0 && matchedLine && (
+              <div
+                role="alert"
+                style={{
+                  marginTop: 8,
+                  padding: '10px 12px',
+                  borderRadius: 6,
+                  background: `${SW_COLORS.alarm}10`,
+                  border: `1px dashed ${SW_COLORS.alarm}`,
+                  display: 'flex',
+                  alignItems: 'flex-start',
+                  gap: 8,
+                  fontSize: 12,
+                  fontWeight: 600,
+                  color: SW_COLORS.ink,
+                }}
+              >
+                <span
+                  style={{
+                    fontFamily: SW_FONTS.mono,
+                    fontSize: 10,
+                    fontWeight: 800,
+                    color: SW_COLORS.alarm,
+                    letterSpacing: '1px',
+                  }}
+                >
+                  ⇄ SHARE DEBT
+                </span>
+                <span style={{ flex: 1, lineHeight: 1.4 }}>
+                  Line <strong>{matchedLine.name}</strong> already shares operators on{' '}
+                  <strong>{shareDebt.stations}</strong> station{shareDebt.stations === 1 ? '' : 's'} ·{' '}
+                  saves <strong>{shareDebt.savings.toFixed(1)}</strong> operator
+                  {shareDebt.savings >= 1.05 ? 's' : ''} of labour, but each shared station
+                  cycles ≥2× slower. Effective crew on this line ≈{' '}
+                  <strong>{recommendedCrewAfterShare}</strong>; deadline math below assumes a
+                  fresh, fully-staffed line of {crewSize}.
+                </span>
+              </div>
+            )}
+
+            {/* ── Per-system comparison ────────────────────────────────
+                How the same order would size up under each of the five
+                canonical systems. Lets the user scan the alternatives
+                without changing their selection. */}
+            <div
+              style={{
+                marginTop: 14,
+                border: `1px solid ${SW_COLORS.line}`,
+                borderRadius: 6,
+                overflow: 'hidden',
+              }}
+            >
+              <div
+                style={{
+                  padding: '6px 10px',
+                  background: SW_COLORS.paperDeep,
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 9,
+                  fontWeight: 800,
+                  color: SW_COLORS.muted,
+                  letterSpacing: '1.5px',
+                }}
+              >
+                COMPARE UNDER OTHER SYSTEMS
+              </div>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ background: SW_COLORS.paper, borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                    {['System', 'Crew', 'Pitch', 'Cycle'].map((h) => (
+                      <th
+                        key={h}
+                        style={{
+                          padding: '6px 10px',
+                          textAlign: 'left',
+                          fontFamily: SW_FONTS.mono,
+                          fontSize: 9,
+                          fontWeight: 700,
+                          color: SW_COLORS.muted,
+                          letterSpacing: '1px',
+                        }}
+                      >
+                        {h}
+                      </th>
+                    ))}
+                  </tr>
+                </thead>
+                <tbody>
+                  {comparison.map((row) => {
+                    const active = row.sys === system;
+                    return (
+                      <tr
+                        key={row.sys}
+                        onClick={() => setSystem(row.sys)}
+                        style={{
+                          borderBottom: `1px solid ${SW_COLORS.line}`,
+                          background: active ? SW_COLORS.brandLite : SW_COLORS.paper,
+                          cursor: 'pointer',
+                        }}
+                        title={`Click to pick ${row.def.label}`}
+                      >
+                        <td style={{ padding: '6px 10px', fontWeight: 700 }}>
+                          <span style={{ color: active ? SW_COLORS.brand : SW_COLORS.muted, marginRight: 6 }}>
+                            {active ? '◆' : '○'}
+                          </span>
+                          {row.def.label}
+                        </td>
+                        <td style={{ padding: '6px 10px', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>
+                          {row.crew}
+                          <span style={{ color: SW_COLORS.muted, fontWeight: 500, marginLeft: 4 }}>opr</span>
+                        </td>
+                        <td style={{ padding: '6px 10px', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>
+                          {row.pitch.toFixed(1)}
+                          <span style={{ color: SW_COLORS.muted, fontWeight: 500, marginLeft: 4 }}>s</span>
+                        </td>
+                        <td style={{ padding: '6px 10px', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>
+                          {row.days}
+                          <span style={{ color: SW_COLORS.muted, fontWeight: 500, marginLeft: 4 }}>d</span>
+                        </td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
             </div>
           </Card>
         </div>

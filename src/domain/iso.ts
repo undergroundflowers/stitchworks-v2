@@ -45,6 +45,49 @@ export function unproject(sx: number, sy: number): { x: number; y: number } {
   };
 }
 
+/** Rotate a local (x, y) point on the build plane by `r` (0/90/180/270) so
+ *  that the rotated bounding box still anchors at (0, 0). Used by isoProjR
+ *  to draw fixtures that should appear rotated on the iso floor rather than
+ *  spun in screen space. For square footprints (w === d) this is a pure
+ *  90° rotation; for rectangular ones, 90° and 270° also swap the w/d axes
+ *  so the rotated geometry occupies a d × w cell rather than spilling
+ *  outside its original w × d box. */
+export function rotateLocal(
+  x: number,
+  y: number,
+  r: number,
+  w: number,
+  d: number,
+): { x: number; y: number } {
+  switch (((r % 360) + 360) % 360) {
+    case 90:
+      return { x: d - y, y: x };
+    case 180:
+      return { x: w - x, y: d - y };
+    case 270:
+      return { x: y, y: w - x };
+    default:
+      return { x, y };
+  }
+}
+
+/** isoProj after applying the build-plane rotation `r` around the footprint
+ *  center (w/2, d/2). Threaded through every fixture draw so a 90° rotation
+ *  in the twin model translates into the iso ground plane (footprint
+ *  reorients, top diamond turns, sub-elements move to the rotated corners)
+ *  rather than spinning the SVG sprite in screen space. */
+export function isoProjR(
+  x: number,
+  y: number,
+  z: number,
+  r: number,
+  w: number,
+  d: number,
+): IsoPoint {
+  const p = rotateLocal(x, y, r, w, d);
+  return isoProj(p.x, p.y, z);
+}
+
 // ============================================================================
 // PALETTE — hybrid cream / brand red / blue / yellow accents
 // ============================================================================
@@ -96,16 +139,19 @@ interface CuboidPoints {
   };
 }
 
-export function isoCuboid(w: number, d: number, h: number): CuboidPoints {
-  // w,d in cells (x, y world); h in altitude units
-  const A = isoProj(0, 0, h),
-    B = isoProj(w, 0, h);
-  const C = isoProj(w, d, h),
-    D = isoProj(0, d, h);
-  const A0 = isoProj(0, 0, 0),
-    B0 = isoProj(w, 0, 0);
-  const C0 = isoProj(w, d, 0),
-    D0 = isoProj(0, d, 0);
+export function isoCuboid(w: number, d: number, h: number, r: number = 0): CuboidPoints {
+  // w,d in cells (x, y world); h in altitude units. `r` rotates the cuboid
+  // on the build plane around (w/2, d/2) so 90/180/270 reorient its diamond
+  // top and side faces correctly.
+  const ip = (x: number, y: number, z: number) => isoProjR(x, y, z, r, w, d);
+  const A = ip(0, 0, h),
+    B = ip(w, 0, h);
+  const C = ip(w, d, h),
+    D = ip(0, d, h);
+  const A0 = ip(0, 0, 0),
+    B0 = ip(w, 0, 0);
+  const C0 = ip(w, d, 0),
+    D0 = ip(0, d, 0);
   return {
     top: [A, B, C, D],
     left: [A, A0, D0, D], // wait — left face is x=0 plane: A,D,D0,A0
@@ -129,10 +175,13 @@ interface CuboidFacesProps {
   left: string;
   right: string;
   stroke?: string;
+  /** Build-plane rotation in degrees (0/90/180/270). Defaults to 0 so the
+   *  existing callers keep their original orientation. */
+  r?: number;
 }
 
-export function CuboidFaces({ w, d, h, top, left, right, stroke }: CuboidFacesProps): ReactNode {
-  const c = isoCuboid(w, d, h);
+export function CuboidFaces({ w, d, h, top, left, right, stroke, r = 0 }: CuboidFacesProps): ReactNode {
+  const c = isoCuboid(w, d, h, r);
   const edge = stroke || SW_PAL.ink;
   return createElement(
     'g',
@@ -182,26 +231,31 @@ export interface IsoDrawOpts {
   w: number;
   d: number;
   h: number;
+  /** Build-plane rotation in degrees (0/90/180/270). Each fixture threads
+   *  this through its CuboidFaces / isoProjR calls so 90° turns visually
+   *  pivot the sprite on the iso floor rather than spinning it in screen
+   *  space. Optional; absent means 0°. */
+  r?: number;
 }
 
 export type IsoDrawFn = (opts: IsoDrawOpts) => ReactNode;
 
 function walls(top: string, side: string): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top, left: shade(side, -0.1), right: side });
+  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top, left: shade(side, -0.1), right: side, r });
 }
 function doorBay(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream }),
+      CuboidFaces({ w, d, h, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
       // bay cut-out (blue glass)
       (() => {
         const ay = 0.5;
-        const A = isoProj(0.2, ay, h * 0.85),
-          B = isoProj(w - 0.2, ay, h * 0.85);
-        const C = isoProj(w - 0.2, ay, 0.2),
-          D = isoProj(0.2, ay, 0.2);
+        const A = isoProjR(0.2, ay, h * 0.85, r, w, d),
+          B = isoProjR(w - 0.2, ay, h * 0.85, r, w, d);
+        const C = isoProjR(w - 0.2, ay, 0.2, r, w, d),
+          D = isoProjR(0.2, ay, 0.2, r, w, d);
         return createElement('polygon', {
           points: ptsToStr([A, B, C, D]),
           fill: SW_PAL.blueLo,
@@ -212,17 +266,17 @@ function doorBay(): IsoDrawFn {
     );
 }
 function windowStrip(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream }),
+      CuboidFaces({ w, d, h, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
       (() => {
         const stripeY = h * 0.55;
-        const A = isoProj(0.2, 0.5, stripeY + 0.4),
-          B = isoProj(w - 0.2, 0.5, stripeY + 0.4);
-        const C = isoProj(w - 0.2, 0.5, stripeY - 0.4),
-          D = isoProj(0.2, 0.5, stripeY - 0.4);
+        const A = isoProjR(0.2, 0.5, stripeY + 0.4, r, w, d),
+          B = isoProjR(w - 0.2, 0.5, stripeY + 0.4, r, w, d);
+        const C = isoProjR(w - 0.2, 0.5, stripeY - 0.4, r, w, d),
+          D = isoProjR(0.2, 0.5, stripeY - 0.4, r, w, d);
         return createElement('polygon', {
           points: ptsToStr([A, B, C, D]),
           fill: SW_PAL.blue,
@@ -233,10 +287,10 @@ function windowStrip(): IsoDrawFn {
     );
 }
 function column(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal });
+  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r });
 }
 function stairs(): IsoDrawFn {
-  return ({ w, d, h }) => {
+  return ({ w, d, h, r = 0 }) => {
     const steps = 4;
     return createElement(
       'g',
@@ -252,31 +306,53 @@ function stairs(): IsoDrawFn {
             h: stepH,
             top: SW_PAL.cream,
             left: SW_PAL.creamLo,
-            right: SW_PAL.cream,
-          }),
+            right: SW_PAL.cream, r }),
         );
       }),
     );
   };
 }
 function zonePaint(color: string, label: string): IsoDrawFn {
-  return ({ w, d }) => {
-    const A = isoProj(0, 0, 0),
-      B = isoProj(w, 0, 0),
-      C = isoProj(w, d, 0),
-      D = isoProj(0, d, 0);
+  return ({ w, d, r = 0 }) => {
+    const A = isoProjR(0, 0, 0, r, w, d),
+      B = isoProjR(w, 0, 0, r, w, d),
+      C = isoProjR(w, d, 0, r, w, d),
+      D = isoProjR(0, d, 0, r, w, d);
     const cx = (A.sx + B.sx + C.sx + D.sx) / 4;
     const cy = (A.sy + B.sy + C.sy + D.sy) / 4;
+    // Floor zones render as a solid pastel paint with a solid dark border —
+    // no opacity tricks so the zone reads as a real painted region.
+    const fill = shade(color, 0.55);
+    const edge = shade(color, -0.25);
     return createElement(
       'g',
       null,
       createElement('polygon', {
         points: ptsToStr([A, B, C, D]),
-        fill: color,
-        fillOpacity: 0.25,
+        fill,
+        stroke: edge,
+        strokeWidth: 1.6,
+      }),
+      // Inner inset stripe so the zone has visual weight at the edges.
+      createElement('polygon', {
+        points: ptsToStr([
+          isoProjR(0.4, 0.4, 0, r, w, d),
+          isoProjR(w - 0.4, 0.4, 0, r, w, d),
+          isoProjR(w - 0.4, d - 0.4, 0, r, w, d),
+          isoProjR(0.4, d - 0.4, 0, r, w, d),
+        ]),
+        fill: shade(color, 0.75),
         stroke: color,
-        strokeWidth: 1.5,
-        strokeDasharray: '4 3',
+        strokeWidth: 0.9,
+      }),
+      // Label plate so the zone tag stands out against the paint.
+      createElement('rect', {
+        x: cx - 36,
+        y: cy - 8,
+        width: 72,
+        height: 16,
+        rx: 3,
+        fill: SW_PAL.ink,
       }),
       createElement(
         'text',
@@ -286,7 +362,7 @@ function zonePaint(color: string, label: string): IsoDrawFn {
           fontFamily: '"JetBrains Mono", monospace',
           fontSize: 10,
           fontWeight: 800,
-          fill: shade(color, -0.4),
+          fill: shade(color, 0.85),
           textAnchor: 'middle',
           letterSpacing: '1.5px',
         },
@@ -296,18 +372,18 @@ function zonePaint(color: string, label: string): IsoDrawFn {
   };
 }
 function conveyorStr(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal }),
+      CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r }),
       // belt stripes on top
       Array.from({ length: w * 2 }).map((_, i) => {
         const x = i * 0.5;
-        const A = isoProj(x, 0.1, h + 0.01),
-          B = isoProj(x + 0.05, 0.1, h + 0.01);
-        const C = isoProj(x + 0.05, d - 0.1, h + 0.01),
-          D = isoProj(x, d - 0.1, h + 0.01);
+        const A = isoProjR(x, 0.1, h + 0.01, r, w, d),
+          B = isoProjR(x + 0.05, 0.1, h + 0.01, r, w, d);
+        const C = isoProjR(x + 0.05, d - 0.1, h + 0.01, r, w, d),
+          D = isoProjR(x, d - 0.1, h + 0.01, r, w, d);
         return createElement('polygon', {
           key: i,
           points: ptsToStr([A, B, C, D]),
@@ -317,13 +393,13 @@ function conveyorStr(): IsoDrawFn {
     );
 }
 function conveyorCurve(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal }),
+      CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r }),
       (() => {
-        const cx = isoProj(w / 2, d / 2, h + 0.01);
+        const cx = isoProjR(w / 2, d / 2, h + 0.01, r, w, d);
         return createElement('circle', {
           cx: cx.sx,
           cy: cx.sy,
@@ -337,17 +413,17 @@ function conveyorCurve(): IsoDrawFn {
     );
 }
 function conveyorIncline(): IsoDrawFn {
-  return ({ w, d, h }) => {
+  return ({ w, d, h, r = 0 }) => {
     // Wedge: top face slopes from h0 at x=0 to h at x=w
     const h0 = h * 0.1;
-    const A = isoProj(0, 0, h0),
-      B = isoProj(w, 0, h);
-    const C = isoProj(w, d, h),
-      D = isoProj(0, d, h0);
-    const A0 = isoProj(0, 0, 0),
-      B0 = isoProj(w, 0, 0);
-    const C0 = isoProj(w, d, 0),
-      D0 = isoProj(0, d, 0);
+    const A = isoProjR(0, 0, h0, r, w, d),
+      B = isoProjR(w, 0, h, r, w, d);
+    const C = isoProjR(w, d, h, r, w, d),
+      D = isoProjR(0, d, h0, r, w, d);
+    const A0 = isoProjR(0, 0, 0, r, w, d),
+      B0 = isoProjR(w, 0, 0, r, w, d);
+    const C0 = isoProjR(w, d, 0, r, w, d),
+      D0 = isoProjR(0, d, 0, r, w, d);
     return createElement(
       'g',
       null,
@@ -373,79 +449,183 @@ function conveyorIncline(): IsoDrawFn {
   };
 }
 function sewingMachine(accent: string, glyph: string): IsoDrawFn {
-  return ({ w, d, h }) =>
-    createElement(
+  return ({ w, d, h, r = 0 }) => {
+    const tableH = h * 0.55;
+    const headH = h * 0.45;
+    // Table → motor block → arm → needle head, all solid cuboids.
+    return createElement(
       'g',
       null,
-      // table
-      CuboidFaces({ w, d, h: h * 0.6, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream }),
-      // head (cuboid on top)
+      // Table base (cream top, darker side faces)
+      CuboidFaces({
+        w,
+        d,
+        h: tableH,
+        top: SW_PAL.cream,
+        left: SW_PAL.creamLo,
+        right: SW_PAL.cream, r }),
+      // Operator end cut-out — a darker rectangle so the operator side is
+      // visually distinct from the machine side.
+      (() => {
+        const A = isoProjR(0.1, d - 0.6, tableH + 0.01, r, w, d);
+        const B = isoProjR(w - 0.1, d - 0.6, tableH + 0.01, r, w, d);
+        const C = isoProjR(w - 0.1, d - 0.1, tableH + 0.01, r, w, d);
+        const D = isoProjR(0.1, d - 0.1, tableH + 0.01, r, w, d);
+        return createElement('polygon', {
+          points: ptsToStr([A, B, C, D]),
+          fill: SW_PAL.creamLo,
+          stroke: SW_PAL.edge,
+          strokeWidth: 0.4,
+        });
+      })(),
+      // Sewing-machine body — a steel cuboid running along the rear of the
+      // table.
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(0, d * 0.3, h * 0.6).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(0, d * 0.3, h * 0.6).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(0.05, 0, tableH, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(0.05, 0, tableH, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
           w: w * 0.9,
-          d: d * 0.4,
-          h: h * 0.4,
-          top: accent,
-          left: shade(accent, -0.2),
-          right: accent,
-        }),
+          d: d * 0.35,
+          h: headH * 0.55,
+          top: SW_PAL.metal,
+          left: SW_PAL.metalLo,
+          right: SW_PAL.metal, r }),
       ),
-      // glyph
-      (() => {
-        const c = isoProj(w * 0.5, d * 0.5, h + 0.02);
-        return createElement(
-          'text',
-          {
-            x: c.sx,
-            y: c.sy + 3,
-            fontFamily: '"Archivo Black", sans-serif',
-            fontSize: 9,
-            fontWeight: 900,
-            fill: SW_PAL.cream,
-            textAnchor: 'middle',
-          },
-          glyph,
-        );
-      })(),
-    );
-}
-function longTable(top: string): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top, left: shade(top, -0.15), right: top });
-}
-function knifeCutter(): IsoDrawFn {
-  return ({ w, d, h }) =>
-    createElement(
-      'g',
-      null,
-      CuboidFaces({ w, d, h: h * 0.6, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal }),
+      // Needle head — accented coloured cuboid at the operator-facing end.
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(0.2, 0.2, h * 0.6).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(0.2, 0.2, h * 0.6).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(w * 0.55, d * 0.05, tableH, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(w * 0.55, d * 0.05, tableH, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
-        CuboidFaces({ w: 0.6, d: 0.6, h: h * 0.4, top: SW_PAL.red, left: SW_PAL.redLo, right: SW_PAL.red }),
+        CuboidFaces({
+          w: w * 0.4,
+          d: d * 0.25,
+          h: headH,
+          top: accent,
+          left: shade(accent, -0.25),
+          right: accent, r }),
+      ),
+      // Thread spool on top of the body
+      (() => {
+        const c = isoProjR(w * 0.2, d * 0.18, tableH + headH * 0.55 + 0.05, r, w, d);
+        return createElement(
+          'g',
+          null,
+          createElement('ellipse', {
+            cx: c.sx,
+            cy: c.sy + 1,
+            rx: 3,
+            ry: 1.4,
+            fill: shade(SW_PAL.yellow, -0.25),
+          }),
+          createElement('ellipse', {
+            cx: c.sx,
+            cy: c.sy - 1,
+            rx: 3,
+            ry: 1.4,
+            fill: SW_PAL.yellow,
+          }),
+          createElement('line', {
+            x1: c.sx,
+            y1: c.sy,
+            x2: c.sx + 12,
+            y2: c.sy + 6,
+            stroke: SW_PAL.yellow,
+            strokeWidth: 0.8,
+          }),
+        );
+      })(),
+      // Needle bar drop — short solid line under the head
+      (() => {
+        const c = isoProjR(w * 0.75, d * 0.18, tableH + 0.02, r, w, d);
+        return createElement('rect', {
+          x: c.sx - 1,
+          y: c.sy - 4,
+          width: 2,
+          height: 5,
+          fill: SW_PAL.edge,
+        });
+      })(),
+      // Pedal under the table on the operator side
+      (() => {
+        const c = isoProjR(w * 0.5, d * 0.95, 0.02, r, w, d);
+        return createElement('ellipse', {
+          cx: c.sx,
+          cy: c.sy,
+          rx: 6,
+          ry: 2,
+          fill: SW_PAL.edge,
+        });
+      })(),
+      // Glyph badge on top of the needle head
+      (() => {
+        const c = isoProjR(w * 0.75, d * 0.18, tableH + headH + 0.02, r, w, d);
+        return createElement(
+          'g',
+          null,
+          createElement('rect', {
+            x: c.sx - 7,
+            y: c.sy - 6,
+            width: 14,
+            height: 10,
+            rx: 2,
+            fill: SW_PAL.ink,
+          }),
+          createElement(
+            'text',
+            {
+              x: c.sx,
+              y: c.sy + 1,
+              fontFamily: '"Archivo Black", sans-serif',
+              fontSize: 8,
+              fontWeight: 900,
+              fill: shade(accent, 0.6),
+              textAnchor: 'middle',
+            },
+            glyph,
+          ),
+        );
+      })(),
+    );
+  };
+}
+function longTable(top: string): IsoDrawFn {
+  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top, left: shade(top, -0.15), right: top, r });
+}
+function knifeCutter(): IsoDrawFn {
+  return ({ w, d, h, r = 0 }) =>
+    createElement(
+      'g',
+      null,
+      CuboidFaces({ w, d, h: h * 0.6, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r }),
+      createElement(
+        'g',
+        {
+          transform: `translate(${isoProjR(0.2, 0.2, h * 0.6, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(0.2, 0.2, h * 0.6, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
+          })`,
+        },
+        CuboidFaces({ w: 0.6, d: 0.6, h: h * 0.4, top: SW_PAL.red, left: SW_PAL.redLo, right: SW_PAL.red, r }),
       ),
     );
 }
 function bandKnife(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream }),
+      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(w * 0.4, d * 0.4, h * 0.5).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(w * 0.4, d * 0.4, h * 0.5).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(w * 0.4, d * 0.4, h * 0.5, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(w * 0.4, d * 0.4, h * 0.5, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
@@ -454,23 +634,22 @@ function bandKnife(): IsoDrawFn {
           h: h * 0.5,
           top: SW_PAL.yellow,
           left: SW_PAL.yellowLo,
-          right: SW_PAL.yellow,
-        }),
+          right: SW_PAL.yellow, r }),
       ),
     );
 }
 function cncCutter(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream }),
+      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
       // bridge gantry
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(w * 0.4, 0, h * 0.5).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(w * 0.4, 0, h * 0.5).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(w * 0.4, 0, h * 0.5, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(w * 0.4, 0, h * 0.5, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
@@ -479,23 +658,22 @@ function cncCutter(): IsoDrawFn {
           h: h * 0.5,
           top: SW_PAL.blue,
           left: SW_PAL.blueLo,
-          right: SW_PAL.blue,
-        }),
+          right: SW_PAL.blue, r }),
       ),
     );
 }
 function forklift(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.6, top: SW_PAL.yellow, left: SW_PAL.yellowLo, right: SW_PAL.yellow }),
+      CuboidFaces({ w, d, h: h * 0.6, top: SW_PAL.yellow, left: SW_PAL.yellowLo, right: SW_PAL.yellow, r }),
       // mast
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(0, 0, h * 0.6).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(0, 0, h * 0.6).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(0, 0, h * 0.6, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(0, 0, h * 0.6, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
@@ -504,39 +682,38 @@ function forklift(): IsoDrawFn {
           h: h * 0.4,
           top: SW_PAL.steel,
           left: SW_PAL.edge,
-          right: SW_PAL.steel,
-        }),
+          right: SW_PAL.steel, r }),
       ),
     );
 }
 function palletJack(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.steel, left: SW_PAL.edge, right: SW_PAL.steel });
+  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.steel, left: SW_PAL.edge, right: SW_PAL.steel, r });
 }
 function trolley(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.3, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal }),
+      CuboidFaces({ w, d, h: h * 0.3, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r }),
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(0.05, 0.05, h * 0.3).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(0.05, 0.05, h * 0.3).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(0.05, 0.05, h * 0.3, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(0.05, 0.05, h * 0.3, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
-        CuboidFaces({ w: 0.9, d: 0.9, h: h * 0.7, top: SW_PAL.red, left: SW_PAL.redLo, right: SW_PAL.red }),
+        CuboidFaces({ w: 0.9, d: 0.9, h: h * 0.7, top: SW_PAL.red, left: SW_PAL.redLo, right: SW_PAL.red, r }),
       ),
     );
 }
 function agv(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h, top: SW_PAL.blue, left: SW_PAL.blueLo, right: SW_PAL.blue }),
+      CuboidFaces({ w, d, h, top: SW_PAL.blue, left: SW_PAL.blueLo, right: SW_PAL.blue, r }),
       (() => {
-        const c = isoProj(w * 0.5, d * 0.5, h + 0.01);
+        const c = isoProjR(w * 0.5, d * 0.5, h + 0.01, r, w, d);
         return createElement('circle', {
           cx: c.sx,
           cy: c.sy,
@@ -548,11 +725,11 @@ function agv(): IsoDrawFn {
     );
 }
 function palletRack(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metalLo }),
+      CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metalLo, r }),
       // yellow pallets stacked
       Array.from({ length: 3 })
         .map((_, lvl) => {
@@ -560,8 +737,8 @@ function palletRack(): IsoDrawFn {
           return Array.from({ length: w }).map((__, i) => {
             const ox = i + 0.1,
               oy = 0.1;
-            const off = isoProj(ox, oy, ly);
-            const base = isoProj(0, 0, 0);
+            const off = isoProjR(ox, oy, ly, r, w, d);
+            const base = isoProjR(0, 0, 0, r, w, d);
             return createElement(
               'g',
               {
@@ -574,8 +751,7 @@ function palletRack(): IsoDrawFn {
                 h: 0.18,
                 top: SW_PAL.yellow,
                 left: SW_PAL.yellowLo,
-                right: SW_PAL.yellow,
-              }),
+                right: SW_PAL.yellow, r }),
             );
           });
         })
@@ -583,19 +759,44 @@ function palletRack(): IsoDrawFn {
     );
 }
 function pallet(): IsoDrawFn {
-  return ({ w, d, h }) =>
-    CuboidFaces({ w, d, h, top: SW_PAL.yellow, left: SW_PAL.yellowLo, right: SW_PAL.yellow });
+  return ({ w, d, h, r = 0 }) =>
+    CuboidFaces({ w, d, h, top: SW_PAL.yellow, left: SW_PAL.yellowLo, right: SW_PAL.yellow, r });
 }
 function fabricRoll(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.wood, left: SW_PAL.woodLo, right: SW_PAL.wood }),
+      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.wood, left: SW_PAL.woodLo, right: SW_PAL.wood, r }),
     );
 }
 function binShelf(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal });
+  return ({ w, d, h, r = 0 }) =>
+    createElement(
+      'g',
+      null,
+      CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r }),
+      // 3 visible bin compartments on the front-facing (right) face
+      ...Array.from({ length: 3 }).map((_, lvl) => {
+        const ly = h * 0.15 + lvl * h * 0.28;
+        return createElement(
+          'g',
+          {
+            key: lvl,
+            transform: `translate(${isoProjR(0, 0.04, ly, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+              isoProjR(0, 0.04, ly, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
+            })`,
+          },
+          CuboidFaces({
+            w: w - 0.08,
+            d: 0.06,
+            h: h * 0.22,
+            top: SW_PAL.yellow,
+            left: SW_PAL.yellowLo,
+            right: SW_PAL.yellow, r }),
+        );
+      }),
+    );
 }
 /** Per-PML-category accent colour (matches the PROCESS canvas card tints
  *  in `pages/Builder.tsx > PML_CATEGORY_TINT` so a Source on the iso
@@ -614,10 +815,10 @@ const PML_CAT_ACCENT: Record<PmlCategory, string> = {
  *  face. Used by every `pml_*` fixture so the iso canvas always shows
  *  the block's identity at a glance. */
 function pmlBlock(Icon: PmlIconComponent, accent: string): IsoDrawFn {
-  return ({ w, d, h }) => {
+  return ({ w, d, h, r = 0 }) => {
     // Compute the top-face centroid for icon placement.
     const c = isoCuboid(w, d, h);
-    const topCenter = isoProj(w / 2, d / 2, h);
+    const topCenter = isoProjR(w / 2, d / 2, h, r, w, d);
     const iconSize = 26;
     return createElement(
       'g',
@@ -629,16 +830,15 @@ function pmlBlock(Icon: PmlIconComponent, accent: string): IsoDrawFn {
         h,
         top: SW_PAL.paper,
         left: shade(SW_PAL.paperShade, -0.05),
-        right: SW_PAL.paperShade,
-      }),
+        right: SW_PAL.paperShade, r }),
       // Coloured stripe on the top edge (front-right ridge) so the
       // category accent is visible without the icon.
       createElement('polygon', {
         points: ptsToStr([
-          isoProj(0, 0, h),
-          isoProj(w, 0, h),
-          isoProj(w, 0.18, h),
-          isoProj(0, 0.18, h),
+          isoProjR(0, 0, h, r, w, d),
+          isoProjR(w, 0, h, r, w, d),
+          isoProjR(w, 0.18, h, r, w, d),
+          isoProjR(0, 0.18, h, r, w, d),
         ]),
         fill: accent,
         stroke: SW_PAL.edge,
@@ -647,10 +847,10 @@ function pmlBlock(Icon: PmlIconComponent, accent: string): IsoDrawFn {
       // Inner top-face inset rectangle in the accent colour
       createElement('polygon', {
         points: ptsToStr([
-          isoProj(0.18, 0.32, h),
-          isoProj(w - 0.18, 0.32, h),
-          isoProj(w - 0.18, d - 0.18, h),
-          isoProj(0.18, d - 0.18, h),
+          isoProjR(0.18, 0.32, h, r, w, d),
+          isoProjR(w - 0.18, 0.32, h, r, w, d),
+          isoProjR(w - 0.18, d - 0.18, h, r, w, d),
+          isoProjR(0.18, d - 0.18, h, r, w, d),
         ]),
         fill: shade(accent, 0.55),
         stroke: accent,
@@ -671,55 +871,245 @@ function pmlBlock(Icon: PmlIconComponent, accent: string): IsoDrawFn {
   };
 }
 
+/** Standing-operator draw factory.
+ *
+ *  Proportional reference (industrial sewing floor, scale ≈ 0.6 m / unit):
+ *    – sewing machine table + head ≈ 0.85 m → ~1.4 iso altitude units
+ *    – standing adult worker      ≈ 1.70 m → ~2.4 iso altitude units
+ *    – worker / machine ratio     ≈ 1.7×
+ *
+ *  Fills the full declared `h` so the operator visually stands as tall as
+ *  the metadata claims (older draws only reached ~70% of declared `h`,
+ *  which is why workers read shorter than machines on the floor).
+ *
+ *  Slim footprint (legs ≈ 0.26 × 0.18 of a cell) so the figure reads as a
+ *  person, not a chunky bin. Anthropometric segment ratios — legs 0.46,
+ *  torso 0.34, head 0.14, cap 0.06 — match a real adult silhouette.
+ */
 function operator(shirt: string): IsoDrawFn {
-  return ({ w: _w, d: _d, h }) =>
-    createElement(
+  return ({ w, d, h, r = 0 }) => {
+    const legsH = h * 0.46;
+    const torsoH = h * 0.34;
+    const headH = h * 0.14;
+    const capH = h * 0.06;
+
+    // Centred sub-footprints (cell coords).
+    const legW = 0.26, legD = 0.18;
+    const legX = 0.5 - legW / 2;
+    const legY = 0.5 - legD / 2;
+
+    const torsoW = 0.34, torsoD = 0.22;
+    const torsoX = 0.5 - torsoW / 2;
+    const torsoY = 0.5 - torsoD / 2;
+
+    const armW = 0.10, armD = 0.18;
+    const armH = torsoH * 0.85;
+
+    const headW = 0.24, headD = 0.20;
+    const headX = 0.5 - headW / 2;
+    const headY = 0.5 - headD / 2;
+
+    const capW = 0.28, capD = 0.22;
+    const capX = 0.5 - capW / 2;
+    const capY = 0.5 - capD / 2;
+
+    const SKIN = '#E8B98A';
+    const PANTS = SW_PAL.edge;
+
+    // Helper — translate a child <g> so (0,0,0) becomes (x,y,z) in world
+    // coords, rotation-aware so 90° turns still place body parts correctly.
+    const at = (x: number, y: number, z: number, children: ReactNode): ReactNode => {
+      const o = isoProjR(x, y, z, r, w, d);
+      const b = isoProjR(0, 0, 0, r, w, d);
+      return createElement(
+        'g',
+        { transform: `translate(${o.sx - b.sx}, ${o.sy - b.sy})` },
+        children,
+      );
+    };
+
+    return createElement(
       'g',
       null,
-      // body cylinder approx (cuboid)
-      createElement(
-        'g',
-        {
-          transform: `translate(${isoProj(0.3, 0.3, 0).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(0.3, 0.3, 0).sy - isoProj(0, 0, 0).sy
-          })`,
-        },
+      // Solid foot shadow
+      (() => {
+        const c = isoProjR(0.5, 0.5, 0, r, w, d);
+        return createElement('ellipse', {
+          cx: c.sx,
+          cy: c.sy + 1,
+          rx: 8,
+          ry: 2.6,
+          fill: SW_PAL.edge,
+        });
+      })(),
+      // Legs
+      at(
+        legX,
+        legY,
+        0,
         CuboidFaces({
-          w: 0.4,
-          d: 0.4,
-          h: h * 0.6,
-          top: shirt,
-          left: shade(shirt, -0.2),
-          right: shirt,
+          w: legW,
+          d: legD,
+          h: legsH,
+          top: shade(PANTS, 0.18),
+          left: shade(PANTS, -0.15),
+          right: PANTS,
+          r,
         }),
       ),
-      // head
-      createElement(
-        'g',
-        {
-          transform: `translate(${isoProj(0.35, 0.35, h * 0.6).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(0.35, 0.35, h * 0.6).sy - isoProj(0, 0, 0).sy
-          })`,
-        },
+      // Belt — a thin contrasting band at the top of the legs
+      at(
+        legX - 0.01,
+        legY - 0.01,
+        legsH - 0.05,
         CuboidFaces({
-          w: 0.3,
-          d: 0.3,
-          h: h * 0.25,
-          top: '#F0C49B',
-          left: shade('#F0C49B', -0.15),
-          right: '#F0C49B',
+          w: legW + 0.02,
+          d: legD + 0.02,
+          h: 0.05,
+          top: SW_PAL.ink,
+          left: shade(SW_PAL.ink, -0.1),
+          right: SW_PAL.ink,
+          r,
+        }),
+      ),
+      // Left arm
+      at(
+        torsoX - armW * 0.7,
+        torsoY + (torsoD - armD) / 2,
+        legsH - armH * 0.1,
+        CuboidFaces({
+          w: armW,
+          d: armD,
+          h: armH,
+          top: shade(shirt, 0.15),
+          left: shade(shirt, -0.25),
+          right: shirt,
+          r,
+        }),
+      ),
+      // Right arm
+      at(
+        torsoX + torsoW - armW * 0.3,
+        torsoY + (torsoD - armD) / 2,
+        legsH - armH * 0.1,
+        CuboidFaces({
+          w: armW,
+          d: armD,
+          h: armH,
+          top: shade(shirt, 0.15),
+          left: shade(shirt, -0.25),
+          right: shirt,
+          r,
+        }),
+      ),
+      // Torso / shirt
+      at(
+        torsoX,
+        torsoY,
+        legsH,
+        CuboidFaces({
+          w: torsoW,
+          d: torsoD,
+          h: torsoH,
+          top: shade(shirt, 0.2),
+          left: shade(shirt, -0.25),
+          right: shirt,
+          r,
+        }),
+      ),
+      // Collar V — a darker triangle at the neckline
+      (() => {
+        const z = legsH + torsoH - 0.02;
+        const A = isoProjR(torsoX + torsoW * 0.3, torsoY + torsoD * 0.05, z, r, w, d);
+        const B = isoProjR(torsoX + torsoW * 0.7, torsoY + torsoD * 0.05, z, r, w, d);
+        const C = isoProjR(torsoX + torsoW * 0.5, torsoY + torsoD * 0.4, z, r, w, d);
+        return createElement('polygon', {
+          points: ptsToStr([A, B, C]),
+          fill: shade(shirt, -0.5),
+          stroke: SW_PAL.edge,
+          strokeWidth: 0.4,
+        });
+      })(),
+      // Apron pocket — a small contrasting patch on the front-right face
+      (() => {
+        const z0 = legsH + torsoH * 0.2;
+        const z1 = legsH + torsoH * 0.55;
+        const A = isoProjR(torsoX + torsoW, torsoY + torsoD * 0.3, z1, r, w, d);
+        const B = isoProjR(torsoX + torsoW, torsoY + torsoD * 0.7, z1, r, w, d);
+        const C = isoProjR(torsoX + torsoW, torsoY + torsoD * 0.7, z0, r, w, d);
+        const D = isoProjR(torsoX + torsoW, torsoY + torsoD * 0.3, z0, r, w, d);
+        return createElement('polygon', {
+          points: ptsToStr([A, B, C, D]),
+          fill: shade(shirt, -0.4),
+          stroke: SW_PAL.edge,
+          strokeWidth: 0.4,
+        });
+      })(),
+      // Head
+      at(
+        headX,
+        headY,
+        legsH + torsoH,
+        CuboidFaces({
+          w: headW,
+          d: headD,
+          h: headH,
+          top: shade(SKIN, 0.1),
+          left: shade(SKIN, -0.2),
+          right: SKIN,
+          r,
+        }),
+      ),
+      // Eyes on the front-right face
+      (() => {
+        const eyeZ = legsH + torsoH + headH * 0.55;
+        const left = isoProjR(headX + headW, headY + headD * 0.32, eyeZ, r, w, d);
+        const right = isoProjR(headX + headW, headY + headD * 0.68, eyeZ, r, w, d);
+        return createElement(
+          'g',
+          null,
+          createElement('rect', {
+            x: left.sx - 1.1,
+            y: left.sy - 0.6,
+            width: 2.2,
+            height: 1.2,
+            fill: SW_PAL.ink,
+          }),
+          createElement('rect', {
+            x: right.sx - 1.1,
+            y: right.sy - 0.6,
+            width: 2.2,
+            height: 1.2,
+            fill: SW_PAL.ink,
+          }),
+        );
+      })(),
+      // Cap on the head — accent-coloured to the shirt
+      at(
+        capX,
+        capY,
+        legsH + torsoH + headH,
+        CuboidFaces({
+          w: capW,
+          d: capD,
+          h: capH,
+          top: shade(shirt, -0.3),
+          left: shade(shirt, -0.5),
+          right: shade(shirt, -0.35),
+          r,
         }),
       ),
     );
+  };
 }
 function bufferPad(label: string, color: string): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h, top: shade(color, 0.4), left: shade(color, -0.05), right: color }),
+      CuboidFaces({ w, d, h, top: shade(color, 0.4), left: shade(color, -0.05), right: color, r }),
       (() => {
-        const c = isoProj(w / 2, d / 2, h + 0.01);
+        const c = isoProjR(w / 2, d / 2, h + 0.01, r, w, d);
         return createElement(
           'text',
           {
@@ -738,16 +1128,16 @@ function bufferPad(label: string, color: string): IsoDrawFn {
     );
 }
 function wipCart(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.3, top: SW_PAL.steel, left: SW_PAL.edge, right: SW_PAL.steel }),
+      CuboidFaces({ w, d, h: h * 0.3, top: SW_PAL.steel, left: SW_PAL.edge, right: SW_PAL.steel, r }),
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(0.05, 0.05, h * 0.3).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(0.05, 0.05, h * 0.3).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(0.05, 0.05, h * 0.3, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(0.05, 0.05, h * 0.3, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
@@ -756,32 +1146,182 @@ function wipCart(): IsoDrawFn {
           h: h * 0.7,
           top: SW_PAL.cream,
           left: SW_PAL.creamLo,
-          right: SW_PAL.cream,
-        }),
+          right: SW_PAL.cream, r }),
       ),
     );
 }
 function workTable(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream });
+  return ({ w, d, h, r = 0 }) =>
+    createElement(
+      'g',
+      null,
+      CuboidFaces({ w, d, h, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
+      // A solid folded panel on top so the table reads as "in use", not empty
+      (() => {
+        const c = isoProjR(w * 0.5, d * 0.5, h + 0.01, r, w, d);
+        return createElement('rect', {
+          x: c.sx - 8,
+          y: c.sy - 4,
+          width: 16,
+          height: 8,
+          rx: 1,
+          fill: shade(SW_PAL.blue, 0.2),
+          stroke: SW_PAL.edge,
+          strokeWidth: 0.5,
+        });
+      })(),
+    );
 }
 function pressingTable(): IsoDrawFn {
-  return ({ w, d, h }) =>
-    CuboidFaces({ w, d, h, top: SW_PAL.creamHi, left: SW_PAL.creamLo, right: SW_PAL.cream });
+  return ({ w, d, h, r = 0 }) =>
+    createElement(
+      'g',
+      null,
+      CuboidFaces({ w, d, h, top: SW_PAL.creamHi, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
+      // Iron + steam wisp glyph on top
+      (() => {
+        const c = isoProjR(w * 0.5, d * 0.5, h + 0.01, r, w, d);
+        return createElement(
+          'g',
+          null,
+          createElement('polygon', {
+            points: `${c.sx - 7},${c.sy + 1} ${c.sx + 7},${c.sy - 1} ${c.sx + 8},${c.sy + 3} ${c.sx - 7},${c.sy + 4}`,
+            fill: SW_PAL.metal,
+            stroke: SW_PAL.edge,
+            strokeWidth: 0.5,
+          }),
+          createElement('rect', {
+            x: c.sx - 5,
+            y: c.sy - 3,
+            width: 10,
+            height: 3,
+            rx: 1,
+            fill: SW_PAL.steel,
+          }),
+          createElement('path', {
+            d: `M ${c.sx - 2} ${c.sy - 6} q -2 -3 0 -5`,
+            stroke: SW_PAL.blue,
+            strokeWidth: 1,
+            fill: 'none',
+          }),
+          createElement('path', {
+            d: `M ${c.sx + 2} ${c.sy - 6} q -2 -3 0 -5`,
+            stroke: SW_PAL.blue,
+            strokeWidth: 1,
+            fill: 'none',
+          }),
+        );
+      })(),
+    );
 }
 function qcTable(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.paper, left: SW_PAL.creamLo, right: SW_PAL.cream });
+  return ({ w, d, h, r = 0 }) =>
+    createElement(
+      'g',
+      null,
+      CuboidFaces({ w, d, h, top: SW_PAL.paper, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
+      // Magnifier + checklist glyph
+      (() => {
+        const c = isoProjR(w * 0.5, d * 0.5, h + 0.01, r, w, d);
+        return createElement(
+          'g',
+          null,
+          createElement('rect', {
+            x: c.sx - 10,
+            y: c.sy - 4,
+            width: 9,
+            height: 8,
+            rx: 0.6,
+            fill: shade(SW_PAL.cream, -0.05),
+            stroke: SW_PAL.edge,
+            strokeWidth: 0.5,
+          }),
+          createElement('rect', {
+            x: c.sx - 8,
+            y: c.sy - 2,
+            width: 5,
+            height: 0.8,
+            fill: SW_PAL.edge,
+          }),
+          createElement('rect', {
+            x: c.sx - 8,
+            y: c.sy,
+            width: 4,
+            height: 0.8,
+            fill: SW_PAL.edge,
+          }),
+          createElement('rect', {
+            x: c.sx - 8,
+            y: c.sy + 2,
+            width: 5,
+            height: 0.8,
+            fill: SW_PAL.edge,
+          }),
+          createElement('circle', {
+            cx: c.sx + 5,
+            cy: c.sy + 1,
+            r: 3.5,
+            fill: SW_PAL.metalLo,
+          }),
+          createElement('circle', {
+            cx: c.sx + 5,
+            cy: c.sy + 1,
+            r: 2.4,
+            fill: SW_PAL.blue,
+          }),
+        );
+      })(),
+    );
 }
 function packBench(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.wood, left: SW_PAL.woodLo, right: SW_PAL.wood });
+  return ({ w, d, h, r = 0 }) =>
+    createElement(
+      'g',
+      null,
+      CuboidFaces({ w, d, h, top: SW_PAL.wood, left: SW_PAL.woodLo, right: SW_PAL.wood, r }),
+      // A carton on top
+      (() => {
+        const c = isoProjR(w * 0.5, d * 0.5, h + 0.01, r, w, d);
+        return createElement(
+          'g',
+          null,
+          createElement('polygon', {
+            points: `${c.sx - 8},${c.sy - 1} ${c.sx},${c.sy - 4} ${c.sx + 8},${c.sy - 1} ${c.sx},${c.sy + 2}`,
+            fill: '#D8B488',
+            stroke: SW_PAL.edge,
+            strokeWidth: 0.5,
+          }),
+          createElement('polygon', {
+            points: `${c.sx + 8},${c.sy - 1} ${c.sx + 8},${c.sy + 5} ${c.sx},${c.sy + 8} ${c.sx},${c.sy + 2}`,
+            fill: '#A37D52',
+            stroke: SW_PAL.edge,
+            strokeWidth: 0.5,
+          }),
+          createElement('polygon', {
+            points: `${c.sx - 8},${c.sy - 1} ${c.sx - 8},${c.sy + 5} ${c.sx},${c.sy + 8} ${c.sx},${c.sy + 2}`,
+            fill: '#C49A6C',
+            stroke: SW_PAL.edge,
+            strokeWidth: 0.5,
+          }),
+          createElement('rect', {
+            x: c.sx - 0.7,
+            y: c.sy - 3.5,
+            width: 1.4,
+            height: 5,
+            fill: SW_PAL.yellow,
+          }),
+        );
+      })(),
+    );
 }
 function compressor(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.blue, left: SW_PAL.blueLo, right: SW_PAL.blue });
+  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.blue, left: SW_PAL.blueLo, right: SW_PAL.blue, r });
 }
 function breakerPanel(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.steel, left: SW_PAL.edge, right: SW_PAL.steel });
+  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.steel, left: SW_PAL.edge, right: SW_PAL.steel, r });
 }
 function hvac(): IsoDrawFn {
-  return ({ w, d, h }) => CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal });
+  return ({ w, d, h, r = 0 }) => CuboidFaces({ w, d, h, top: SW_PAL.metal, left: SW_PAL.metalLo, right: SW_PAL.metal, r });
 }
 
 // ── Apparel-specific draw fns ───────────────────────────────────────────────
@@ -790,17 +1330,17 @@ function hvac(): IsoDrawFn {
  *  carriage that rolls along the long axis. Distinct from the CNC cutter
  *  by a flatter, wider gantry and the cream cloth-lay top. */
 function autoSpreader(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.45, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream }),
+      CuboidFaces({ w, d, h: h * 0.45, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
       // gantry rail (blue carriage)
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(w * 0.25, 0, h * 0.45).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(w * 0.25, 0, h * 0.45).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(w * 0.25, 0, h * 0.45, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(w * 0.25, 0, h * 0.45, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
@@ -809,8 +1349,7 @@ function autoSpreader(): IsoDrawFn {
           h: h * 0.4,
           top: SW_PAL.blue,
           left: SW_PAL.blueLo,
-          right: SW_PAL.blue,
-        }),
+          right: SW_PAL.blue, r }),
       ),
     );
 }
@@ -818,16 +1357,16 @@ function autoSpreader(): IsoDrawFn {
 /** Marker plotter — narrow paper-marker printing table with a thin print
  *  head crossing the short axis. Lower profile than the CNC. */
 function markerPlotter(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.paper, left: SW_PAL.creamLo, right: SW_PAL.cream }),
+      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.paper, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(w * 0.45, 0, h * 0.5).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(w * 0.45, 0, h * 0.5).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(w * 0.45, 0, h * 0.5, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(w * 0.45, 0, h * 0.5, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
@@ -836,8 +1375,7 @@ function markerPlotter(): IsoDrawFn {
           h: h * 0.3,
           top: SW_PAL.yellow,
           left: SW_PAL.yellowLo,
-          right: SW_PAL.yellow,
-        }),
+          right: SW_PAL.yellow, r }),
       ),
     );
 }
@@ -845,16 +1383,16 @@ function markerPlotter(): IsoDrawFn {
 /** Single-head embroidery machine — flat work table + perpendicular needle
  *  bridge + a yellow hoop ring on top representing the embroidery frame. */
 function embroideryMachine(): IsoDrawFn {
-  return ({ w, d, h }) =>
+  return ({ w, d, h, r = 0 }) =>
     createElement(
       'g',
       null,
-      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream }),
+      CuboidFaces({ w, d, h: h * 0.5, top: SW_PAL.cream, left: SW_PAL.creamLo, right: SW_PAL.cream, r }),
       createElement(
         'g',
         {
-          transform: `translate(${isoProj(w * 0.2, 0, h * 0.5).sx - isoProj(0, 0, 0).sx}, ${
-            isoProj(w * 0.2, 0, h * 0.5).sy - isoProj(0, 0, 0).sy
+          transform: `translate(${isoProjR(w * 0.2, 0, h * 0.5, r, w, d).sx - isoProjR(0, 0, 0, r, w, d).sx}, ${
+            isoProjR(w * 0.2, 0, h * 0.5, r, w, d).sy - isoProjR(0, 0, 0, r, w, d).sy
           })`,
         },
         CuboidFaces({
@@ -863,11 +1401,10 @@ function embroideryMachine(): IsoDrawFn {
           h: h * 0.45,
           top: SW_PAL.steel,
           left: SW_PAL.edge,
-          right: SW_PAL.steel,
-        }),
+          right: SW_PAL.steel, r }),
       ),
       (() => {
-        const c = isoProj(w / 2, d / 2, h + 0.05);
+        const c = isoProjR(w / 2, d / 2, h + 0.05, r, w, d);
         return createElement('circle', {
           cx: c.sx,
           cy: c.sy,
@@ -1042,11 +1579,14 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
   { id: 'st_bin', cat: 'store', label: 'Bin shelf', w: 2, d: 1, h: 3.5, draw: binShelf() },
 
   // --- OPERATORS ---
-  { id: 'op_sewer', cat: 'op', label: 'Sewer', w: 1, d: 1, h: 1.6, draw: operator(SW_PAL.red) },
-  { id: 'op_cutter', cat: 'op', label: 'Cutter', w: 1, d: 1, h: 1.6, draw: operator(SW_PAL.green) },
-  { id: 'op_helper', cat: 'op', label: 'Helper', w: 1, d: 1, h: 1.6, draw: operator(SW_PAL.yellow) },
-  { id: 'op_super', cat: 'op', label: 'Supervisor', w: 1, d: 1, h: 1.6, draw: operator(SW_PAL.ink) },
-  { id: 'op_qc', cat: 'op', label: 'QC inspector', w: 1, d: 1, h: 1.6, draw: operator(SW_PAL.blue) },
+  // Standing operators — h=2.4 puts a worker at ~1.7m which is 1.7× a
+  // sewing-machine table+head (h=1.4). Matches real-floor anthropometry so
+  // workers visually overhang their machines rather than reading shorter.
+  { id: 'op_sewer', cat: 'op', label: 'Sewer', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.red) },
+  { id: 'op_cutter', cat: 'op', label: 'Cutter', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.green) },
+  { id: 'op_helper', cat: 'op', label: 'Helper', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.yellow) },
+  { id: 'op_super', cat: 'op', label: 'Supervisor', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.ink) },
+  { id: 'op_qc', cat: 'op', label: 'QC inspector', w: 1, d: 1, h: 2.4, draw: operator(SW_PAL.blue) },
 
   // --- BUFFERS ---
   { id: 'buf_in', cat: 'buf', label: 'Inbound buffer', w: 2, d: 2, h: 0.4, draw: bufferPad('IN', SW_PAL.green) },
@@ -1114,6 +1654,74 @@ export const ISO_FIXTURE_CATALOG: IsoFixture[] = [
     draw: pmlBlock(spec.Icon, PML_CAT_ACCENT[spec.category]),
   })),
 ];
+
+// ============================================================================
+// CROSS-MODULE MAPPING — bridge to the asset-library catalogs
+//
+// The Asset Library page edits `MachineCode` and `WorkerRole` entries from
+// `domain/machines.ts` / `domain/workers.ts`, but the Builder canvas draws
+// `ISO_FIXTURE_CATALOG` blocks. These helpers tie the two together so the
+// Asset Library can preview the exact iso block the Builder will place.
+// ============================================================================
+
+/** Map each industry machine code to its preferred iso fixture id. The
+ *  fixture is the block the Builder drops onto the canvas. Codes missing a
+ *  bespoke fixture fall back to the closest visual relative. */
+export const MACHINE_CODE_TO_ISO_FIXTURE: Record<string, string> = {
+  SNL:   'a_snls',
+  DNL:   'a_dnls',
+  '4OL': 'a_4ol',
+  '5OL': 'a_5ol',
+  FL:    'a_flatlock',
+  FB:    'a_foa',
+  KS:    'a_kansai',
+  BH:    'a_buttonhole',
+  BS:    'a_buttonsew',
+  BT:    'a_bartack',
+  EMB:   'a_embroidery',
+  CUT:   'a_knife_straight',
+  CAD:   'a_cnc_cutter',
+  SPR:   'a_spread_auto',
+  FUSE:  'a_iron_inline',
+  PRESS: 'a_iron_inline',
+  STEAM: 'a_iron_inline',
+  INSP:  'a_inspect_table',
+  MNL:   'a_op_desk',
+};
+
+/** Map each worker archetype role to its iso operator fixture. Roles that
+ *  share visual identity collapse onto the same operator block (e.g. all
+ *  QC-flavoured roles use op_qc). */
+export const WORKER_ROLE_TO_ISO_FIXTURE: Record<string, string> = {
+  sew_op:           'op_sewer',
+  helper:           'op_helper',
+  cutter:           'op_cutter',
+  spreader:         'op_cutter',
+  bundler:          'op_helper',
+  fuser:            'op_sewer',
+  embroidery_op:    'op_sewer',
+  qc_inline:        'op_qc',
+  qc_final:         'op_qc',
+  presser:          'op_sewer',
+  packer:           'op_helper',
+  material_handler: 'op_helper',
+  mechanic:         'op_super',
+  supervisor:       'op_super',
+  merchandiser:     'op_super',
+};
+
+/** Look up the iso fixture for a MachineCode or any catalog id. Returns the
+ *  fixture object (with `draw`, `w`, `d`, `h`) or null. */
+export function isoFixtureForMachineCode(code: string): IsoFixture | null {
+  const fid = MACHINE_CODE_TO_ISO_FIXTURE[code] ?? code;
+  return ISO_FIXTURE_CATALOG.find((f) => f.id === fid) ?? null;
+}
+
+/** Look up the iso fixture for a WorkerRole. */
+export function isoFixtureForWorkerRole(role: string): IsoFixture | null {
+  const fid = WORKER_ROLE_TO_ISO_FIXTURE[role] ?? 'op_helper';
+  return ISO_FIXTURE_CATALOG.find((f) => f.id === fid) ?? null;
+}
 
 // ============================================================================
 // DEFAULT VARIABLE SETS by category

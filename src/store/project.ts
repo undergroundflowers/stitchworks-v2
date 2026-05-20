@@ -73,6 +73,16 @@ export interface CustomProductSpec {
   description?: string;
 }
 
+/** Per-kind edit overlay for a built-in product. Sparse — only the fields
+ *  the user changed are populated. */
+export interface ProductEdit {
+  label?: string;
+  color?: string;
+  description?: string;
+  /** Override the SVG sprite shape (the rendered "kind"). */
+  baseSprite?: ProductKind;
+}
+
 export interface ProjectMeta {
   name: string;
   factory: string;
@@ -356,14 +366,31 @@ export interface ProjectState {
   machineEdits: Record<string, MachineSpec>;
   /** User-authored workstations keyed by their custom code. */
   customMachines: Record<string, CustomMachineSpec>;
+  /** Built-in machines flagged hidden by the user. They still exist in code
+   *  but are filtered out of the asset library and any picker that calls
+   *  through `useMachines`. */
+  hiddenMachines: Record<string, true>;
+  /** User-uploaded image (data URL) per machine code. Overrides the SVG sprite
+   *  on asset library cards and any consumer that honours `customImage`. */
+  machineImages: Record<string, string>;
 
   /** Per-role edits that shadow built-in `WORKER_ARCHETYPES`. */
   workerEdits: Record<string, WorkerArchetype>;
   /** User-authored worker archetypes keyed by their custom role id. */
   customWorkers: Record<string, CustomWorkerArchetype>;
+  /** Built-in worker roles flagged hidden by the user. */
+  hiddenWorkers: Record<string, true>;
+  /** User-uploaded image (data URL) per worker role. */
+  workerImages: Record<string, string>;
 
   /** User-authored product kinds keyed by their custom kind id. */
   customProducts: Record<string, CustomProductSpec>;
+  /** Sparse edit overlay for built-in products (label/color/description). */
+  productEdits: Record<string, ProductEdit>;
+  /** Built-in product kinds flagged hidden by the user. */
+  hiddenProducts: Record<string, true>;
+  /** User-uploaded image (data URL) per product kind. */
+  productImages: Record<string, string>;
 
   /** Display preferences set from the Settings page. Render sites read
    *  these to format currency, dates, distances and SAM. */
@@ -488,6 +515,14 @@ export interface ProjectState {
   patchCustomMachine: (code: string, patch: Partial<Omit<CustomMachineSpec, 'code' | 'isCustom'>>) => void;
   /** Remove a user-authored machine. */
   removeCustomMachine: (code: string) => void;
+  /** Hide a built-in machine (filters it out of the asset library) or
+   *  remove a custom machine outright. Idempotent. */
+  deleteMachine: (code: string) => void;
+  /** Un-hide a previously deleted built-in machine. No-op for customs. */
+  restoreMachine: (code: string) => void;
+  /** Set or clear the uploaded image (data URL) for a machine code. Pass
+   *  `null` to clear. */
+  setMachineImage: (code: string, dataUrl: string | null) => void;
 
   // ── Asset library: workers ───────────────────────────────────────────────
   patchWorker: (
@@ -499,11 +534,28 @@ export interface ProjectState {
   addCustomWorker: (spec: CustomWorkerArchetype) => void;
   patchCustomWorker: (role: string, patch: Partial<Omit<CustomWorkerArchetype, 'role' | 'isCustom'>>) => void;
   removeCustomWorker: (role: string) => void;
+  /** Hide a built-in worker role or remove a custom one. */
+  deleteWorker: (role: string) => void;
+  /** Un-hide a previously deleted built-in worker role. */
+  restoreWorker: (role: string) => void;
+  /** Set or clear the uploaded image for a worker role. */
+  setWorkerImage: (role: string, dataUrl: string | null) => void;
 
   // ── Asset library: products ──────────────────────────────────────────────
   addCustomProduct: (spec: CustomProductSpec) => void;
   patchCustomProduct: (kind: string, patch: Partial<Omit<CustomProductSpec, 'kind' | 'isCustom'>>) => void;
   removeCustomProduct: (kind: string) => void;
+  /** Patch a built-in product (label/color/description/baseSprite). Clones
+   *  the patch into `productEdits` sparsely. */
+  patchProduct: (kind: string, patch: ProductEdit) => void;
+  /** Drop the edit overlay for a built-in product. */
+  resetProduct: (kind: string) => void;
+  /** Hide a built-in product or remove a custom one. */
+  deleteProduct: (kind: string) => void;
+  /** Un-hide a previously deleted built-in product. */
+  restoreProduct: (kind: string) => void;
+  /** Set or clear the uploaded image for a product kind. */
+  setProductImage: (kind: string, dataUrl: string | null) => void;
   /**
    * Sweep custom (non-built-in) garments whose names match the test-name
    * pattern (dvss/dsvs/asdf/test/casdcz). Idempotent — safe to call on every
@@ -601,14 +653,25 @@ const defaults: Omit<
   | 'addCustomMachine'
   | 'patchCustomMachine'
   | 'removeCustomMachine'
+  | 'deleteMachine'
+  | 'restoreMachine'
+  | 'setMachineImage'
   | 'patchWorker'
   | 'resetWorker'
   | 'addCustomWorker'
   | 'patchCustomWorker'
   | 'removeCustomWorker'
+  | 'deleteWorker'
+  | 'restoreWorker'
+  | 'setWorkerImage'
   | 'addCustomProduct'
   | 'patchCustomProduct'
   | 'removeCustomProduct'
+  | 'patchProduct'
+  | 'resetProduct'
+  | 'deleteProduct'
+  | 'restoreProduct'
+  | 'setProductImage'
 > = (() => {
   const meta = defaultMeta();
   return {
@@ -627,9 +690,16 @@ const defaults: Omit<
     hiddenGarmentIds: {},
     machineEdits: {},
     customMachines: {},
+    hiddenMachines: {},
+    machineImages: {},
     workerEdits: {},
     customWorkers: {},
+    hiddenWorkers: {},
+    workerImages: {},
     customProducts: {},
+    productEdits: {},
+    hiddenProducts: {},
+    productImages: {},
     units: defaultUnits,
     time: defaultTimeSettings(meta.createdAt),
   };
@@ -983,6 +1053,38 @@ export const useProject = create<ProjectState>()(
           return touch({ ...s, customMachines: next });
         }),
 
+      deleteMachine: (code) =>
+        set((s) => {
+          if (s.customMachines[code]) {
+            const next = { ...s.customMachines };
+            delete next[code];
+            const nextImages = { ...s.machineImages };
+            delete nextImages[code];
+            return touch({ ...s, customMachines: next, machineImages: nextImages });
+          }
+          if (s.hiddenMachines[code]) return s;
+          return touch({
+            ...s,
+            hiddenMachines: { ...s.hiddenMachines, [code]: true },
+          });
+        }),
+
+      restoreMachine: (code) =>
+        set((s) => {
+          if (!s.hiddenMachines[code]) return s;
+          const next = { ...s.hiddenMachines };
+          delete next[code];
+          return touch({ ...s, hiddenMachines: next });
+        }),
+
+      setMachineImage: (code, dataUrl) =>
+        set((s) => {
+          const next = { ...s.machineImages };
+          if (dataUrl) next[code] = dataUrl;
+          else delete next[code];
+          return touch({ ...s, machineImages: next });
+        }),
+
       // ── Asset library: workers ───────────────────────────────────────────
       patchWorker: (role, builtIn, patch) =>
         set((s) => {
@@ -1021,6 +1123,38 @@ export const useProject = create<ProjectState>()(
           return touch({ ...s, customWorkers: next });
         }),
 
+      deleteWorker: (role) =>
+        set((s) => {
+          if (s.customWorkers[role]) {
+            const next = { ...s.customWorkers };
+            delete next[role];
+            const nextImages = { ...s.workerImages };
+            delete nextImages[role];
+            return touch({ ...s, customWorkers: next, workerImages: nextImages });
+          }
+          if (s.hiddenWorkers[role]) return s;
+          return touch({
+            ...s,
+            hiddenWorkers: { ...s.hiddenWorkers, [role]: true },
+          });
+        }),
+
+      restoreWorker: (role) =>
+        set((s) => {
+          if (!s.hiddenWorkers[role]) return s;
+          const next = { ...s.hiddenWorkers };
+          delete next[role];
+          return touch({ ...s, hiddenWorkers: next });
+        }),
+
+      setWorkerImage: (role, dataUrl) =>
+        set((s) => {
+          const next = { ...s.workerImages };
+          if (dataUrl) next[role] = dataUrl;
+          else delete next[role];
+          return touch({ ...s, workerImages: next });
+        }),
+
       // ── Asset library: products ──────────────────────────────────────────
       addCustomProduct: (spec) =>
         set((s) => touch({ ...s, customProducts: { ...s.customProducts, [spec.kind]: spec } })),
@@ -1041,6 +1175,60 @@ export const useProject = create<ProjectState>()(
           const next = { ...s.customProducts };
           delete next[kind];
           return touch({ ...s, customProducts: next });
+        }),
+
+      patchProduct: (kind, patch) =>
+        set((s) => {
+          const current = s.productEdits[kind] ?? {};
+          const merged: ProductEdit = { ...current, ...patch };
+          // Strip undefined keys so the overlay stays sparse.
+          (Object.keys(merged) as (keyof ProductEdit)[]).forEach((k) => {
+            if (merged[k] === undefined) delete merged[k];
+          });
+          return touch({
+            ...s,
+            productEdits: { ...s.productEdits, [kind]: merged },
+          });
+        }),
+
+      resetProduct: (kind) =>
+        set((s) => {
+          if (!s.productEdits[kind]) return s;
+          const next = { ...s.productEdits };
+          delete next[kind];
+          return touch({ ...s, productEdits: next });
+        }),
+
+      deleteProduct: (kind) =>
+        set((s) => {
+          if (s.customProducts[kind]) {
+            const next = { ...s.customProducts };
+            delete next[kind];
+            const nextImages = { ...s.productImages };
+            delete nextImages[kind];
+            return touch({ ...s, customProducts: next, productImages: nextImages });
+          }
+          if (s.hiddenProducts[kind]) return s;
+          return touch({
+            ...s,
+            hiddenProducts: { ...s.hiddenProducts, [kind]: true },
+          });
+        }),
+
+      restoreProduct: (kind) =>
+        set((s) => {
+          if (!s.hiddenProducts[kind]) return s;
+          const next = { ...s.hiddenProducts };
+          delete next[kind];
+          return touch({ ...s, hiddenProducts: next });
+        }),
+
+      setProductImage: (kind, dataUrl) =>
+        set((s) => {
+          const next = { ...s.productImages };
+          if (dataUrl) next[kind] = dataUrl;
+          else delete next[kind];
+          return touch({ ...s, productImages: next });
         }),
 
       purgeTestGarments: () => {

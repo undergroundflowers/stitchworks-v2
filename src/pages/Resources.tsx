@@ -4,7 +4,9 @@ import { Fragment, useState, useMemo } from 'react';
 import { useSearchParams } from 'react-router-dom';
 import {
   ALL_WORKER_ARCHETYPES,
+  WORKER_ARCHETYPES,
   type WorkerArchetype,
+  type WorkerRole,
   ALL_MACHINES,
   type MachineSpec,
   type MachineCode,
@@ -14,7 +16,13 @@ import {
   type GarmentTemplate,
   GARMENT_TEMPLATES,
 } from '../domain';
+import type {
+  Assignment,
+  Operator as TwinOperator,
+  SewingLine,
+} from '../domain/twin';
 import { useProject, useGarments, type EffectiveGarments } from '../store';
+import { useTwin, selectActiveTwin } from '../store/twin';
 import { AssetsGalleryPage } from './AssetsGallery';
 
 /**
@@ -54,7 +62,25 @@ export function ResourcesPage() {
     () => project.factory.lines.reduce((s, l) => s + (l.operators || 0), 0),
     [project.factory.lines],
   );
-  const operators = useMemo(() => buildOperators(factoryHeadcount), [factoryHeadcount]);
+  // Operators come from the active Twin when it carries any (post step-3
+  // seed flow), otherwise we fall back to the synthesised demo roster so
+  // the table is never empty on v8 saves or canonical-only projects.
+  const activeTwin = useTwin(selectActiveTwin);
+  const operators = useMemo(() => {
+    const twinOps = activeTwin?.operators ?? [];
+    if (twinOps.length > 0) {
+      const workstationsById = new Map(
+        (activeTwin?.workstations ?? []).map((w) => [w.id, { id: w.id, name: w.name }]),
+      );
+      return operatorsFromTwin(
+        twinOps,
+        activeTwin?.assignments ?? [],
+        activeTwin?.lines ?? [],
+        workstationsById,
+      );
+    }
+    return buildOperators(factoryHeadcount);
+  }, [activeTwin, factoryHeadcount]);
   const machines = useMemo(() => buildMachines(), []);
 
   const activeCount = operators.filter((o) => o.status === 'ACTIVE').length;
@@ -98,7 +124,7 @@ export function ResourcesPage() {
               <table style={{ width:'100%', borderCollapse:'collapse', fontFamily: SW_FONTS.body }}>
                 <thead>
                   <tr style={{ background: SW_COLORS.paperDeep, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                    {['ID','Name','Role','Eff %','SAM','Shift','Wage/hr','Status'].map(h => (
+                    {['ID','Name','Role','Line','Eff %','Assignment','Shift','Wage/hr','Status'].map(h => (
                       <th key={h} style={{ padding:'10px 12px', textAlign:'left', fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, letterSpacing:'1px' }}>{h}</th>
                     ))}
                   </tr>
@@ -119,13 +145,63 @@ export function ResourcesPage() {
                           {o.archetype.label}
                         </span>
                       </td>
+                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontSize:11, color: SW_COLORS.steel }}>
+                        {o.lineName ?? '—'}
+                      </td>
                       <td style={{ padding:'10px 12px' }}>
                         <div style={{ display:'flex', alignItems:'center', gap:6 }}>
                           <span style={{ fontFamily: SW_FONTS.mono, fontWeight:700, width:30, color: o.eff>=80?SW_COLORS.ok:o.eff>=65?SW_COLORS.thread:SW_COLORS.alarm }}>{o.eff}%</span>
                           <div style={{ flex:1, maxWidth:60 }}><Progress value={o.eff} color={o.eff>=80?SW_COLORS.ok:o.eff>=65?SW_COLORS.thread:SW_COLORS.alarm} height={4}/></div>
                         </div>
                       </td>
-                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontWeight:700 }}>{o.sam}</td>
+                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontSize:11, color: SW_COLORS.muted, minWidth: 220 }}>
+                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
+                          <span>{o.assignmentSummary ?? `SAM ${o.sam}`}</span>
+                          {o.overallocated && (
+                            <span
+                              title="This operator's non-rotation shareFrac sums to > 1.0. Engine cycle math will treat the most absent station as the bottleneck; consider redistributing assignments."
+                              style={{
+                                fontFamily: SW_FONTS.mono,
+                                fontSize: 9,
+                                fontWeight: 800,
+                                color: SW_COLORS.alarm,
+                                padding: '1px 6px',
+                                border: `1px solid ${SW_COLORS.alarm}`,
+                                borderRadius: 3,
+                                letterSpacing: '0.05em',
+                              }}
+                            >
+                              ⚠ OVERALLOCATED
+                            </span>
+                          )}
+                        </div>
+                        {o.stationDetails && o.stationDetails.length > 0 && (
+                          <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
+                            {o.stationDetails.map((s, idx) => {
+                              const sharedColor = s.sharePct < 100 ? SW_COLORS.alarm : SW_COLORS.steel;
+                              return (
+                                <div
+                                  key={idx}
+                                  style={{
+                                    display: 'grid',
+                                    gridTemplateColumns: '1fr auto',
+                                    gap: 6,
+                                    alignItems: 'center',
+                                    fontSize: 10,
+                                  }}
+                                >
+                                  <span style={{ color: SW_COLORS.ink, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.wsName}>
+                                    {s.wsName}
+                                  </span>
+                                  <span style={{ color: sharedColor, fontWeight: 700, minWidth: 30, textAlign: 'right' }}>
+                                    {s.sharePct}%
+                                  </span>
+                                </div>
+                              );
+                            })}
+                          </div>
+                        )}
+                      </td>
                       <td style={{ padding:'10px 12px' }}><Tag soft color={o.shift==='A'?SW_COLORS.brand:o.shift==='B'?SW_COLORS.bobbin:SW_COLORS.fabric}>{o.shift}</Tag></td>
                       <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontWeight:700, color: SW_COLORS.thread }}>${o.wage.toFixed(0)}</td>
                       <td style={{ padding:'10px 12px' }}>
@@ -732,6 +808,106 @@ interface SeededOperator {
   shift: 'A' | 'B' | 'C';
   status: 'ACTIVE' | 'SICK' | 'TRAINING';
   wage: number;
+  /** Parent sewing-line name when the row came from a real Twin operator;
+   *  blank for synthesised demo rows. */
+  lineName?: string;
+  /** "3 stns · rotation", "1 stn · primary", etc. — empty for demo rows. */
+  assignmentSummary?: string;
+  /** Per-station breakdown for twin-derived rows — drives the expandable
+   *  "stations" column so the user sees which workstations an operator
+   *  covers and at what share %. Empty / missing for demo rows. */
+  stationDetails?: Array<{ wsName: string; sharePct: number; role: string }>;
+  /** True when this operator's non-rotation shareFrac sums to > 1.0 —
+   *  surfaced as a ⚠ OVERALLOCATED chip. The validator emits a matching
+   *  warning string in `validateTwin`. */
+  overallocated?: boolean;
+  /** True when this row came from `Twin.operators`. The right-side cards
+   *  hide demo-only stats (SICK / TRAINING) for twin rows. */
+  fromTwin?: boolean;
+}
+
+/** Map an Operator entity from the active twin onto the row shape the
+ *  Operators table already knows how to render. Each operator's
+ *  Assignment rows are summarised into a single "N stns · <role>" tag
+ *  so the user sees fixed-station vs rotation membership at a glance. */
+function operatorsFromTwin(
+  operators: TwinOperator[],
+  assignments: Assignment[],
+  lines: SewingLine[],
+  workstationsById: Map<string, { id: string; name: string }>,
+): SeededOperator[] {
+  const linesById = new Map(lines.map((l) => [l.id, l]));
+  const byOperator = new Map<string, Assignment[]>();
+  for (const a of assignments) {
+    const arr = byOperator.get(a.operatorId) ?? [];
+    arr.push(a);
+    byOperator.set(a.operatorId, arr);
+  }
+  return operators.map((op, i) => {
+    const role = (op.archetypeId as WorkerRole) ?? 'sew_op';
+    const archetype = WORKER_ARCHETYPES[role] ?? WORKER_ARCHETYPES.sew_op;
+    const myAssignments = byOperator.get(op.id) ?? [];
+    // Pick the dominant assignment role for the summary tag. Rotation wins
+    // when any rotation_member assignment exists, otherwise the first
+    // assignment's role; falls back to "floater" for un-assigned operators.
+    const dominant =
+      myAssignments.find((a) => a.role === 'rotation_member')?.role ??
+      myAssignments[0]?.role ??
+      (op.floats ? 'floater' : 'floater');
+    const summary =
+      myAssignments.length === 0
+        ? op.floats
+          ? '— · floater'
+          : '— · unassigned'
+        : `${myAssignments.length} stn${myAssignments.length === 1 ? '' : 's'} · ${dominant}`;
+    // Per-station breakdown — drives the expandable list under the summary.
+    const stationDetails = myAssignments.map((a) => {
+      const sharePct =
+        a.shareFrac !== undefined
+          ? Math.round(a.shareFrac * 100)
+          : a.role === 'primary'
+            ? 100
+            : a.role === 'helper'
+              ? 30
+              : a.role === 'rotation_member'
+                ? Math.round(100 / Math.max(1, myAssignments.length))
+                : 0;
+      return {
+        wsName: workstationsById.get(a.wsId)?.name ?? a.wsId,
+        sharePct,
+        role: a.role,
+      };
+    });
+    // Σ shareFrac across non-rotation assignments. Rotation members are
+    // expected to sum near 1 (one operator splits attention across their
+    // rotation by design) so they don't count toward over-allocation.
+    const nonRotSum = myAssignments
+      .filter((a) => a.role !== 'rotation_member')
+      .reduce((s, a) => s + (a.shareFrac ?? (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0)), 0);
+    const overallocated = nonRotSum > 1.001;
+    // Average skill efficiency × 100 ⇒ display %.
+    const avgEff =
+      op.skills.length > 0
+        ? Math.round(
+            (op.skills.reduce((s, sk) => s + sk.efficiency, 0) / op.skills.length) * 100,
+          )
+        : Math.round(archetype.baseEfficiency * 100);
+    return {
+      id: `OPR-${String(i + 1).padStart(2, '0')}`,
+      name: op.name,
+      archetype,
+      eff: avgEff,
+      sam: '—',
+      shift: 'A',
+      status: 'ACTIVE',
+      wage: archetype.baseCostHr,
+      lineName: op.lineId ? linesById.get(op.lineId)?.name ?? '—' : '—',
+      assignmentSummary: summary,
+      stationDetails,
+      overallocated,
+      fromTwin: true,
+    };
+  });
 }
 
 const NAMES = ['Aanya','Rohan','Mei','Kofi','Lara','Yui','Tariq','Sara','Rafa','Nina','Diego','Eun','Jamal','Priya','Ola','Ravi','Lin','Pavel','Kemi','Iris','Boun','Asha','Nova','Tomi','Hina','Beto','Hai','Anya','Karim','Joon'];

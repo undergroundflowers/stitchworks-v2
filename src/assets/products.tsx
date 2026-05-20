@@ -1,13 +1,18 @@
 /**
  * Product sprites — what flows through the factory. Three families:
  *
- *   raw materials    — fabric roll, thread cone, trim/button card
+ *   raw materials    — fabric roll, thread cone, trim/button card, zipper
  *   work-in-progress — cut-piece bundle, partial garment, hanger garment
  *   finished goods   — folded garment in poly bag, packed carton
  *
  * Plus one sprite per garment template (T-shirt, polo, formal shirt,
  * trouser, sweatshirt) so the order/factory views can show the actual
  * SKU silhouette instead of a generic icon.
+ *
+ * Solid-fill discipline: every shape uses opaque colour. Layered tones
+ * (lighter top, mid body, darker base) build depth without opacity tricks.
+ * Hollow stroke-only shapes have been replaced with filled glyphs so each
+ * sprite reads as a real, tangible object at every size.
  *
  * All sprites are drawn on a 100x100 viewBox. Garment colours come from a
  * small palette of common factory colourways and can be overridden via prop.
@@ -48,6 +53,16 @@ interface ProductSpriteProps {
   cssStyle?: CSSProperties;
 }
 
+function shade(color: string, amt: number): string {
+  const c = color.replace('#', '');
+  const r = parseInt(c.slice(0, 2), 16);
+  const g = parseInt(c.slice(2, 4), 16);
+  const b = parseInt(c.slice(4, 6), 16);
+  const t = (v: number) =>
+    Math.max(0, Math.min(255, Math.round(v + (amt > 0 ? (255 - v) * amt : v * amt))));
+  return '#' + [t(r), t(g), t(b)].map((v) => v.toString(16).padStart(2, '0')).join('');
+}
+
 export function ProductSprite({
   kind,
   size = 64,
@@ -66,15 +81,16 @@ export function ProductSprite({
       <Body kind={kind} color={color} />
       {typeof count === 'number' && (
         <g>
-          <circle cx={84} cy={18} r={12} fill={SW_COLORS.ink} />
+          <circle cx={84} cy={18} r={13} fill={SW_COLORS.ink} />
+          <circle cx={84} cy={18} r={11} fill={SW_COLORS.brand} />
           <text
             x={84}
-            y={18}
+            y={19}
             fontSize={10}
-            fontWeight={800}
+            fontWeight={900}
             textAnchor="middle"
             dominantBaseline="central"
-            fill={SW_COLORS.brand}
+            fill="#FFFFFF"
             fontFamily="ui-monospace, monospace"
           >
             ×{count}
@@ -110,7 +126,7 @@ function Body({ kind, color }: { kind: ProductKind; color?: string }) {
     case 'polo':
       return <Polo color={color ?? SW_COLORS.bobbin} />;
     case 'shirt':
-      return <FormalShirt color={color ?? SW_COLORS.paper} />;
+      return <FormalShirt color={color ?? SW_COLORS.paperEdge} />;
     case 'trouser':
       return <Trouser color={color ?? SW_COLORS.steel} />;
     case 'sweatshirt':
@@ -122,61 +138,87 @@ function Body({ kind, color }: { kind: ProductKind; color?: string }) {
   }
 }
 
+// Solid grounding shadow — used at the base of upright objects.
+function GroundShadow({ cx = 50, cy = 88, rx = 28 }: { cx?: number; cy?: number; rx?: number }) {
+  return (
+    <>
+      <ellipse cx={cx} cy={cy} rx={rx} ry={4.5} fill={SW_COLORS.steel} />
+      <ellipse cx={cx} cy={cy - 0.6} rx={rx * 0.78} ry={3} fill={SW_COLORS.ink} />
+    </>
+  );
+}
+
 // ── Raw ─────────────────────────────────────────────────────────────────
 function FabricRoll({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.2);
   return (
     <g>
-      <rect x={10} y={30} width={80} height={40} rx={4} fill={color} stroke={SW_COLORS.ink} strokeWidth={1.5} />
-      <ellipse cx={10} cy={50} rx={4} ry={20} fill={SW_COLORS.ink} opacity={0.85} />
-      <ellipse cx={90} cy={50} rx={4} ry={20} fill={color} stroke={SW_COLORS.ink} strokeWidth={1.5} />
-      {[40, 50, 60].map((y) => (
-        <line key={y} x1={14} y1={y} x2={86} y2={y} stroke={SW_COLORS.paper} strokeWidth={0.6} opacity={0.5} />
-      ))}
-      <rect x={14} y={34} width={20} height={6} rx={1} fill={SW_COLORS.paper} stroke={SW_COLORS.ink} strokeWidth={0.5} />
+      <GroundShadow cx={50} cy={76} rx={42} />
+      {/* Roll core (left end) */}
+      <ellipse cx={10} cy={50} rx={5} ry={20} fill={shade(color, -0.4)} />
+      <ellipse cx={10} cy={50} rx={3} ry={14} fill={SW_COLORS.ink} />
+      {/* Body */}
+      <rect x={10} y={30} width={80} height={40} fill={color} />
+      <rect x={10} y={30} width={80} height={8} fill={lite} />
+      <rect x={10} y={62} width={80} height={8} fill={deep} />
+      {/* Right cap */}
+      <ellipse cx={90} cy={50} rx={5} ry={20} fill={lite} />
+      <ellipse cx={90} cy={50} rx={3} ry={14} fill={shade(color, -0.15)} />
+      {/* Outline */}
+      <rect x={10} y={30} width={80} height={40} fill="none" stroke={SW_COLORS.ink} strokeWidth={1.5} />
+      {/* Solid label sticker */}
+      <rect x={14} y={34} width={20} height={8} fill={SW_COLORS.paper} />
+      <rect x={14} y={34} width={20} height={2.5} fill={shade(SW_COLORS.paper, -0.1)} />
+      <rect x={14} y={34} width={20} height={8} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.8} />
     </g>
   );
 }
 
 function ThreadCone({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.25);
   return (
     <g>
-      <ellipse cx={50} cy={84} rx={22} ry={5} fill={SW_COLORS.ink} opacity={0.15} />
-      <path
-        d={`M 32 80 L 68 80 L 60 22 L 40 22 Z`}
-        fill={color}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.2}
-      />
-      {[30, 40, 50, 60, 70].map((y) => (
-        <line
-          key={y}
-          x1={36 + (y - 22) * 0.07}
-          y1={y}
-          x2={64 - (y - 22) * 0.07}
-          y2={y}
-          stroke={SW_COLORS.paper}
-          strokeWidth={0.5}
-          opacity={0.5}
-        />
-      ))}
-      <ellipse cx={50} cy={22} rx={10} ry={3} fill={SW_COLORS.steel} />
-      <line x1={50} y1={22} x2={50} y2={10} stroke={color} strokeWidth={1} />
-      <circle cx={50} cy={10} r={2} fill={color} />
+      <GroundShadow cx={50} cy={86} rx={26} />
+      {/* Base disc */}
+      <ellipse cx={50} cy={80} rx={20} ry={5} fill={SW_COLORS.steel} />
+      <ellipse cx={50} cy={78} rx={20} ry={3.5} fill={SW_COLORS.steelLite} />
+      {/* Cone body */}
+      <path d={`M 32 80 L 68 80 L 60 22 L 40 22 Z`} fill={color} />
+      <path d={`M 40 22 L 60 22 L 56 50 L 44 50 Z`} fill={lite} />
+      <path d={`M 32 80 L 68 80 L 64 60 L 36 60 Z`} fill={deep} />
+      <path d={`M 32 80 L 68 80 L 60 22 L 40 22 Z`} fill="none" stroke={SW_COLORS.ink} strokeWidth={1.3} />
+      {/* Spindle top */}
+      <ellipse cx={50} cy={22} rx={10} ry={3.5} fill={SW_COLORS.steel} />
+      <ellipse cx={50} cy={21} rx={10} ry={2.2} fill={SW_COLORS.steelLite} />
+      <rect x={49} y={12} width={2} height={10} fill={SW_COLORS.steel} />
+      <circle cx={50} cy={10} r={2.5} fill={color} />
+      <circle cx={50} cy={10} r={1.2} fill={lite} />
     </g>
   );
 }
 
 function TrimCard({ color }: { color: string }) {
+  const deep = shade(color, -0.2);
   return (
     <g>
-      <rect x={20} y={20} width={60} height={60} rx={3} fill={SW_COLORS.paper} stroke={SW_COLORS.ink} strokeWidth={1.2} />
-      <rect x={26} y={26} width={48} height={10} fill={color} />
-      <text x={50} y={32.5} fontSize={6} fontWeight={700} textAnchor="middle" fill={SW_COLORS.paper} dominantBaseline="central">TRIM</text>
-      {[44, 54, 64].map((y) => (
+      <GroundShadow cx={50} cy={84} rx={32} />
+      <rect x={20} y={20} width={60} height={60} rx={3} fill={SW_COLORS.paper} />
+      <rect x={20} y={20} width={60} height={10} rx={3} fill={color} />
+      <rect x={20} y={28} width={60} height={2} fill={deep} />
+      <rect x={20} y={20} width={60} height={60} rx={3} fill="none" stroke={SW_COLORS.ink} strokeWidth={1.3} />
+      <text x={50} y={26} fontSize={6} fontWeight={900} textAnchor="middle" fill="#FFFFFF" dominantBaseline="central">
+        TRIM
+      </text>
+      {[42, 54, 66].map((y) => (
         <g key={y}>
-          <circle cx={32} cy={y} r={2.5} fill={color} stroke={SW_COLORS.ink} strokeWidth={0.5} />
-          <circle cx={50} cy={y} r={2.5} fill={color} stroke={SW_COLORS.ink} strokeWidth={0.5} />
-          <circle cx={68} cy={y} r={2.5} fill={color} stroke={SW_COLORS.ink} strokeWidth={0.5} />
+          <circle cx={32} cy={y} r={3} fill={color} />
+          <circle cx={32} cy={y} r={1.4} fill={deep} />
+          <circle cx={50} cy={y} r={3} fill={color} />
+          <circle cx={50} cy={y} r={1.4} fill={deep} />
+          <circle cx={68} cy={y} r={3} fill={color} />
+          <circle cx={68} cy={y} r={1.4} fill={deep} />
         </g>
       ))}
     </g>
@@ -184,17 +226,24 @@ function TrimCard({ color }: { color: string }) {
 }
 
 function ButtonCard({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.2);
   return (
     <g>
-      <rect x={18} y={20} width={64} height={60} rx={3} fill={SW_COLORS.paper} stroke={SW_COLORS.ink} strokeWidth={1.2} />
+      <GroundShadow cx={50} cy={84} rx={34} />
+      <rect x={18} y={20} width={64} height={60} rx={3} fill={SW_COLORS.paper} />
+      <rect x={18} y={20} width={64} height={6} rx={3} fill={shade(SW_COLORS.paper, -0.08)} />
+      <rect x={18} y={20} width={64} height={60} rx={3} fill="none" stroke={SW_COLORS.ink} strokeWidth={1.3} />
       {Array.from({ length: 4 }).map((_, r) =>
         Array.from({ length: 4 }).map((_, c) => (
           <g key={`${r}-${c}`}>
-            <circle cx={28 + c * 14} cy={32 + r * 12} r={4} fill={color} stroke={SW_COLORS.ink} strokeWidth={0.6} />
-            <circle cx={26.5 + c * 14} cy={30.5 + r * 12} r={0.5} fill={SW_COLORS.ink} />
-            <circle cx={29.5 + c * 14} cy={30.5 + r * 12} r={0.5} fill={SW_COLORS.ink} />
-            <circle cx={26.5 + c * 14} cy={33.5 + r * 12} r={0.5} fill={SW_COLORS.ink} />
-            <circle cx={29.5 + c * 14} cy={33.5 + r * 12} r={0.5} fill={SW_COLORS.ink} />
+            <circle cx={28 + c * 14} cy={32 + r * 12} r={4.4} fill={deep} />
+            <circle cx={28 + c * 14} cy={32 + r * 12} r={3.4} fill={color} />
+            <circle cx={26 + c * 14} cy={30 + r * 12} r={1.2} fill={lite} />
+            <circle cx={26.5 + c * 14} cy={30.5 + r * 12} r={0.6} fill={SW_COLORS.ink} />
+            <circle cx={29.5 + c * 14} cy={30.5 + r * 12} r={0.6} fill={SW_COLORS.ink} />
+            <circle cx={26.5 + c * 14} cy={33.5 + r * 12} r={0.6} fill={SW_COLORS.ink} />
+            <circle cx={29.5 + c * 14} cy={33.5 + r * 12} r={0.6} fill={SW_COLORS.ink} />
           </g>
         )),
       )}
@@ -203,72 +252,87 @@ function ButtonCard({ color }: { color: string }) {
 }
 
 function Zipper({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
   return (
     <g>
-      <rect x={42} y={14} width={16} height={72} rx={2} fill={SW_COLORS.paper} stroke={SW_COLORS.ink} strokeWidth={1} />
+      <GroundShadow cx={50} cy={88} rx={18} />
+      <rect x={42} y={14} width={16} height={72} rx={2} fill={SW_COLORS.paper} />
+      <rect x={42} y={14} width={16} height={6} rx={2} fill={shade(SW_COLORS.paper, -0.1)} />
+      <rect x={42} y={14} width={16} height={72} rx={2} fill="none" stroke={SW_COLORS.ink} strokeWidth={1} />
       {Array.from({ length: 14 }).map((_, i) => (
         <g key={i}>
           <rect x={42} y={16 + i * 5} width={7} height={3} fill={color} />
+          <rect x={42} y={16 + i * 5} width={7} height={1} fill={deep} />
           <rect x={51} y={18.5 + i * 5} width={7} height={3} fill={color} />
+          <rect x={51} y={18.5 + i * 5} width={7} height={1} fill={deep} />
         </g>
       ))}
-      <path d="M 38 50 L 62 50 L 56 60 L 44 60 Z" fill={color} stroke={SW_COLORS.ink} strokeWidth={1} />
-      <line x1={50} y1={60} x2={50} y2={68} stroke={SW_COLORS.ink} strokeWidth={2} />
-      <circle cx={50} cy={70} r={3} fill={color} stroke={SW_COLORS.ink} strokeWidth={1} />
+      <path d="M 38 50 L 62 50 L 56 60 L 44 60 Z" fill={SW_COLORS.steelLite} />
+      <path d="M 38 50 L 62 50 L 60 53 L 40 53 Z" fill="#FFFFFF" />
+      <rect x={49} y={60} width={2} height={8} fill={SW_COLORS.ink} />
+      <circle cx={50} cy={71} r={4} fill={SW_COLORS.steel} />
+      <circle cx={50} cy={70} r={2} fill={SW_COLORS.steelLite} />
     </g>
   );
 }
 
 // ── Work in progress ────────────────────────────────────────────────────
 function Bundle({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.2);
   return (
     <g>
-      <ellipse cx={50} cy={86} rx={32} ry={4} fill={SW_COLORS.ink} opacity={0.18} />
-      {/* Stack */}
-      {[60, 50, 40].map((y, i) => (
-        <rect
-          key={y}
-          x={20 + i * 1}
-          y={y}
-          width={60 - i * 2}
-          height={14}
-          rx={2}
-          fill={color}
-          stroke={SW_COLORS.ink}
-          strokeWidth={1}
-          opacity={0.85 + i * 0.05}
-        />
-      ))}
-      {/* String tying the bundle */}
-      <line x1={35} y1={36} x2={35} y2={78} stroke={SW_COLORS.ink} strokeWidth={1.2} />
-      <line x1={65} y1={36} x2={65} y2={78} stroke={SW_COLORS.ink} strokeWidth={1.2} />
+      <GroundShadow cx={50} cy={86} rx={34} />
+      {/* Solid stacked layers — bottom darker, top lighter */}
+      <rect x={20} y={62} width={60} height={16} rx={2} fill={deep} />
+      <rect x={21} y={50} width={58} height={14} rx={2} fill={color} />
+      <rect x={22} y={38} width={56} height={14} rx={2} fill={lite} />
+      <rect x={22} y={38} width={56} height={4} rx={2} fill={shade(color, 0.35)} />
+      {/* Twine */}
+      <rect x={34} y={36} width={2} height={44} fill={SW_COLORS.ink} />
+      <rect x={64} y={36} width={2} height={44} fill={SW_COLORS.ink} />
       {/* Ticket */}
-      <rect x={36} y={28} width={28} height={12} rx={1.5} fill={SW_COLORS.thread} stroke={SW_COLORS.ink} strokeWidth={0.8} />
-      <line x1={40} y1={32} x2={60} y2={32} stroke={SW_COLORS.ink} strokeWidth={0.5} />
-      <line x1={40} y1={36} x2={56} y2={36} stroke={SW_COLORS.ink} strokeWidth={0.5} />
+      <rect x={36} y={26} width={28} height={14} rx={1.5} fill={SW_COLORS.thread} />
+      <rect x={36} y={26} width={28} height={3.5} fill={shade(SW_COLORS.thread, -0.2)} />
+      <rect x={36} y={26} width={28} height={14} rx={1.5} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.9} />
+      <rect x={40} y={32} width={20} height={1} fill={SW_COLORS.ink} />
+      <rect x={40} y={35} width={16} height={1} fill={SW_COLORS.ink} />
+      <rect x={40} y={38} width={12} height={1} fill={SW_COLORS.ink} />
     </g>
   );
 }
 
 function CutPiece({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.18);
   return (
     <g>
-      {/* A back panel of a t-shirt, pre-sewn */}
+      <GroundShadow cx={50} cy={84} rx={32} />
+      {/* Body panel */}
       <path
         d={`M 20 28 L 30 22 L 40 26 L 60 26 L 70 22 L 80 28 L 76 38 L 68 36 L 68 80 L 32 80 L 32 36 L 24 38 Z`}
         fill={color}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.2}
       />
-      {/* Cut markers */}
       <path
-        d="M 20 28 L 30 22 L 40 26 L 60 26 L 70 22 L 80 28 L 76 38 L 68 36 L 68 80 L 32 80 L 32 36 L 24 38 Z"
-        fill="none"
-        stroke={SW_COLORS.alarm}
-        strokeWidth={0.6}
-        strokeDasharray="3 2"
-        opacity={0.7}
+        d={`M 20 28 L 30 22 L 40 26 L 60 26 L 70 22 L 80 28 L 76 38 L 68 36 L 68 40 L 32 40 L 32 36 L 24 38 Z`}
+        fill={lite}
       />
+      <path d={`M 32 70 L 68 70 L 68 80 L 32 80 Z`} fill={deep} />
+      <path
+        d={`M 20 28 L 30 22 L 40 26 L 60 26 L 70 22 L 80 28 L 76 38 L 68 36 L 68 80 L 32 80 L 32 36 L 24 38 Z`}
+        fill="none"
+        stroke={SW_COLORS.ink}
+        strokeWidth={1.4}
+      />
+      {/* Solid notch markers */}
+      {[
+        [30, 22],
+        [70, 22],
+        [40, 26],
+        [60, 26],
+      ].map(([x, y], i) => (
+        <circle key={i} cx={x} cy={y} r={1.6} fill={SW_COLORS.alarm} />
+      ))}
     </g>
   );
 }
@@ -276,35 +340,55 @@ function CutPiece({ color }: { color: string }) {
 function WipGarment({ color }: { color: string }) {
   return (
     <g>
-      {/* T-shirt-ish body, half stitched */}
       <Tshirt color={color} />
-      {/* Seam lines */}
-      <line x1={32} y1={40} x2={32} y2={80} stroke={SW_COLORS.alarm} strokeWidth={0.8} strokeDasharray="2 2" />
-      <line x1={68} y1={40} x2={68} y2={80} stroke={SW_COLORS.alarm} strokeWidth={0.8} strokeDasharray="2 2" />
-      {/* In-progress badge */}
-      <circle cx={20} cy={20} r={8} fill={SW_COLORS.warn} stroke={SW_COLORS.ink} strokeWidth={1} />
-      <text x={20} y={20} fontSize={8} fontWeight={800} textAnchor="middle" dominantBaseline="central" fill={SW_COLORS.ink}>WIP</text>
+      {/* Solid seam lines */}
+      <rect x={31} y={42} width={2} height={38} fill={SW_COLORS.alarm} />
+      <rect x={67} y={42} width={2} height={38} fill={SW_COLORS.alarm} />
+      {/* Solid WIP badge */}
+      <circle cx={20} cy={20} r={9} fill={SW_COLORS.ink} />
+      <circle cx={20} cy={20} r={7.5} fill={SW_COLORS.warn} />
+      <text
+        x={20}
+        y={20}
+        fontSize={7}
+        fontWeight={900}
+        textAnchor="middle"
+        dominantBaseline="central"
+        fill={SW_COLORS.ink}
+      >
+        WIP
+      </text>
     </g>
   );
 }
 
 function HangerGarment({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
   return (
     <g>
-      {/* Hanger */}
+      <GroundShadow cx={50} cy={92} rx={32} />
+      {/* Hanger — solid */}
       <path
-        d={`M 50 14 q -4 -4 -8 0 q 0 4 4 6 L 50 22`}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.4}
-        fill="none"
+        d={`M 50 14 q -4 -4 -8 0 q 0 4 4 6 L 50 22 L 50 14 Z`}
+        fill={SW_COLORS.steelLite}
       />
-      <path d={`M 18 32 L 50 22 L 82 32 Z`} fill="none" stroke={SW_COLORS.ink} strokeWidth={1.4} strokeLinejoin="round" />
-      {/* Garment */}
+      <polygon points="18,32 50,22 82,32 50,28" fill={SW_COLORS.steel} />
+      <polygon points="18,32 50,22 50,28" fill={SW_COLORS.steelLite} />
+      {/* Garment body */}
       <path
         d={`M 22 32 L 30 28 L 40 34 L 60 34 L 70 28 L 78 32 L 74 44 L 66 42 L 66 88 L 34 88 L 34 42 L 26 44 Z`}
         fill={color}
+      />
+      <path
+        d={`M 22 32 L 30 28 L 40 34 L 60 34 L 70 28 L 78 32 L 74 38 L 66 38 L 66 42 L 34 42 L 34 38 L 26 38 Z`}
+        fill={shade(color, 0.18)}
+      />
+      <rect x={34} y={80} width={32} height={8} fill={deep} />
+      <path
+        d={`M 22 32 L 30 28 L 40 34 L 60 34 L 70 28 L 78 32 L 74 44 L 66 42 L 66 88 L 34 88 L 34 42 L 26 44 Z`}
+        fill="none"
         stroke={SW_COLORS.ink}
-        strokeWidth={1.2}
+        strokeWidth={1.4}
       />
     </g>
   );
@@ -312,19 +396,36 @@ function HangerGarment({ color }: { color: string }) {
 
 // ── Garment templates ───────────────────────────────────────────────────
 function Tshirt({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.18);
   return (
     <g>
+      <GroundShadow cx={50} cy={90} rx={34} />
       <path
         d={`M 18 32 L 30 22 L 40 28 Q 50 32 60 28 L 70 22 L 82 32 L 76 44 L 68 42 L 68 86 L 32 86 L 32 42 L 24 44 Z`}
         fill={color}
+        strokeLinejoin="round"
+      />
+      {/* Solid shoulder highlight */}
+      <path
+        d={`M 18 32 L 30 22 L 40 28 L 30 32 L 24 36 Z`}
+        fill={lite}
+      />
+      <path
+        d={`M 82 32 L 70 22 L 60 28 L 70 32 L 76 36 Z`}
+        fill={lite}
+      />
+      {/* Solid hem */}
+      <rect x={32} y={80} width={36} height={6} fill={deep} />
+      <path
+        d={`M 18 32 L 30 22 L 40 28 Q 50 32 60 28 L 70 22 L 82 32 L 76 44 L 68 42 L 68 86 L 32 86 L 32 42 L 24 44 Z`}
+        fill="none"
         stroke={SW_COLORS.ink}
         strokeWidth={1.5}
         strokeLinejoin="round"
       />
-      {/* Neck rib */}
-      <path d={`M 40 28 Q 50 33 60 28`} fill="none" stroke={SW_COLORS.ink} strokeWidth={1} />
-      {/* Body hem */}
-      <line x1={32} y1={82} x2={68} y2={82} stroke={SW_COLORS.ink} strokeWidth={0.6} opacity={0.5} />
+      {/* Solid neck rib */}
+      <path d={`M 38 26 Q 50 34 62 26 L 60 28 Q 50 32 40 28 Z`} fill={deep} />
     </g>
   );
 }
@@ -333,178 +434,219 @@ function Polo({ color }: { color: string }) {
   return (
     <g>
       <Tshirt color={color} />
-      {/* Collar */}
-      <path
-        d={`M 40 28 L 44 26 L 50 32 L 56 26 L 60 28 L 56 36 L 50 38 L 44 36 Z`}
-        fill={SW_COLORS.paper}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1}
-      />
+      {/* Solid collar */}
+      <polygon points="40,28 44,26 50,32 56,26 60,28 56,36 50,38 44,36" fill={SW_COLORS.paper} />
+      <polygon points="40,28 44,26 50,32 56,26 60,28 56,30 50,33 44,30" fill={shade(SW_COLORS.paper, -0.1)} />
+      <polygon points="40,28 44,26 50,32 56,26 60,28 56,36 50,38 44,36" fill="none" stroke={SW_COLORS.ink} strokeWidth={1} />
       {/* Placket */}
-      <line x1={50} y1={32} x2={50} y2={48} stroke={SW_COLORS.ink} strokeWidth={1} />
-      <circle cx={50} cy={38} r={1} fill={SW_COLORS.ink} />
-      <circle cx={50} cy={44} r={1} fill={SW_COLORS.ink} />
+      <rect x={48.5} y={32} width={3} height={16} fill={shade(color, -0.3)} />
+      <circle cx={50} cy={38} r={1.2} fill={SW_COLORS.ink} />
+      <circle cx={50} cy={44} r={1.2} fill={SW_COLORS.ink} />
     </g>
   );
 }
 
 function FormalShirt({ color }: { color: string }) {
+  const deep = shade(color, -0.2);
+  const lite = shade(color, 0.15);
   return (
     <g>
+      <GroundShadow cx={50} cy={92} rx={38} />
       {/* Body — long sleeves */}
       <path
         d={`M 14 36 L 26 22 L 36 28 Q 50 32 64 28 L 74 22 L 86 36 L 80 78 L 70 76 L 70 88 L 30 88 L 30 76 L 20 78 Z`}
         fill={color}
+        strokeLinejoin="round"
+      />
+      <path
+        d={`M 14 36 L 26 22 L 36 28 L 26 30 L 20 34 Z`}
+        fill={lite}
+      />
+      <path
+        d={`M 86 36 L 74 22 L 64 28 L 74 30 L 80 34 Z`}
+        fill={lite}
+      />
+      <rect x={30} y={80} width={40} height={8} fill={deep} />
+      <path
+        d={`M 14 36 L 26 22 L 36 28 Q 50 32 64 28 L 74 22 L 86 36 L 80 78 L 70 76 L 70 88 L 30 88 L 30 76 L 20 78 Z`}
+        fill="none"
         stroke={SW_COLORS.ink}
         strokeWidth={1.5}
         strokeLinejoin="round"
       />
-      {/* Collar */}
-      <path
-        d={`M 36 28 L 42 24 L 50 34 L 58 24 L 64 28 L 58 38 L 50 40 L 42 38 Z`}
-        fill={SW_COLORS.paper}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1}
-      />
-      <line x1={50} y1={34} x2={50} y2={84} stroke={SW_COLORS.ink} strokeWidth={1} />
-      {/* Buttons */}
+      {/* Solid collar */}
+      <polygon points="36,28 42,24 50,34 58,24 64,28 58,38 50,40 42,38" fill={SW_COLORS.paper} />
+      <polygon points="36,28 42,24 50,34 58,24 64,28 58,32 50,35 42,32" fill={shade(SW_COLORS.paper, -0.08)} />
+      <polygon points="36,28 42,24 50,34 58,24 64,28 58,38 50,40 42,38" fill="none" stroke={SW_COLORS.ink} strokeWidth={1} />
+      {/* Button placket */}
+      <rect x={48.5} y={34} width={3} height={50} fill={shade(color, -0.25)} />
       {[42, 50, 58, 66, 74].map((y) => (
-        <circle key={y} cx={50} cy={y} r={1.2} fill={SW_COLORS.ink} />
+        <g key={y}>
+          <circle cx={50} cy={y} r={1.4} fill={SW_COLORS.paper} />
+          <circle cx={50} cy={y} r={1} fill={SW_COLORS.ink} />
+        </g>
       ))}
-      {/* Pocket */}
-      <rect x={34} y={48} width={12} height={14} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.8} />
+      {/* Solid chest pocket */}
+      <rect x={34} y={48} width={12} height={14} fill={lite} />
+      <rect x={34} y={48} width={12} height={3} fill={shade(color, -0.1)} />
+      <rect x={34} y={48} width={12} height={14} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.9} />
     </g>
   );
 }
 
 function Trouser({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.18);
   return (
     <g>
-      {/* Waistband */}
-      <rect x={22} y={14} width={56} height={8} fill={SW_COLORS.steelLite} stroke={SW_COLORS.ink} strokeWidth={1} />
-      {/* Body */}
+      <GroundShadow cx={50} cy={92} rx={32} />
+      {/* Solid waistband */}
+      <rect x={22} y={14} width={56} height={8} fill={SW_COLORS.steel} />
+      <rect x={22} y={14} width={56} height={2.5} fill={SW_COLORS.steelLite} />
+      <rect x={22} y={14} width={56} height={8} fill="none" stroke={SW_COLORS.ink} strokeWidth={1} />
+      {/* Solid legs */}
       <path
         d={`M 22 22 L 78 22 L 74 88 L 56 88 L 50 36 L 44 88 L 26 88 Z`}
         fill={color}
+        strokeLinejoin="round"
+      />
+      <path
+        d={`M 22 22 L 78 22 L 74 30 L 26 30 Z`}
+        fill={lite}
+      />
+      <rect x={26} y={82} width={18} height={6} fill={deep} />
+      <rect x={56} y={82} width={18} height={6} fill={deep} />
+      <path
+        d={`M 22 22 L 78 22 L 74 88 L 56 88 L 50 36 L 44 88 L 26 88 Z`}
+        fill="none"
         stroke={SW_COLORS.ink}
         strokeWidth={1.5}
         strokeLinejoin="round"
       />
-      {/* Fly */}
-      <line x1={50} y1={22} x2={50} y2={36} stroke={SW_COLORS.ink} strokeWidth={1} strokeDasharray="2 2" />
-      {/* Pockets */}
-      <path d={`M 28 22 q 4 8 12 8`} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.8} />
-      <path d={`M 72 22 q -4 8 -12 8`} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.8} />
+      {/* Solid fly */}
+      <rect x={48.5} y={22} width={3} height={14} fill={shade(color, -0.35)} />
+      {/* Solid pockets */}
+      <path d={`M 28 22 q 4 8 12 8 L 38 26 L 30 22 Z`} fill={lite} />
+      <path d={`M 72 22 q -4 8 -12 8 L 62 26 L 70 22 Z`} fill={lite} />
       {/* Belt loops */}
       {[30, 42, 58, 70].map((x) => (
-        <rect key={x} x={x - 1.5} y={12} width={3} height={4} fill={color} stroke={SW_COLORS.ink} strokeWidth={0.6} />
+        <rect key={x} x={x - 1.6} y={12} width={3.2} height={5} fill={deep} />
       ))}
     </g>
   );
 }
 
 function Sweatshirt({ color }: { color: string }) {
+  const deep = shade(color, -0.25);
+  const lite = shade(color, 0.2);
   return (
     <g>
+      <GroundShadow cx={50} cy={90} rx={36} />
       {/* Hood */}
       <path
         d={`M 38 26 Q 50 12 62 26 L 62 32 L 38 32 Z`}
         fill={color}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.3}
       />
-      <path d={`M 42 24 Q 50 18 58 24`} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.8} opacity={0.5} />
+      <path d={`M 40 22 Q 50 14 60 22 L 60 26 L 40 26 Z`} fill={lite} />
       {/* Body */}
       <path
         d={`M 18 36 L 30 26 L 40 30 L 60 30 L 70 26 L 82 36 L 78 50 L 70 48 L 70 86 L 30 86 L 30 48 L 22 50 Z`}
         fill={color}
+      />
+      <path
+        d={`M 18 36 L 30 26 L 40 30 L 30 34 L 22 38 Z`}
+        fill={lite}
+      />
+      <path
+        d={`M 82 36 L 70 26 L 60 30 L 70 34 L 78 38 Z`}
+        fill={lite}
+      />
+      <rect x={30} y={80} width={40} height={6} fill={deep} />
+      <path
+        d={`M 18 36 L 30 26 L 40 30 L 60 30 L 70 26 L 82 36 L 78 50 L 70 48 L 70 86 L 30 86 L 30 48 L 22 50 Z`}
+        fill="none"
         stroke={SW_COLORS.ink}
         strokeWidth={1.5}
         strokeLinejoin="round"
       />
-      {/* Kangaroo pocket */}
+      {/* Solid kangaroo pocket */}
       <path
         d={`M 32 60 L 68 60 L 64 76 L 36 76 Z`}
-        fill="none"
-        stroke={SW_COLORS.ink}
-        strokeWidth={0.8}
+        fill={deep}
       />
       {/* Drawstrings */}
-      <line x1={46} y1={28} x2={46} y2={40} stroke={SW_COLORS.paper} strokeWidth={1} />
-      <line x1={54} y1={28} x2={54} y2={40} stroke={SW_COLORS.paper} strokeWidth={1} />
-      {/* Cuffs */}
-      <rect x={18} y={42} width={6} height={6} fill={SW_COLORS.steelLite} opacity={0.5} />
-      <rect x={76} y={42} width={6} height={6} fill={SW_COLORS.steelLite} opacity={0.5} />
-      <rect x={30} y={82} width={40} height={4} fill={SW_COLORS.steelLite} opacity={0.5} />
+      <rect x={45} y={28} width={1.8} height={14} fill={SW_COLORS.paper} />
+      <rect x={53} y={28} width={1.8} height={14} fill={SW_COLORS.paper} />
+      {/* Cuffs + hem ribbing */}
+      <rect x={18} y={42} width={6} height={8} fill={SW_COLORS.steel} />
+      <rect x={76} y={42} width={6} height={8} fill={SW_COLORS.steel} />
+      <rect x={30} y={82} width={40} height={6} fill={SW_COLORS.steel} />
     </g>
   );
 }
 
 // ── Packed ──────────────────────────────────────────────────────────────
 function Polybag({ color }: { color: string }) {
+  const deep = shade(color, -0.2);
   return (
     <g>
-      {/* Bag outline */}
-      <path
-        d={`M 20 24 L 80 24 L 80 86 L 20 86 Z`}
-        fill={SW_COLORS.paper}
-        opacity={0.85}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.2}
-      />
-      {/* Hang hole */}
-      <ellipse cx={50} cy={20} rx={6} ry={2} fill="none" stroke={SW_COLORS.ink} strokeWidth={1} />
-      {/* Folded garment inside */}
-      <rect x={28} y={36} width={44} height={12} rx={1} fill={color} />
-      <rect x={28} y={50} width={44} height={12} rx={1} fill={color} opacity={0.85} />
-      <rect x={28} y={64} width={44} height={12} rx={1} fill={color} opacity={0.7} />
+      <GroundShadow cx={50} cy={90} rx={36} />
+      {/* Bag — solid translucent-looking layered fills */}
+      <rect x={20} y={24} width={60} height={62} rx={2} fill={SW_COLORS.paperEdge} />
+      <rect x={20} y={24} width={60} height={12} rx={2} fill="#FFFFFF" />
+      <rect x={20} y={80} width={60} height={6} rx={2} fill={shade(SW_COLORS.paperEdge, -0.15)} />
+      <rect x={20} y={24} width={60} height={62} rx={2} fill="none" stroke={SW_COLORS.ink} strokeWidth={1.4} />
+      {/* Hang hole — solid disc */}
+      <ellipse cx={50} cy={20} rx={6} ry={2.4} fill={SW_COLORS.ink} />
+      <ellipse cx={50} cy={20} rx={4.5} ry={1.4} fill={SW_COLORS.paperEdge} />
+      {/* Folded garment inside — solid layered rectangles */}
+      <rect x={28} y={36} width={44} height={12} rx={1.5} fill={color} />
+      <rect x={28} y={36} width={44} height={3} rx={1.5} fill={shade(color, 0.2)} />
+      <rect x={28} y={50} width={44} height={12} rx={1.5} fill={shade(color, -0.1)} />
+      <rect x={28} y={50} width={44} height={3} rx={1.5} fill={color} />
+      <rect x={28} y={64} width={44} height={12} rx={1.5} fill={deep} />
+      <rect x={28} y={64} width={44} height={3} rx={1.5} fill={shade(color, -0.15)} />
       {/* Sticker */}
-      <rect x={56} y={68} width={18} height={12} rx={1.5} fill={SW_COLORS.paper} stroke={SW_COLORS.ink} strokeWidth={0.6} />
-      <line x1={58} y1={72} x2={72} y2={72} stroke={SW_COLORS.ink} strokeWidth={0.5} />
-      <line x1={58} y1={76} x2={68} y2={76} stroke={SW_COLORS.ink} strokeWidth={0.5} />
-      {/* Plastic shine */}
-      <line x1={26} y1={28} x2={32} y2={84} stroke={SW_COLORS.paper} strokeWidth={1.5} opacity={0.8} />
+      <rect x={56} y={68} width={18} height={12} rx={1.5} fill={SW_COLORS.paper} />
+      <rect x={56} y={68} width={18} height={3} rx={1.5} fill={shade(SW_COLORS.paper, -0.1)} />
+      <rect x={56} y={68} width={18} height={12} rx={1.5} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.8} />
+      <rect x={59} y={73} width={14} height={1} fill={SW_COLORS.ink} />
+      <rect x={59} y={75.5} width={10} height={1} fill={SW_COLORS.ink} />
+      {/* Solid plastic shine */}
+      <rect x={26} y={28} width={2.5} height={56} fill="#FFFFFF" />
+      <rect x={32} y={28} width={1.2} height={56} fill={shade(SW_COLORS.paper, -0.1)} />
     </g>
   );
 }
 
 function Carton() {
   const cardboard = '#C49A6C';
+  const cardLight = '#D8B488';
   const cardShade = '#A37D52';
   return (
     <g>
+      <GroundShadow cx={50} cy={92} rx={38} />
       {/* Top face */}
-      <path
-        d={`M 14 30 L 50 16 L 86 30 L 50 44 Z`}
-        fill={cardboard}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.2}
-        strokeLinejoin="round"
-      />
+      <polygon points="14,30 50,16 86,30 50,44" fill={cardLight} />
+      <polygon points="14,30 50,16 50,30" fill="#E8C9A2" />
       {/* Right face */}
-      <path
-        d={`M 86 30 L 86 76 L 50 90 L 50 44 Z`}
-        fill={cardShade}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.2}
-        strokeLinejoin="round"
-      />
+      <polygon points="86,30 86,76 50,90 50,44" fill={cardShade} />
       {/* Left face */}
-      <path
-        d={`M 14 30 L 14 76 L 50 90 L 50 44 Z`}
-        fill={cardboard}
-        stroke={SW_COLORS.ink}
-        strokeWidth={1.2}
-        strokeLinejoin="round"
-        opacity={0.92}
-      />
-      {/* Tape on top */}
-      <path d={`M 50 16 L 50 44`} stroke={SW_COLORS.thread} strokeWidth={3} opacity={0.8} />
+      <polygon points="14,30 14,76 50,90 50,44" fill={cardboard} />
+      {/* Edges */}
+      <polygon points="14,30 50,16 86,30 50,44" fill="none" stroke={SW_COLORS.ink} strokeWidth={1.4} strokeLinejoin="round" />
+      <polygon points="86,30 86,76 50,90 50,44" fill="none" stroke={SW_COLORS.ink} strokeWidth={1.4} strokeLinejoin="round" />
+      <polygon points="14,30 14,76 50,90 50,44" fill="none" stroke={SW_COLORS.ink} strokeWidth={1.4} strokeLinejoin="round" />
+      {/* Solid tape stripe */}
+      <polygon points="48,17 52,17 52,44 48,44" fill={SW_COLORS.thread} />
+      <polygon points="48,17 52,17 50,21" fill={shade(SW_COLORS.thread, -0.2)} />
       {/* Label */}
-      <rect x={56} y={56} width={22} height={14} fill={SW_COLORS.paper} stroke={SW_COLORS.ink} strokeWidth={0.8} />
-      <line x1={59} y1={60} x2={75} y2={60} stroke={SW_COLORS.ink} strokeWidth={0.5} />
-      <line x1={59} y1={64} x2={73} y2={64} stroke={SW_COLORS.ink} strokeWidth={0.5} />
-      <line x1={59} y1={68} x2={70} y2={68} stroke={SW_COLORS.ink} strokeWidth={0.5} />
+      <rect x={56} y={56} width={22} height={14} fill={SW_COLORS.paper} />
+      <rect x={56} y={56} width={22} height={3.5} fill={shade(SW_COLORS.paper, -0.1)} />
+      <rect x={56} y={56} width={22} height={14} fill="none" stroke={SW_COLORS.ink} strokeWidth={0.8} />
+      <rect x={59} y={61} width={16} height={1} fill={SW_COLORS.ink} />
+      <rect x={59} y={64} width={14} height={1} fill={SW_COLORS.ink} />
+      <rect x={59} y={67} width={11} height={1} fill={SW_COLORS.ink} />
     </g>
   );
 }
