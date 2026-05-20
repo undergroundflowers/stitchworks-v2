@@ -26,6 +26,12 @@ import {
   type BalancerOptions,
   type BalancerResult,
 } from './balancers';
+import {
+  lineBalanceRatio,
+  lineBalanceEfficiency,
+  optimumManning,
+  balanceLoss,
+} from './kpi';
 
 type BalancerFn = (opts: BalancerOptions) => BalancerResult;
 const HEURISTICS: { id: string; fn: BalancerFn }[] = [
@@ -172,6 +178,75 @@ for (const heuristic of ['LCR', 'RPW', 'KW']) {
   }
 }
 void opIdx;
+
+// ── Sempai 3-metric line-balance worked example ───────────────────────────
+// Hand-calculable five-station example. Stations carry SMV (min) loads of
+// 1.0, 0.9, 0.7, 0.6, 0.4 — total work content 3.6 min across 5 operators.
+//
+// At takt = 1.0 min (the slowest station), LBE collapses to LBR — the
+// no-demand reference case.
+// At takt = 0.8 min (tighter demand than the bottleneck can hold), LBE
+// must read >100 — infeasible. Optimum manning = ⌈3.6/0.8⌉ = 5, equal to
+// the current crew, but the slowest station blocks takt at 0.8 min.
+// At takt = 1.2 min (loose demand), LBE drops below LBR — we have spare
+// capacity vs takt. Optimum manning = ⌈3.6/1.2⌉ = 3.
+console.log('\n=== Sempai 3-metric worked example (5 stations, ΣSAM 3.6 min) ===');
+const sempaiStations = [1.0, 0.9, 0.7, 0.6, 0.4];
+const sempaiTotalSam = sempaiStations.reduce((s, v) => s + v, 0);
+const sempaiCases: { takt: number; expectLBR: number; expectLBE: number; expectMan: number }[] = [
+  // takt = 1.0  → LBE == LBR == 3.6 / (5 × 1.0) × 100 = 72 %. Manning = ⌈3.6⌉ = 4.
+  { takt: 1.0, expectLBR: 72, expectLBE: 72, expectMan: 4 },
+  // takt = 0.8  → LBE = 3.6 / (5 × 0.8) × 100 = 90 %. Manning = ⌈3.6/0.8⌉ = 5.
+  { takt: 0.8, expectLBR: 72, expectLBE: 90, expectMan: 5 },
+  // takt = 1.2  → LBE = 3.6 / (5 × 1.2) × 100 = 60 %. Manning = ⌈3.6/1.2⌉ = 3.
+  { takt: 1.2, expectLBR: 72, expectLBE: 60, expectMan: 3 },
+];
+for (const c of sempaiCases) {
+  const lbr = lineBalanceRatio(sempaiStations);
+  const lbe = lineBalanceEfficiency({ stationSmvs: sempaiStations, taktMin: c.takt });
+  const man = optimumManning({ totalSam: sempaiTotalSam, taktMin: c.takt });
+  const ok =
+    Math.abs(lbr - c.expectLBR) < 0.01 &&
+    Math.abs(lbe - c.expectLBE) < 0.01 &&
+    man === c.expectMan;
+  console.log(
+    `takt=${c.takt.toFixed(1)} → LBR=${lbr.toFixed(2)}% (exp ${c.expectLBR})  LBE=${lbe.toFixed(2)}% (exp ${c.expectLBE})  manning=${man} (exp ${c.expectMan})  ${ok ? 'OK' : 'MISMATCH'}`,
+  );
+  if (Math.abs(lbr - c.expectLBR) > 0.01) {
+    fail(`Sempai LBR at takt=${c.takt}: got ${lbr.toFixed(4)}, expected ${c.expectLBR}`);
+  }
+  if (Math.abs(lbe - c.expectLBE) > 0.01) {
+    fail(`Sempai LBE at takt=${c.takt}: got ${lbe.toFixed(4)}, expected ${c.expectLBE}`);
+  }
+  if (man !== c.expectMan) {
+    fail(`Sempai manning at takt=${c.takt}: got ${man}, expected ${c.expectMan}`);
+  }
+}
+
+// LBR + BalanceLoss = 100 % invariant. The two are algebraic complements;
+// if this ever drifts, one of the two formulas has been touched.
+const lbr = lineBalanceRatio(sempaiStations);
+const bl = balanceLoss(sempaiStations);
+if (Math.abs(lbr + bl - 100) > 0.01) {
+  fail(`LBR + BalanceLoss must = 100; got ${lbr.toFixed(2)} + ${bl.toFixed(2)} = ${(lbr + bl).toFixed(2)}`);
+}
+console.log(`LBR + BalanceLoss = ${(lbr + bl).toFixed(2)}% (must = 100)`);
+
+// Edge guards — zero takt and empty station list must not blow up or
+// return NaN. The UI hits both when an order is uncommitted or the
+// Yamazumi is empty.
+if (lineBalanceEfficiency({ stationSmvs: [], taktMin: 1 }) !== 0) {
+  fail('LBE on empty stations must return 0');
+}
+if (lineBalanceEfficiency({ stationSmvs: sempaiStations, taktMin: 0 }) !== 0) {
+  fail('LBE at takt=0 must return 0 (no demand signal)');
+}
+if (optimumManning({ totalSam: sempaiTotalSam, taktMin: 0 }) !== 0) {
+  fail('Optimum manning at takt=0 must return 0');
+}
+if (optimumManning({ totalSam: 0, taktMin: 1 }) !== 0) {
+  fail('Optimum manning at totalSam=0 must return 0');
+}
 
 if (hadFailure) {
   console.error('\nSelfcheck FAILED');

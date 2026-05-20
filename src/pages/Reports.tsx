@@ -6,8 +6,13 @@ import { ScenariosPanel } from './Scenarios';
 import {
   smoothnessIndex,
   balanceLoss,
+  lineBalanceRatio,
+  lineBalanceEfficiency,
+  optimumManning,
   lineEfficiency,
   bottleneckSmv,
+  suggestBalanceActions,
+  type BalanceSuggestion,
 } from '../domain';
 import {
   efficiencyFromSkillMatrix,
@@ -180,6 +185,67 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     sam: yamTemplate.totalSmv,
     operators: yamOperators,
     workMinutes: 60 * 8,
+  });
+
+  // ── Sempai 3-metric line-balance suite ──────────────────────────────────
+  // Three metrics that the lean-manufacturing literature (e.g. Sempai's
+  // line-balance calculator) treats as a single triad:
+  //   1. Line Balance Ratio   — fairness across stations (sum / N × max).
+  //   2. Line Balance Efficiency — capacity used vs takt (sum / N × takt).
+  //   3. Optimum Manning      — theoretical headcount at takt (ΣSAM / takt).
+  // LBR and Balance Loss are complements (LBR + BL ≈ 100). LBE only differs
+  // from LBR when takt ≠ bottleneck, i.e. when demand actually drives the
+  // pace rather than the slowest station. Optimum manning is the headcount
+  // floor a perfect rebalance would land at; the gap to `yamOperators` is
+  // the labour cost of the current imbalance.
+  //
+  // Takt source: the user's most recent committed order gives a concrete
+  // demandPerShift = qty / deadlineDays, so takt = SHIFT_MIN / demand. When
+  // no order is committed yet, fall back to the bottleneck SMV — that's
+  // the cycle the line will naturally hold, and using it makes LBE collapse
+  // to LBR (which is the honest answer in the absence of a demand signal).
+  const latestOrder = project.orders[0];
+  const orderDemandPerShift =
+    latestOrder && latestOrder.deadlineDays > 0
+      ? latestOrder.qty / latestOrder.deadlineDays
+      : 0;
+  const taktFromOrder =
+    orderDemandPerShift > 0 ? SHIFT_MIN / orderDemandPerShift : 0;
+  const yamTaktReal = taktFromOrder > 0 ? taktFromOrder : yamBottleneck;
+  const taktSource: 'order' | 'bottleneck' =
+    taktFromOrder > 0 ? 'order' : 'bottleneck';
+  const yamLBR = lineBalanceRatio(stationSmvs);
+  const yamLBE = lineBalanceEfficiency({
+    stationSmvs,
+    taktMin: yamTaktReal,
+  });
+  const yamOptManning = optimumManning({
+    totalSam: yamTemplate.totalSmv,
+    taktMin: yamTaktReal,
+  });
+
+  // Balance-advisor suggestions — computed from the same numbers the metric
+  // tier shows, so the WHAT TO FIX list and the tiles can never disagree.
+  // The advisor is pure; deriving via useMemo is overkill at this dataset
+  // size (≤30 stations) and would just pin a stale array on garment swap.
+  const balanceSuggestions: BalanceSuggestion[] = suggestBalanceActions({
+    stations: yamAssignments.map((a) => ({
+      id: a.id,
+      operations: a.operations,
+      effectiveLoadMin: a.operations.reduce((s, o) => s + o.smv, 0),
+    })),
+    totalSam: yamTemplate.totalSmv,
+    operators: yamOperators,
+    taktMin: yamTaktReal,
+    taktSource,
+    bottleneckSmv: yamBottleneck,
+    lbr: yamLBR,
+    lbe: yamLBE,
+    optimumManning: yamOptManning,
+    balanceLoss: yamBalance,
+    smoothness: yamSmoothness,
+    hasManualOverride: !!storedOverride,
+    bulletinName: yamTemplate.name,
   });
 
   // ── Real run-driven KPIs from the sim engine ────────────────────────────
@@ -1059,6 +1125,143 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             <Stat label="BALANCE LOSS" value={yamBalance.toFixed(1)} unit="%" color={yamBalance > 25 ? SW_COLORS.alarm : SW_COLORS.thread}/>
             <Stat label="LINE EFF" value={yamEfficiency.toFixed(1)} unit="%" color={yamEfficiency >= 80 ? SW_COLORS.ok : SW_COLORS.thread}/>
           </div>
+          {/* Sempai's 3 line-balance metrics, surfaced as their own tier so
+              the user can read them as a related triad rather than mixed in
+              with the engine-scope KPIs above. LBR = fairness across the
+              line as built; LBE = capacity used vs takt; Opt manning =
+              theoretical minimum headcount at takt. */}
+          <div style={{ marginTop: 10, padding: '6px 10px 4px', border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, background: '#fafaf6' }}>
+            <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, marginBottom: 6, justifyContent: 'space-between' }}>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, letterSpacing: '0.08em', color: SW_COLORS.muted }}>
+                3-METRIC LINE BALANCE  ·  FAIRNESS · TAKT-EFFICIENCY · MANNING
+              </div>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
+                Takt {yamTaktReal.toFixed(3)} min · source: {taktSource === 'order'
+                  ? `Order ${latestOrder?.po ?? '—'} (${latestOrder?.qty ?? 0} pcs / ${latestOrder?.deadlineDays ?? 0} d)`
+                  : 'bottleneck SMV (no committed order — commit one for demand-driven takt)'}
+              </div>
+            </div>
+            <div style={{ display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 8 }}>
+              <div>
+                <Stat
+                  label="LINE BALANCE RATIO"
+                  value={yamLBR.toFixed(1)}
+                  unit="%"
+                  color={yamLBR >= 85 ? SW_COLORS.ok : yamLBR >= 75 ? SW_COLORS.thread : SW_COLORS.alarm}
+                  info={<><b>Fairness</b> across stations.<br/>LBR = Σ stationSMV ÷ (N × longest station) × 100.<br/>Complement of Balance Loss. 100 % = every station as loaded as the bottleneck.</>}
+                />
+                <div style={{ marginTop: 4, fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
+                  Fairness across stations · complement of Balance Loss
+                </div>
+              </div>
+              <div>
+                <Stat
+                  label="LINE BALANCE EFF"
+                  value={yamLBE.toFixed(1)}
+                  unit="%"
+                  color={
+                    yamLBE > 100 ? SW_COLORS.alarm
+                    : yamLBE >= 85 ? SW_COLORS.ok
+                    : yamLBE >= 70 ? SW_COLORS.thread
+                    : SW_COLORS.alarm
+                  }
+                  info={<><b>Capacity used vs takt.</b><br/>LBE = Σ stationSMV ÷ (N × takt) × 100.<br/>&lt;100 = spare capacity vs demand; &gt;100 = infeasible at current manning.</>}
+                />
+                <div style={{ marginTop: 4, fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
+                  {yamLBE > 100 ? 'Infeasible — bottleneck slower than takt' : 'Capacity used vs takt'}
+                </div>
+              </div>
+              <div>
+                <Stat
+                  label="OPTIMUM MANNING"
+                  value={yamOptManning.toFixed(0)}
+                  unit={`/ ${yamOperators} now`}
+                  color={
+                    yamOptManning > yamOperators ? SW_COLORS.alarm
+                    : yamOptManning === yamOperators ? SW_COLORS.ok
+                    : SW_COLORS.thread
+                  }
+                  info={<><b>Theoretical headcount</b> at takt.<br/>Manning = ⌈ Garment SAM ÷ takt ⌉.<br/>The minimum operators a perfectly balanced line would need to hit takt — gap to actual = labour cost of imbalance.</>}
+                />
+                <div style={{ marginTop: 4, fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
+                  {yamOptManning > yamOperators
+                    ? `Need ${yamOptManning - yamOperators} more to hit takt`
+                    : yamOptManning < yamOperators
+                      ? `${yamOperators - yamOptManning} above theoretical floor`
+                      : 'At theoretical floor'}
+                </div>
+              </div>
+            </div>
+          </div>
+          {/* WHAT TO FIX — actionable suggestions derived from the live
+              metrics. Severity-coloured rows so the user can scan to the
+              red items first. Empty state shows a "healthy" info row. */}
+          <div style={{ marginTop: 12, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, overflow: 'hidden' }}>
+            <div style={{ padding: '8px 12px', background: SW_COLORS.ink, color: '#fff', display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 900, letterSpacing: '0.08em' }}>
+                WHAT TO FIX  ·  {balanceSuggestions.length} {balanceSuggestions.length === 1 ? 'item' : 'items'}
+              </div>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: '#dcd6c6' }}>
+                Updates live as you change garment, operators, or drag the Yamazumi
+              </div>
+            </div>
+            <div>
+              {balanceSuggestions.map((s, i) => {
+                const colourBySeverity: Record<typeof s.severity, { bar: string; chip: string; chipText: string; label: string }> = {
+                  critical:    { bar: SW_COLORS.alarm,  chip: SW_COLORS.alarm,  chipText: '#fff',         label: 'CRITICAL' },
+                  warn:        { bar: '#d49a2a',        chip: '#d49a2a',        chipText: '#fff',         label: 'WARN' },
+                  opportunity: { bar: SW_COLORS.brand,  chip: SW_COLORS.brand,  chipText: '#fff',         label: 'OPPORTUNITY' },
+                  info:        { bar: SW_COLORS.line,   chip: '#eee9d8',        chipText: SW_COLORS.ink,  label: 'INFO' },
+                };
+                const c = colourBySeverity[s.severity];
+                return (
+                  <div
+                    key={s.id}
+                    style={{
+                      display: 'grid',
+                      gridTemplateColumns: 'auto 1fr',
+                      gap: 12,
+                      padding: '10px 12px',
+                      borderTop: i === 0 ? 'none' : `1px solid ${SW_COLORS.line}`,
+                      borderLeft: `4px solid ${c.bar}`,
+                      background: '#fff',
+                    }}
+                  >
+                    <div style={{ display: 'flex', alignItems: 'flex-start', paddingTop: 1 }}>
+                      <span
+                        style={{
+                          padding: '2px 6px',
+                          fontFamily: SW_FONTS.mono,
+                          fontSize: 9,
+                          fontWeight: 900,
+                          letterSpacing: '0.08em',
+                          background: c.chip,
+                          color: c.chipText,
+                          borderRadius: 3,
+                          whiteSpace: 'nowrap',
+                        }}
+                      >
+                        {c.label}
+                      </span>
+                    </div>
+                    <div>
+                      <div style={{ fontFamily: SW_FONTS.display, fontSize: 13, fontWeight: 800, color: SW_COLORS.ink, marginBottom: 2 }}>
+                        {s.title}
+                      </div>
+                      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.45, marginBottom: 4 }}>
+                        {s.detail}
+                      </div>
+                      <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.ink, fontWeight: 600, lineHeight: 1.45 }}>
+                        <span style={{ color: SW_COLORS.muted, fontWeight: 700 }}>→ </span>
+                        {s.action}
+                      </div>
+                    </div>
+                  </div>
+                );
+              })}
+            </div>
+          </div>
+
           <div style={{ marginTop: 8, fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted }}>
             Smoothness index {yamSmoothness.toFixed(3)} (lower = smoother) · {storedOverride ? `Manual override (${storedOverride.length} operators)` : 'LPT auto-assignment'} · Source bulletin: {yamTemplate.operations.length} operations from {yamTemplate.name}
           </div>

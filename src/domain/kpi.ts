@@ -61,6 +61,12 @@ export function balanceLoss(stationSmvs: StationLoad[]): number {
  * Line balance ratio (LBR) % = (sumOfStationSmvs / (longestStation × operators)) × 100
  * The complement of balance loss; sometimes reported instead. Same shareFrac
  * inflation rule as `balanceLoss`.
+ *
+ * Also known as the **fairness** metric in Sempai/lean materials: it asks
+ * "how evenly is work shared across operators?", comparing every station to
+ * the slowest one. 100 % = perfectly fair (every station at the bottleneck);
+ * lower = idle slack on the faster stations. Companion to
+ * `lineBalanceEfficiency` (vs takt, not vs bottleneck) and `optimumManning`.
  */
 export function lineBalanceRatio(stationSmvs: StationLoad[]): number {
   if (stationSmvs.length === 0) return 0;
@@ -69,6 +75,57 @@ export function lineBalanceRatio(stationSmvs: StationLoad[]): number {
   if (longest === 0) return 0;
   const sum = effs.reduce((s, v) => s + v, 0);
   return (sum / (effs.length * longest)) * 100;
+}
+
+/**
+ * Line balance efficiency (LBE) % = (sumOfStationSmvs / (operators × taktMin)) × 100
+ *
+ * The second of Sempai's three line-balance metrics. Whereas `lineBalanceRatio`
+ * compares stations to the *slowest station* (fairness across the line as
+ * built), LBE compares the total work content to the *takt-paced capacity*
+ * the line has under that operator count. That makes it the customer-facing
+ * number: it answers "of the capacity we've staffed to meet demand, how much
+ * is actually doing work?"
+ *
+ * Interpretation:
+ *   • 100 %  → every operator-minute earns SAM at the pace demand requires.
+ *   • <100 % → spare capacity vs takt (over-staffed for the demand, or
+ *              bottleneck has slack relative to takt).
+ *   • >100 % → infeasible: the bulletin can't be balanced under this many
+ *              operators at takt; the slowest station must beat takt and
+ *              currently doesn't. Caller should re-staff or split the op.
+ *
+ * Same `shareFrac` inflation rule as `balanceLoss` so a one-operator-two-
+ * stations layout doesn't read artificially high.
+ */
+export function lineBalanceEfficiency(opts: {
+  stationSmvs: StationLoad[];
+  taktMin: number;
+}): number {
+  if (opts.stationSmvs.length === 0 || opts.taktMin <= 0) return 0;
+  const effs = opts.stationSmvs.map(effectiveSmvForBalance);
+  const sum = effs.reduce((s, v) => s + v, 0);
+  return (sum / (effs.length * opts.taktMin)) * 100;
+}
+
+/**
+ * Optimum manning (theoretical headcount) = ceil( totalSam / taktMin ).
+ *
+ * The third of Sempai's three metrics. Given a takt the line must hit, this
+ * is the *minimum* number of operators a perfectly-balanced line would
+ * need — every operator loaded right up to takt with zero slack. Real lines
+ * always carry more than this because of imbalance, indivisible operations,
+ * and skill variance; the gap between actual and optimum is the labour cost
+ * of the imperfect balance.
+ *
+ * Reported as a positive integer (ceil) so the user reads "you need at least
+ * N people" rather than "you need 14.3 people". Pass the *true* SAM (sum of
+ * operation SMVs), not the slowest-station SMV — manning is about total work
+ * content, not the current bottleneck.
+ */
+export function optimumManning(opts: { totalSam: number; taktMin: number }): number {
+  if (opts.taktMin <= 0 || opts.totalSam <= 0) return 0;
+  return Math.ceil(opts.totalSam / opts.taktMin);
 }
 
 /**
