@@ -25,6 +25,8 @@
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
 
+import { quotaAwareLocalStorage } from './persist-storage';
+
 import {
   type Twin,
   type Scenario,
@@ -1149,7 +1151,11 @@ export const useTwin = create<TwinState>()(
     {
       name: 'stitchworks.twin.v1',
       version: TWIN_STORE_SCHEMA_VERSION,
-      storage: createJSONStorage(() => localStorage),
+      // Quota-aware storage so a silent QuotaExceededError on the twin
+      // write (the biggest of the three persisted stores — canonical +
+      // every scenario's full twin) becomes a visible console.error +
+      // window event instead of an empty Builder dropdown after refresh.
+      storage: createJSONStorage(() => quotaAwareLocalStorage()),
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
         canonical: state.canonical,

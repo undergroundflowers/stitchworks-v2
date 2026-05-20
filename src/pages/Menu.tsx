@@ -105,11 +105,19 @@ export function MenuPage() {
   const [modelamaLoading, setModelamaLoading] = useState(false);
   const handleLoadModelamaFactory = async () => {
     if (atCap || modelamaLoading) return;
+    // Idempotent reload: if the active factory is already a Modelama bundle,
+    // refresh it in place instead of archiving a "(2)", "(3)", … copy each
+    // click. Match the canonical prefix (the suffix may be a (N) collision
+    // disambiguator added by uniquifyFactoryName on a prior load).
+    const currentName = useProject.getState().meta.name ?? '';
+    const isAlreadyModelama = /^Modelama · Garment Factory/i.test(currentName.trim());
     const proceed =
       typeof window === 'undefined'
         ? true
         : window.confirm(
-            'Load the Modelama factory? Your current factory will be archived to the SAVED FACTORIES library first. The Modelama bundle ships 4 styles (1-pkt Shirt, Shorts, Blouse, Dress) on one floor.',
+            isAlreadyModelama
+              ? 'Re-seed the Modelama factory? The active canonical + scenarios will be replaced with a fresh bundle, but the library is left alone (no archive copy).'
+              : 'Load the Modelama factory? Your current factory will be archived to the SAVED FACTORIES library first. The Modelama bundle ships 4 styles (1-pkt Shirt, Shorts, Blouse, Dress) on one floor.',
           );
     if (!proceed) return;
     setModelamaLoading(true);
@@ -119,7 +127,17 @@ export function MenuPage() {
         window.alert('Could not load Modelama bundle — the bundled xlsx files were not reachable.');
         return;
       }
-      archiveAndStartFresh('Modelama · Garment Factory');
+      if (isAlreadyModelama) {
+        // In-place reseed — drop project + twin state without snapshotting
+        // the (stale) active factory into the library. resetProject also
+        // wipes project.scenarios so the upcoming saveScenario loop seeds
+        // fresh entries instead of stacking duplicates.
+        useProject.getState().resetProject();
+        useTwin.getState().resetTwin();
+        useProject.getState().rename('Modelama · Garment Factory');
+      } else {
+        archiveAndStartFresh('Modelama · Garment Factory');
+      }
       const { twin, garments } = buildModelamaTwin(parsed, 'Modelama · Garment Factory');
       // Register imported garments so workstations can resolve their opIds
       // through `useGarments()` downstream.

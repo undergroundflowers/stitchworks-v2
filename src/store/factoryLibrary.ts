@@ -23,6 +23,7 @@ import {
 } from './project';
 import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
 import type { Twin, Scenario as TwinScenario } from '../domain/twin';
+import { quotaAwareLocalStorage } from './persist-storage';
 
 export const LIBRARY_SCHEMA_VERSION = 1 as const;
 
@@ -170,7 +171,19 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
           project,
           twin,
         };
-        set((s) => ({ savedFactories: [entry, ...s.savedFactories] }));
+        // Enforce FACTORY_LIBRARY_MAX so repeated Load-Bundle clicks can't
+        // grow the library unbounded. Each entry holds a full project+twin
+        // snapshot (~hundreds of KB), and zustand/persist silently swallows
+        // QuotaExceededError when the combined localStorage budget blows —
+        // so without this cap the twin-store persist (the biggest write)
+        // is the one that gets dropped on the next click, leaving the
+        // Builder's FACTORY dropdown empty while Reports still shows the
+        // project-store scenarios. Drop oldest first so the most recent
+        // factories stay closest to hand.
+        set((s) => {
+          const next = [entry, ...s.savedFactories];
+          return { savedFactories: next.slice(0, FACTORY_LIBRARY_MAX) };
+        });
         return entry;
       },
 
@@ -234,7 +247,29 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
     {
       name: 'stitchworks.library.v1',
       version: LIBRARY_SCHEMA_VERSION,
-      storage: createJSONStorage(() => localStorage),
+      // Quota-aware storage: when a library write blows past the budget,
+      // the recovery hook drops the OLDEST saved factory in place and the
+      // wrapper retries the write once. This mirrors the cap enforcement
+      // in archiveCurrent for the case where the budget is exhausted by
+      // sibling stores (twin / project) rather than library growth.
+      storage: createJSONStorage(() =>
+        quotaAwareLocalStorage({
+          onQuotaError: () => {
+            const s = useFactoryLibrary.getState();
+            if (s.savedFactories.length <= 1) return false;
+            // Drop the oldest entry (savedFactories is newest-first).
+            useFactoryLibrary.setState({
+              savedFactories: s.savedFactories.slice(0, s.savedFactories.length - 1),
+            });
+            // eslint-disable-next-line no-console
+            console.warn(
+              `[factoryLibrary] quota hit — dropped oldest saved factory to make room. ` +
+                `Library now holds ${s.savedFactories.length - 1} entries.`,
+            );
+            return true;
+          },
+        }),
+      ),
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
         savedFactories: state.savedFactories,
