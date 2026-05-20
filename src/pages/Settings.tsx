@@ -3,6 +3,7 @@ import { Card, Button, SectionHeader, ToggleGroup, Slider, HudSelect, Tag, TimeC
 import { useEffect, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, downloadProjectJson, pickProjectFile, isFactoryNameTaken } from '../store';
+import { useTwin } from '../store/twin';
 import { ALL_GARMENT_TEMPLATES } from '../domain';
 import { formatDate } from '../lib/format';
 import type { UnitsPrefs } from '../store/project';
@@ -11,7 +12,48 @@ import { fmtMinutesAsHHMM, parseHHMM, type ModelTimeUnit } from '../simulation/t
 export function SettingsPage() {
   const navigate = useNavigate();
   const project = useProject();
+  // Read the twin universe so we can surface factory composition + the
+  // saved scenario forks on the PROJECT card. The PROJECT card is the
+  // single landing place where the user inspects + exports the active
+  // factory; the Builder used to host an EXPORT JSON button for the same
+  // payload — that's been folded in here.
+  const canonical = useTwin((s) => s.canonical);
+  const scenarios = useTwin((s) => s.scenarios);
+  const activeScenarioId = useTwin((s) => s.activeScenarioId);
+  const activeTwin =
+    activeScenarioId == null
+      ? canonical
+      : scenarios.find((s) => s.id === activeScenarioId)?.twin ?? canonical;
+
   const [importMsg, setImportMsg] = useState<{ kind: 'ok' | 'err'; text: string } | null>(null);
+
+  // Download the active twin (canonical or scenario fork) as a standalone
+  // JSON file. Same payload + filename convention the Builder used.
+  function exportActiveTwinJson() {
+    const data = JSON.stringify(activeTwin, null, 2);
+    const blob = new Blob([data], { type: 'application/json' });
+    const url = URL.createObjectURL(blob);
+    const a = document.createElement('a');
+    a.href = url;
+    a.download = `${(activeTwin.name || 'twin').replace(/[^a-z0-9_-]/gi, '-')}.twin.json`;
+    document.body.appendChild(a);
+    a.click();
+    a.remove();
+    URL.revokeObjectURL(url);
+  }
+
+  // Lightweight counter helper — `operators` and `assignments` are
+  // optional on Twin (older saves omit them), so coerce to [] before
+  // counting to avoid a noisy `?? 0` everywhere in the JSX.
+  const composition = {
+    departments: canonical.departments.length,
+    lines: canonical.lines.length,
+    workstations: canonical.workstations.length,
+    connectors: canonical.connectors.length,
+    operators: (canonical.operators ?? []).length,
+    assignments: (canonical.assignments ?? []).length,
+    orders: (canonical.orders ?? []).length,
+  };
 
   // Local UI state for the simulation sliders — these are presentational
   // toggles for now; the engine's actual variance lives in buildSimConfig.
@@ -118,9 +160,206 @@ export function SettingsPage() {
               />
             </div>
           </div>
+          {/* ── FACTORY DETAILS ────────────────────────────────────────
+              Composition snapshot of the canonical twin (the master
+              factory authored in Builder). Read-only counts so the user
+              has a single place to confirm "what's in this factory"
+              without bouncing back to Builder. */}
+          <div
+            style={{
+              marginTop: 18,
+              padding: 12,
+              background: SW_COLORS.paperDeep,
+              border: `1px solid ${SW_COLORS.line}`,
+              borderRadius: SW_RADIUS.sm,
+            }}
+          >
+            <div
+              style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                fontWeight: 800,
+                letterSpacing: '0.14em',
+                color: SW_COLORS.muted,
+                marginBottom: 8,
+              }}
+            >
+              FACTORY DETAILS
+            </div>
+            <div
+              style={{
+                display: 'grid',
+                gridTemplateColumns: 'repeat(4, 1fr)',
+                gap: 10,
+              }}
+            >
+              {[
+                { label: 'Departments', value: composition.departments },
+                { label: 'Sewing lines', value: composition.lines },
+                { label: 'Workstations', value: composition.workstations },
+                { label: 'Connectors', value: composition.connectors },
+                { label: 'Operators', value: composition.operators },
+                { label: 'Assignments', value: composition.assignments },
+                { label: 'Orders', value: composition.orders },
+                { label: 'Scenarios', value: scenarios.length },
+              ].map((stat) => (
+                <div
+                  key={stat.label}
+                  style={{
+                    background: SW_COLORS.paper,
+                    border: `1px solid ${SW_COLORS.line}`,
+                    borderRadius: SW_RADIUS.sm,
+                    padding: '6px 10px',
+                  }}
+                >
+                  <div
+                    style={{
+                      fontFamily: SW_FONTS.mono,
+                      fontSize: 9,
+                      fontWeight: 700,
+                      color: SW_COLORS.muted,
+                      letterSpacing: '1px',
+                    }}
+                  >
+                    {stat.label.toUpperCase()}
+                  </div>
+                  <div
+                    style={{
+                      fontFamily: SW_FONTS.display,
+                      fontSize: 18,
+                      fontWeight: 900,
+                      color: stat.value > 0 ? SW_COLORS.ink : SW_COLORS.faint,
+                      marginTop: 2,
+                    }}
+                  >
+                    {stat.value}
+                  </div>
+                </div>
+              ))}
+            </div>
+            <div
+              style={{
+                marginTop: 8,
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                color: SW_COLORS.muted,
+                letterSpacing: '0.04em',
+              }}
+            >
+              Canonical · created {formatDate(canonical.createdAt, project.units.dateFormat)} ·
+              modified {formatDate(canonical.modifiedAt, project.units.dateFormat)}
+            </div>
+          </div>
+
+          {/* ── SAVED SCENARIOS ────────────────────────────────────────
+              Every scenario fork off the canonical twin. Per-row counts
+              come from the scenario's own twin payload (a deep clone at
+              fork time), so this list stays accurate even after the
+              canonical drifts. */}
+          {scenarios.length > 0 && (
+            <div
+              style={{
+                marginTop: 12,
+                padding: 12,
+                background: SW_COLORS.paperDeep,
+                border: `1px solid ${SW_COLORS.line}`,
+                borderRadius: SW_RADIUS.sm,
+              }}
+            >
+              <div
+                style={{
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 10,
+                  fontWeight: 800,
+                  letterSpacing: '0.14em',
+                  color: SW_COLORS.muted,
+                  marginBottom: 8,
+                }}
+              >
+                SAVED SCENARIOS · {scenarios.length}
+              </div>
+              <div style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+                {scenarios.map((scn) => {
+                  const isActive = scn.id === activeScenarioId;
+                  return (
+                    <div
+                      key={scn.id}
+                      style={{
+                        display: 'grid',
+                        gridTemplateColumns: '1fr auto auto auto auto',
+                        alignItems: 'center',
+                        gap: 12,
+                        padding: '8px 10px',
+                        background: SW_COLORS.paper,
+                        border: `1px solid ${isActive ? SW_COLORS.brand : SW_COLORS.line}`,
+                        borderRadius: SW_RADIUS.sm,
+                      }}
+                    >
+                      <div style={{ minWidth: 0 }}>
+                        <div
+                          style={{
+                            display: 'flex',
+                            alignItems: 'center',
+                            gap: 8,
+                            fontFamily: SW_FONTS.body,
+                            fontSize: 13,
+                            fontWeight: 700,
+                            color: SW_COLORS.ink,
+                            overflow: 'hidden',
+                            textOverflow: 'ellipsis',
+                            whiteSpace: 'nowrap',
+                          }}
+                        >
+                          {scn.name}
+                          {isActive && (
+                            <span
+                              style={{
+                                fontFamily: SW_FONTS.mono,
+                                fontSize: 9,
+                                fontWeight: 800,
+                                color: SW_COLORS.brand,
+                                letterSpacing: '0.12em',
+                                padding: '1px 6px',
+                                border: `1px solid ${SW_COLORS.brand}55`,
+                                borderRadius: SW_RADIUS.sm,
+                              }}
+                            >
+                              ACTIVE
+                            </span>
+                          )}
+                        </div>
+                        <div
+                          style={{
+                            fontFamily: SW_FONTS.mono,
+                            fontSize: 10,
+                            color: SW_COLORS.muted,
+                            marginTop: 2,
+                          }}
+                        >
+                          Modified {formatDate(scn.modifiedAt, project.units.dateFormat)}
+                        </div>
+                      </div>
+                      <ScenarioCount label="DEPTS" value={scn.twin.departments.length} />
+                      <ScenarioCount label="STATIONS" value={scn.twin.workstations.length} />
+                      <ScenarioCount label="OPR" value={(scn.twin.operators ?? []).length} />
+                      <ScenarioCount label="RUNS" value={scn.runs.length} />
+                    </div>
+                  );
+                })}
+              </div>
+            </div>
+          )}
+
           <div style={{ display: 'flex', gap: 8, marginTop: 18, flexWrap: 'wrap' }}>
             <Button variant="secondary" icon="⤓" onClick={() => downloadProjectJson(project)}>
               Export .swproj
+            </Button>
+            <Button
+              variant="secondary"
+              icon="⤓"
+              onClick={exportActiveTwinJson}
+            >
+              Export twin JSON
             </Button>
             <Button
               variant="secondary"
@@ -380,6 +619,37 @@ export function SettingsPage() {
           <Button variant="secondary" onClick={() => navigate('/')}>Back to menu</Button>
           <Button variant="primary" onClick={() => navigate('/builder')}>Save</Button>
         </div>
+      </div>
+    </div>
+  );
+}
+
+/** Small inline count chip — used in the SAVED SCENARIOS list to surface
+ *  per-scenario depth (workstations, operators, runs) without bloating
+ *  each row into a multi-line card. */
+function ScenarioCount({ label, value }: { label: string; value: number }) {
+  return (
+    <div style={{ textAlign: 'right' }}>
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 9,
+          fontWeight: 700,
+          color: SW_COLORS.muted,
+          letterSpacing: '1px',
+        }}
+      >
+        {label}
+      </div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 13,
+          fontWeight: 800,
+          color: value > 0 ? SW_COLORS.ink : SW_COLORS.faint,
+        }}
+      >
+        {value}
       </div>
     </div>
   );

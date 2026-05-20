@@ -10,6 +10,7 @@ import {
   isFactoryNameTaken,
   FACTORY_LIBRARY_MAX,
 } from '../store';
+import { buildReferenceFactoryTwin } from '../domain/reference-twin';
 import { fmtCalendar } from '../simulation/timeUnit';
 
 /**
@@ -83,6 +84,32 @@ export function MenuPage() {
     if (ok) deleteFactory(id);
   };
 
+  // Multi-line reference factory preset — used to live as a "📚 LOAD REF
+  // FACTORY" button on the Builder toolbar. Promoted here so the home
+  // page is the single landing place for picking which factory to open.
+  // Behaviour: archive whatever the user has open, reset, then swap the
+  // fresh canonical with the multi-line reference twin (Hossain ·
+  // Elnaggar · Morshed · Kursun · Koç stacked on one floor). Lands the
+  // user in Builder so they can browse the seeded lines immediately.
+  const handleLoadReferenceFactory = () => {
+    if (atCap) return;
+    const proceed =
+      typeof window === 'undefined'
+        ? true
+        : window.confirm(
+            'Load the multi-line reference factory? Your current factory will be archived to the SAVED FACTORIES library first.',
+          );
+    if (!proceed) return;
+    archiveAndStartFresh('Reference Factory · All Lines');
+    const refTwin = buildReferenceFactoryTwin({ name: 'Reference Factory · All Lines' });
+    const r = useTwin.getState().loadCanonical(refTwin);
+    if (!r.ok) {
+      window.alert(`Could not load reference factory: ${r.reason}`);
+      return;
+    }
+    navigate('/builder');
+  };
+
   return (
     <div style={{
       width: '100%', height: '100%',
@@ -147,6 +174,13 @@ export function MenuPage() {
               scenarioCount={activeScenarioCount}
               onClick={() => navigate('/builder')}
               onOpenScenarios={handleOpenScenariosForActive}
+            />
+            {/* Multi-line reference factory preset. Same look as a saved
+                factory tile so it reads as "another factory you can open"
+                — distinguished by the dashed border + PRESET badge. */}
+            <ReferenceFactoryPresetSlot
+              onClick={handleLoadReferenceFactory}
+              disabled={atCap}
             />
             {savedFactories.map((slot) => (
               <FactorySlot
@@ -319,6 +353,111 @@ function FactorySlot({ label, caption, badge, badgeColor, scenarioCount, onClick
         </button>
       )}
     </Card>
+  );
+}
+
+/**
+ * Reference-factory preset tile. Same footprint as `FactorySlot` so it
+ * sits cleanly in the SAVED FACTORIES row, but with a dashed border +
+ * brand-coloured PRESET badge so the user understands it's a starter
+ * pack, not their own saved factory. Click → archive the current
+ * factory + load the multi-line reference twin as the new active one.
+ */
+function ReferenceFactoryPresetSlot({
+  onClick,
+  disabled,
+}: {
+  onClick: () => void;
+  disabled?: boolean;
+}) {
+  return (
+    <button
+      type="button"
+      onClick={onClick}
+      disabled={disabled}
+      title={
+        disabled
+          ? 'Factory library is at capacity — delete a saved factory first.'
+          : 'Load the multi-line reference factory (Hossain · Elnaggar · Morshed · Kursun · Koç stacked on one floor). Your current factory will be archived to SAVED FACTORIES first.'
+      }
+      style={{
+        all: 'unset',
+        boxSizing: 'border-box',
+        flex: '1 1 180px',
+        minWidth: 160,
+        padding: 14,
+        background: SW_COLORS.paper,
+        border: `1.5px dashed ${SW_COLORS.brand}80`,
+        borderRadius: SW_RADIUS.md,
+        cursor: disabled ? 'not-allowed' : 'pointer',
+        opacity: disabled ? 0.5 : 1,
+        display: 'flex',
+        flexDirection: 'column',
+        transition: 'background 120ms, border-color 120ms',
+      }}
+      onMouseEnter={(e) => {
+        if (disabled) return;
+        e.currentTarget.style.background = `${SW_COLORS.brand}08`;
+        e.currentTarget.style.borderColor = SW_COLORS.brand;
+      }}
+      onMouseLeave={(e) => {
+        e.currentTarget.style.background = SW_COLORS.paper;
+        e.currentTarget.style.borderColor = `${SW_COLORS.brand}80`;
+      }}
+    >
+      <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'center', marginBottom: 6, gap: 6, minHeight: 16 }}>
+        <Tag soft color={SW_COLORS.brand}>PRESET</Tag>
+        <span aria-hidden="true" style={{ fontSize: 16, lineHeight: 1 }}>📚</span>
+      </div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.display,
+          fontSize: 14,
+          fontWeight: 800,
+          color: SW_COLORS.ink,
+          marginBottom: 4,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        Reference Factory
+      </div>
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 10,
+          color: SW_COLORS.muted,
+          fontWeight: 600,
+          whiteSpace: 'nowrap',
+          overflow: 'hidden',
+          textOverflow: 'ellipsis',
+        }}
+      >
+        5 LITERATURE LINES
+      </div>
+      <div
+        style={{
+          marginTop: 10,
+          padding: '6px 8px',
+          background: 'transparent',
+          border: `1px solid ${SW_COLORS.brand}40`,
+          borderRadius: 4,
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'space-between',
+          gap: 6,
+          fontFamily: SW_FONTS.mono,
+          fontSize: 10,
+          fontWeight: 700,
+          letterSpacing: '0.5px',
+          color: SW_COLORS.brand,
+        }}
+      >
+        <span>✦ LOAD INTO ACTIVE</span>
+        <span>→</span>
+      </div>
+    </button>
   );
 }
 

@@ -81,7 +81,6 @@ import {
   type ApparelBlockPreset,
   type ApparelPresetId,
 } from '../domain/apparelPresets';
-import { buildReferenceFactoryTwin } from '../domain/reference-twin';
 import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 
@@ -389,7 +388,6 @@ export function BuilderPage() {
   const setBlock = useTwin((s) => s.setBlock);
   const addConnector = useTwin((s) => s.addConnector);
   const removeConnector = useTwin((s) => s.removeConnector);
-  const loadCanonical = useTwin((s) => s.loadCanonical);
   const createScenarioFromCanonical = useTwin(
     (s) => s.createScenarioFromCanonical,
   );
@@ -1249,20 +1247,6 @@ export function BuilderPage() {
     };
   }, [selected, extraSelectedWs, rotateWorkstation, removeWorkstation, removeDepartment, duplicateWorkstation, resetView, selectAllWs, copySelection, cutSelection, pasteClipboard, undoTwin, redoTwin]);
 
-  // ── Export JSON ────────────────────────────────────────────────────────────
-  const onExportJson = useCallback(() => {
-    const data = JSON.stringify(twin, null, 2);
-    const blob = new Blob([data], { type: 'application/json' });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement('a');
-    a.href = url;
-    a.download = `${(twin.name || 'twin').replace(/[^a-z0-9_-]/gi, '-')}.twin.json`;
-    document.body.appendChild(a);
-    a.click();
-    a.remove();
-    URL.revokeObjectURL(url);
-  }, [twin]);
-
   // ── Save / Save As ─────────────────────────────────────────────────────────
   // Two flows:
   //   • Save     — re-stamps modifiedAt on the active twin (canonical or
@@ -1364,117 +1348,15 @@ export function BuilderPage() {
         <button onClick={() => navigate('/')} style={btnSec} title="Back to menu" aria-label="Back to menu">
           ←
         </button>
-        {/* Title sits on its own line; the FACTORY picker and the action
-            buttons (SAVE, SAVE AS, DELETE, SIMULATE) form a second row
-            beneath, sharing one horizontal axis so the picker and the
-            verbs that act on it live on the same baseline. */}
-        <div style={{ display: 'flex', flexDirection: 'column', gap: 8, alignItems: 'flex-start' }}>
-          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12 }}>
-            <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing: '-0.01em' }}>
-              FACTORY BUILDER
-            </div>
-            {/* Pre-flight graph health chip — moved here so the issue count
-                sits next to the page label it describes, instead of floating
-                at the far right of the toolbar. */}
-            <div style={{ position: 'relative' }}>
-              <button
-                onClick={() => setIssuesOpen((v) => !v)}
-                title={
-                  pmlIssues.length === 0
-                    ? 'Graph passes pre-flight checks — ready to run.'
-                    : 'Click to expand the pre-flight issue list.'
-                }
-                style={{
-                  ...btnSec,
-                  background:
-                    errorCount > 0
-                      ? '#FFE5E5'
-                      : warnCount > 0
-                        ? '#FFF6E0'
-                        : pmlIssues.length === 0
-                          ? '#E7F7EE'
-                          : SW_COLORS.paperDeep,
-                  borderColor:
-                    errorCount > 0
-                      ? SW_COLORS.alarm
-                      : warnCount > 0
-                        ? SW_COLORS.thread
-                        : SW_COLORS.line,
-                  color:
-                    errorCount > 0 ? SW_COLORS.alarm : warnCount > 0 ? SW_COLORS.steel : SW_COLORS.steel,
-                  fontFamily: SW_FONTS.mono,
-                  fontSize: 10,
-                  fontWeight: 800,
-                }}
-              >
-                {errorCount > 0
-                  ? `⨯ ${errorCount} ERR${warnCount + infoCount > 0 ? ` · ${warnCount + infoCount} HINT` : ''}`
-                  : warnCount > 0
-                    ? `⚠ ${warnCount} WARN${infoCount > 0 ? ` · ${infoCount}` : ''}`
-                    : infoCount > 0
-                      ? `✓ READY · ${infoCount} HINT`
-                      : '✓ READY'}
-              </button>
-              {issuesOpen && pmlIssues.length > 0 && (
-                <div
-                  style={{
-                    position: 'absolute',
-                    top: 'calc(100% + 4px)',
-                    left: 0,
-                    zIndex: 10,
-                    width: 360,
-                    maxHeight: 320,
-                    overflowY: 'auto',
-                    background: SW_COLORS.paper,
-                    border: `1px solid ${SW_COLORS.line}`,
-                    borderRadius: 6,
-                    boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
-                    padding: 8,
-                  }}
-                >
-                  <div style={{ ...sectionLabel, marginBottom: 6 }}>
-                    Pre-flight · {pmlIssues.length} issue{pmlIssues.length === 1 ? '' : 's'}
-                  </div>
-                  {pmlIssues.map((iss, i) => {
-                    const tone =
-                      iss.level === 'error'
-                        ? SW_COLORS.alarm
-                        : iss.level === 'warn'
-                          ? SW_COLORS.thread
-                          : SW_COLORS.muted;
-                    const glyph =
-                      iss.level === 'error' ? '⨯' : iss.level === 'warn' ? '⚠' : '·';
-                    return (
-                      <div
-                        key={i}
-                        onClick={() => {
-                          if (iss.wsId) setSelected({ kind: 'ws', id: iss.wsId });
-                        }}
-                        style={{
-                          padding: '6px 8px',
-                          borderLeft: `3px solid ${tone}`,
-                          background: SW_COLORS.paperDeep,
-                          borderRadius: 3,
-                          marginBottom: 4,
-                          fontSize: 11,
-                          lineHeight: 1.4,
-                          color: SW_COLORS.steel,
-                          cursor: iss.wsId ? 'pointer' : 'default',
-                        }}
-                        title={iss.wsId ? 'Click to select this block in the inspector' : undefined}
-                      >
-                        <strong style={{ color: tone, fontFamily: SW_FONTS.mono, marginRight: 6 }}>
-                          {glyph} {iss.level.toUpperCase()}
-                        </strong>
-                        {iss.message}
-                      </div>
-                    );
-                  })}
-                </div>
-              )}
-            </div>
+        {/* Title and the full action row (FACTORY picker, SAVE, SAVE AS,
+            DELETE, ✓ READY chip, SIMULATE, BEST) sit on a single
+            horizontal baseline. The READY chip lives between DELETE and
+            SIMULATE so the pre-flight health is read right before the
+            user commits to a sim run. */}
+        <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
+          <div style={{ fontFamily: SW_FONTS.display, fontSize: 16, fontWeight: 900, letterSpacing: '-0.01em' }}>
+            FACTORY BUILDER
           </div>
-          <div style={{ display: 'flex', flexDirection: 'row', alignItems: 'center', gap: 12, flexWrap: 'wrap' }}>
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ ...sectionLabel, marginBottom: 0 }}>FACTORY</span>
             <HudSelect
@@ -1571,6 +1453,106 @@ export function BuilderPage() {
           >
             🗑 DELETE
           </button>
+          {/* Pre-flight graph health chip — sits between DELETE and
+              SIMULATE so the green / amber / red status is the last
+              thing the user reads before committing to a run. */}
+          <div style={{ position: 'relative' }}>
+            <button
+              onClick={() => setIssuesOpen((v) => !v)}
+              title={
+                pmlIssues.length === 0
+                  ? 'Graph passes pre-flight checks — ready to run.'
+                  : 'Click to expand the pre-flight issue list.'
+              }
+              style={{
+                ...btnSec,
+                background:
+                  errorCount > 0
+                    ? '#FFE5E5'
+                    : warnCount > 0
+                      ? '#FFF6E0'
+                      : pmlIssues.length === 0
+                        ? '#E7F7EE'
+                        : SW_COLORS.paperDeep,
+                borderColor:
+                  errorCount > 0
+                    ? SW_COLORS.alarm
+                    : warnCount > 0
+                      ? SW_COLORS.thread
+                      : SW_COLORS.line,
+                color:
+                  errorCount > 0 ? SW_COLORS.alarm : warnCount > 0 ? SW_COLORS.steel : SW_COLORS.steel,
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                fontWeight: 800,
+              }}
+            >
+              {errorCount > 0
+                ? `⨯ ${errorCount} ERR${warnCount + infoCount > 0 ? ` · ${warnCount + infoCount} HINT` : ''}`
+                : warnCount > 0
+                  ? `⚠ ${warnCount} WARN${infoCount > 0 ? ` · ${infoCount}` : ''}`
+                  : infoCount > 0
+                    ? `✓ READY · ${infoCount} HINT`
+                    : '✓ READY'}
+            </button>
+            {issuesOpen && pmlIssues.length > 0 && (
+              <div
+                style={{
+                  position: 'absolute',
+                  top: 'calc(100% + 4px)',
+                  left: 0,
+                  zIndex: 10,
+                  width: 360,
+                  maxHeight: 320,
+                  overflowY: 'auto',
+                  background: SW_COLORS.paper,
+                  border: `1px solid ${SW_COLORS.line}`,
+                  borderRadius: 6,
+                  boxShadow: '0 6px 18px rgba(0,0,0,0.18)',
+                  padding: 8,
+                }}
+              >
+                <div style={{ ...sectionLabel, marginBottom: 6 }}>
+                  Pre-flight · {pmlIssues.length} issue{pmlIssues.length === 1 ? '' : 's'}
+                </div>
+                {pmlIssues.map((iss, i) => {
+                  const tone =
+                    iss.level === 'error'
+                      ? SW_COLORS.alarm
+                      : iss.level === 'warn'
+                        ? SW_COLORS.thread
+                        : SW_COLORS.muted;
+                  const glyph =
+                    iss.level === 'error' ? '⨯' : iss.level === 'warn' ? '⚠' : '·';
+                  return (
+                    <div
+                      key={i}
+                      onClick={() => {
+                        if (iss.wsId) setSelected({ kind: 'ws', id: iss.wsId });
+                      }}
+                      style={{
+                        padding: '6px 8px',
+                        borderLeft: `3px solid ${tone}`,
+                        background: SW_COLORS.paperDeep,
+                        borderRadius: 3,
+                        marginBottom: 4,
+                        fontSize: 11,
+                        lineHeight: 1.4,
+                        color: SW_COLORS.steel,
+                        cursor: iss.wsId ? 'pointer' : 'default',
+                      }}
+                      title={iss.wsId ? 'Click to select this block in the inspector' : undefined}
+                    >
+                      <strong style={{ color: tone, fontFamily: SW_FONTS.mono, marginRight: 6 }}>
+                        {glyph} {iss.level.toUpperCase()}
+                      </strong>
+                      {iss.message}
+                    </div>
+                  );
+                })}
+              </div>
+            )}
+          </div>
           {(() => {
             const simulatableCount = twin.workstations.filter(
               (ws) => ws.operation.opId != null,
@@ -1645,7 +1627,6 @@ export function BuilderPage() {
             </button>
           )}
           </div>
-          </div>
         </div>
 
         <div style={{ flex: 1 }} />
@@ -1710,31 +1691,11 @@ export function BuilderPage() {
             in line with the canvas-mode toggle and CONTROLS dropdown).
             See the absolute-positioned block inside the canvas div below. */}
 
-        <button onClick={onExportJson} style={btnSec} title="Download the active twin as JSON">
-          ⤓ EXPORT JSON
-        </button>
-        <button
-          onClick={() => {
-            const has = canonical.departments.length > 0 || canonical.workstations.length > 0;
-            if (
-              has &&
-              !window.confirm(
-                'Replace the current canonical factory with the multi-line reference factory? Existing scenarios will be cleared.',
-              )
-            ) {
-              return;
-            }
-            const next = buildReferenceFactoryTwin({ name: 'Reference Factory · All Lines' });
-            const result = loadCanonical(next);
-            if (!result.ok) {
-              window.alert(`Could not load reference factory: ${result.reason}`);
-            }
-          }}
-          style={btnSec}
-          title="Seed the canonical twin with one line per reference paper (Hossain · Elnaggar · Morshed · Kursun · Koç) stacked on the same floor."
-        >
-          📚 LOAD REF FACTORY
-        </button>
+        {/* EXPORT JSON moved to Settings → PROJECT card so factory-level
+            actions (export, scenarios, composition) live in one place.
+            LOAD REF FACTORY moved to Menu → SAVED FACTORIES as a
+            "Reference Factory" preset tile so picking which factory to
+            open happens on the home screen, not from inside Builder. */}
 
         {/* RUN SIM button + its inline toast were removed when the legacy
             engine was retired. ▶ SIMULATE (above) is the single entry point
