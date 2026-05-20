@@ -2148,6 +2148,14 @@ export function BuilderPage() {
           <CountChip label="STATIONS" value={twin.workstations.length} />
         </div>
 
+        {/* Bottom-right canvas legend — sits above the zoom controls.
+            Explains the connector kinds (flow / operator / material), the
+            carrier letter badges painted on flow connectors (B/P/H/T), and
+            the per-lens header pill above each workstation. The active
+            lens row is highlighted so the reader knows which pill is
+            currently rendered above the iso sprites. */}
+        <IsoLegend lens={lens} />
+
         {/* Top-left connect-flow tool — sits at the same vertical baseline
             as the canvas-mode toggle and CONTROLS dropdown so the three
             read as one row of overlays. */}
@@ -2949,7 +2957,7 @@ function CanvasSVG(props: CanvasSVGProps) {
                 sharedPct={sharedPct}
                 operatorCount={operatorCount}
                 operatorNames={operatorNames}
-                opLabel={opLabelFor(w, garmentsById)}
+                opMeta={opMetaFor(w, garmentsById)}
                 onClick={(e) => props.onSelect({ kind: 'ws', id: w.id }, { shift: e.shiftKey })}
                 onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
               />
@@ -3343,30 +3351,45 @@ function SewingLineBand({
 // ── WORKSTATION sprite ────────────────────────────────────────────────────────
 
 /**
- * Short label for the OPERATIONS-lens pill above a station. The raw opId
- * carries four namespacing layers (`mod-{style}-imp-{code}-{idx}`) for
- * uniqueness; on the canvas we only want the bulletin-recognised handle
- * — the op's authored `code`, falling back to a truncated `name`, then
- * to a stripped opId when the garment template can't resolve it.
+ * Resolve the OPERATIONS-lens label parts for a station. Returns both the
+ * bulletin `code` (e.g. "1081") and a short operation `name` (e.g. "Bartack
+ * pkt mouth") so the canvas pill can show what work is being done, not just
+ * the opaque code. Falls back gracefully when the garment template can't
+ * resolve the opId; the raw `mod-{style}-imp-{code}-{idx}` namespacing is
+ * stripped so the user never sees it.
  */
-function opLabelFor(
+function opMetaFor(
   ws: Workstation,
   garmentsById: Record<string, GarmentTemplate>,
-): string {
+): { code: string; name: string } {
   const { opId, garmentId, freeText } = ws.operation;
-  if (!opId) return freeText ?? '—';
+  if (!opId) return { code: freeText ?? '—', name: '' };
   const op = garmentId
     ? garmentsById[garmentId]?.operations.find((o) => o.id === opId)
     : undefined;
-  if (op?.code) return op.code;
-  if (op?.name) {
-    const n = op.name.trim();
-    return n.length > 14 ? n.slice(0, 13) + '…' : n;
+  if (op) {
+    const fullName = (op.name ?? '').trim();
+    const shortName =
+      fullName.length > 18 ? fullName.slice(0, 17) + '…' : fullName;
+    if (op.code) return { code: op.code, name: shortName };
+    if (shortName) return { code: shortName, name: '' };
   }
-  return opId
+  const stripped = opId
     .replace(/^mod-[a-z0-9]+-/i, '')
     .replace(/^imp-/i, '')
     .replace(/-\d+$/, '');
+  return { code: stripped, name: '' };
+}
+
+/**
+ * Compact operator ID for the chip next to a workstation. Modelama operators
+ * are named like `PRO-OP01` — already short. For other twins where `name` may
+ * be a free-text string we cap it so the chip stays readable.
+ */
+function operatorIdLabel(name: string): string {
+  const trimmed = name.trim();
+  if (!trimmed) return '—';
+  return trimmed.length > 10 ? trimmed.slice(0, 9) + '…' : trimmed;
 }
 
 function WorkstationSprite({
@@ -3378,7 +3401,7 @@ function WorkstationSprite({
   sharedPct = null,
   operatorCount = 0,
   operatorNames = [],
-  opLabel = '—',
+  opMeta = { code: '—', name: '' },
   onClick,
   onMouseDown,
 }: {
@@ -3399,11 +3422,14 @@ function WorkstationSprite({
    *  the sprite so the Builder makes the c-count visible without the
    *  user having to switch to the RESOURCES lens. */
   operatorCount?: number;
-  /** Operator names — surfaced on hover for traceability. */
+  /** Operator names — first one is shown as the chip ID; full roster
+   *  shows in the hover tooltip. */
   operatorNames?: string[];
-  /** Short OPERATIONS-lens label (bulletin code, short name, or stripped opId).
-   *  Resolved upstream so the sprite stays free of garment-template lookups. */
-  opLabel?: string;
+  /** OPERATIONS-lens label parts: `code` is the bulletin handle (e.g.
+   *  "1081"), `name` is the short operation name (e.g. "Bartack pkt mouth").
+   *  Both are resolved upstream so the sprite stays free of garment-template
+   *  lookups. */
+  opMeta?: { code: string; name: string };
   onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
@@ -3489,19 +3515,31 @@ function WorkstationSprite({
         />
       )}
 
-      {/* OPERATIONS lens badge — pill width auto-fits the resolved label
-          (bulletin code or short name) so long opIds don't bleed past the
-          rect. Full opId stays available on hover via the <title>. */}
+      {/* OPERATIONS lens badge — two-line pill so the user sees BOTH the
+          bulletin code (top, mono) and the operation name (bottom, smaller).
+          The code alone is easy to mistake for an operator ID; pairing it
+          with the human-readable name removes that ambiguity. Width
+          auto-fits whichever line is longer; full opId still appears on
+          hover via the <title>. */}
       {lens === 'operations' && (() => {
-        const label = opLabel || '—';
-        const pillW = Math.max(28, Math.min(110, label.length * 6 + 12));
+        const code = opMeta.code || '—';
+        const name = opMeta.name || '';
+        const widest = Math.max(code.length, name.length);
+        const pillW = Math.max(34, Math.min(120, widest * 5.6 + 12));
+        const pillH = name ? 22 : 14;
+        const pillY = name ? -15 : -9;
         return (
           <g transform="translate(0, -28)">
             <title>{ws.operation.opId ?? ws.operation.freeText ?? ''}</title>
-            <rect x={-pillW / 2} y={-9} width={pillW} height={14} rx={3} fill={SW_COLORS.ink} fillOpacity={0.85} />
-            <text x={0} y={1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
-              {label}
+            <rect x={-pillW / 2} y={pillY} width={pillW} height={pillH} rx={3} fill={SW_COLORS.ink} fillOpacity={0.88} />
+            <text x={0} y={name ? -5 : 1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
+              {code}
             </text>
+            {name && (
+              <text x={0} y={4} textAnchor="middle" fontFamily={SW_FONTS.body} fontSize={7} fontWeight={500} fill="#fff" fillOpacity={0.88} style={{ letterSpacing: '0.02em' }}>
+                {name}
+              </text>
+            )}
           </g>
         );
       })()}
@@ -3526,55 +3564,77 @@ function WorkstationSprite({
         </g>
       )}
 
-      {/* OPERATOR chip — always on, regardless of lens. Shows the c that
-          the queue analysis will use as the parallel-server count, plus
-          tiny dots for the first ≤6 operators. Operator names appear in
-          a SVG <title> tooltip so hover reveals the roster. Sits below
-          the sprite so it doesn't collide with the per-lens header pill
-          above. */}
-      {operatorCount > 0 && (
-        <g transform="translate(0, 22)" style={{ pointerEvents: 'all' }}>
-          <title>
-            {operatorNames.length > 0
-              ? `Operators: ${operatorNames.join(', ')}`
-              : `${operatorCount} operator${operatorCount === 1 ? '' : 's'} required`}
-          </title>
-          <rect
-            x={-22}
-            y={-8}
-            width={44}
-            height={14}
-            rx={7}
-            fill={SW_COLORS.ink}
-            fillOpacity={0.78}
-            stroke={SW_COLORS.brand}
-            strokeOpacity={0.55}
-            strokeWidth={0.7}
-          />
-          <text
-            x={-10}
-            y={3}
-            textAnchor="middle"
-            fontFamily={SW_FONTS.mono}
-            fontSize={9}
-            fontWeight={800}
-            fill="#fff"
-            style={{ letterSpacing: '0.04em' }}
-          >
-            {`☻×${operatorCount}`}
-          </text>
-          {Array.from({ length: Math.min(operatorCount, 6) }, (_, i) => (
+      {/* OPERATOR chip — always on, regardless of lens. Shows the primary
+          operator's ID (e.g. "PRO-OP01") so the canvas distinguishes the
+          PERSON working at this station from the OPERATION being performed
+          on it (which is the pill above). A small ☻ head-icon sits on the
+          left of the chip so it reads as "a person", brand-orange ring so
+          it pops against the iso scene. When >1 operator is assigned, a
+          "+N" badge appears to the right of the primary ID. Full roster
+          surfaces on hover. */}
+      {operatorCount > 0 && (() => {
+        const primary = operatorNames[0] ?? '';
+        const idLabel = primary ? operatorIdLabel(primary) : `OP×${operatorCount}`;
+        const extra = Math.max(0, operatorCount - 1);
+        const labelLen = idLabel.length + (extra > 0 ? 3 : 0);
+        const chipW = Math.max(48, Math.min(110, labelLen * 6 + 22));
+        return (
+          <g transform="translate(0, 22)" style={{ pointerEvents: 'all' }}>
+            <title>
+              {operatorNames.length > 0
+                ? `Operators: ${operatorNames.join(', ')}`
+                : `${operatorCount} operator${operatorCount === 1 ? '' : 's'} required`}
+            </title>
+            <rect
+              x={-chipW / 2}
+              y={-8}
+              width={chipW}
+              height={14}
+              rx={7}
+              fill={SW_COLORS.ink}
+              fillOpacity={0.82}
+              stroke={SW_COLORS.brand}
+              strokeOpacity={0.7}
+              strokeWidth={0.8}
+            />
+            {/* head-icon: small filled circle in brand-orange so the chip
+                reads as "operator" at a glance. */}
             <circle
-              key={i}
-              cx={2 + i * 3}
-              cy={0}
-              r={1.4}
+              cx={-chipW / 2 + 7}
+              cy={-1}
+              r={3.2}
               fill={SW_COLORS.brand}
               fillOpacity={0.95}
             />
-          ))}
-        </g>
-      )}
+            <text
+              x={-chipW / 2 + 13}
+              y={3}
+              textAnchor="start"
+              fontFamily={SW_FONTS.mono}
+              fontSize={8.5}
+              fontWeight={700}
+              fill="#fff"
+              style={{ letterSpacing: '0.04em' }}
+            >
+              {idLabel}
+            </text>
+            {extra > 0 && (
+              <text
+                x={chipW / 2 - 4}
+                y={3}
+                textAnchor="end"
+                fontFamily={SW_FONTS.mono}
+                fontSize={8}
+                fontWeight={800}
+                fill={SW_COLORS.brand}
+                style={{ letterSpacing: '0.04em' }}
+              >
+                {`+${extra}`}
+              </text>
+            )}
+          </g>
+        );
+      })()}
 
       {/* SHARED-WORKER pill — lens-independent, sits above the per-lens
           badge so the user can spot shared stations from across the
@@ -7160,6 +7220,185 @@ function CountChip({ label, value }: { label: string; value: number }) {
       <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1.2px' }}>{label}</span>
       <strong style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900, color: SW_COLORS.ink }}>{value}</strong>
     </div>
+  );
+}
+
+/**
+ * Bottom-right reference panel on the iso canvas. Explains the connector
+ * kinds (flow / operator / material), the carrier letter badges painted at
+ * a flow connector's midpoint (B/P/H/T), and the per-lens header pill that
+ * floats above each workstation. The row matching the active lens is
+ * highlighted; the other lens rows are dimmed so the legend doubles as
+ * "here's what the other lenses would show".
+ *
+ * Swatches mirror CONNECTOR_HEX, the dash rules in flowStyleFor(), and
+ * CARRIER_STYLE exactly so a line on the canvas matches the corresponding
+ * legend row without translation. Pointer events are off so the panel
+ * never steals clicks from the canvas underneath.
+ */
+function IsoLegend({ lens }: { lens: Lens }) {
+  const lensRows: { key: Lens; bg: string; label: string; meaning: string }[] = [
+    { key: 'operations', bg: SW_COLORS.ink,       label: 'op-code', meaning: 'operation' },
+    { key: 'resources',  bg: SW_COLORS.bobbin,    label: '☻ × N',   meaning: 'workers' },
+    { key: 'kpis',       bg: SW_COLORS.brandDeep, label: 'NN%',     meaning: 'utilisation' },
+  ];
+  return (
+    <div
+      style={{
+        position: 'absolute',
+        bottom: 56,
+        right: 14,
+        zIndex: 5,
+        background: SW_COLORS.paper + 'ee',
+        backdropFilter: 'blur(8px)',
+        WebkitBackdropFilter: 'blur(8px)',
+        border: `1px solid ${SW_COLORS.line}`,
+        borderRadius: 6,
+        padding: '6px 8px',
+        display: 'flex',
+        flexDirection: 'column',
+        gap: 4,
+        fontFamily: SW_FONTS.mono,
+        fontSize: 9,
+        color: SW_COLORS.steel,
+        letterSpacing: '0.03em',
+        pointerEvents: 'none',
+      }}
+      aria-label="Canvas legend"
+    >
+      <div
+        style={{
+          fontFamily: SW_FONTS.mono,
+          fontSize: 8,
+          fontWeight: 900,
+          color: SW_COLORS.ink,
+          letterSpacing: '0.15em',
+        }}
+      >
+        LEGEND
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+        <LegendLine color={SW_COLORS.brand}  width={2.4} label="flow" />
+        <LegendLine color={SW_COLORS.bobbin} width={1.8} dash="6 4" label="operator" />
+        <LegendLine color={SW_COLORS.thread} width={1.8} dash="6 4" label="material" />
+      </div>
+
+      <div style={{ display: 'flex', alignItems: 'center', gap: 7 }}>
+        <CarrierChip letter="B" color={SW_COLORS.brand} width={2.6}            meaning="bundle" />
+        <CarrierChip letter="P" color={SW_COLORS.steel} width={1.6}            meaning="piece" />
+        <CarrierChip letter="H" color={SW_COLORS.brand} width={2.0} dash="1 4" meaning="hanger" />
+        <CarrierChip letter="T" color={SW_COLORS.ink}   width={2.0} dash="8 4" meaning="takt" />
+      </div>
+
+      {/* Lens header pills above each station. We only render the pill swatch
+       *  (no trailing meaning word) to stay narrow; the meaning is in the
+       *  title tooltip and the inspector lens toggle next to the canvas. The
+       *  active lens row is haloed in brand red so the reader knows which
+       *  pill is currently rendered above the iso sprites. */}
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {lensRows.map((row) => {
+          const active = row.key === lens;
+          return (
+            <span
+              key={row.key}
+              style={{
+                background: row.bg,
+                color: '#fff',
+                fontFamily: SW_FONTS.mono,
+                fontSize: 8,
+                fontWeight: 800,
+                padding: '2px 6px',
+                borderRadius: 3,
+                letterSpacing: '0.04em',
+                opacity: active ? 1 : 0.45,
+                border: active ? `1px solid ${SW_COLORS.brand}` : '1px solid transparent',
+              }}
+              title={`${row.meaning} pill — active in the ${row.key} lens`}
+            >
+              {row.label}
+            </span>
+          );
+        })}
+        <span style={{ color: SW_COLORS.muted, fontSize: 9 }}>
+          {`station header · ${lensRows.find((r) => r.key === lens)?.meaning ?? ''}`}
+        </span>
+      </div>
+    </div>
+  );
+}
+
+function LegendLine({
+  color,
+  width,
+  dash,
+  label,
+}: {
+  color: string;
+  width: number;
+  dash?: string;
+  label: string;
+}) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <svg width={22} height={6} aria-hidden>
+        <line
+          x1={1}
+          y1={3}
+          x2={21}
+          y2={3}
+          stroke={color}
+          strokeWidth={width}
+          strokeDasharray={dash}
+          strokeLinecap="round"
+        />
+      </svg>
+      {label}
+    </span>
+  );
+}
+
+function CarrierChip({
+  letter,
+  color,
+  width,
+  dash,
+  meaning,
+}: {
+  letter: string;
+  color: string;
+  width: number;
+  dash?: string;
+  meaning: string;
+}) {
+  return (
+    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 5 }}>
+      <svg width={30} height={14} aria-hidden>
+        <line
+          x1={1}
+          y1={7}
+          x2={29}
+          y2={7}
+          stroke={color}
+          strokeWidth={width}
+          strokeDasharray={dash}
+          strokeLinecap="round"
+        />
+        <circle cx={15} cy={7} r={6} fill={SW_COLORS.paper} stroke={color} strokeWidth={1} />
+        <text
+          x={15}
+          y={10}
+          textAnchor="middle"
+          fontFamily={SW_FONTS.mono}
+          fontSize={8}
+          fontWeight={800}
+          fill={color}
+        >
+          {letter}
+        </text>
+      </svg>
+      {meaning}
+    </span>
   );
 }
 
