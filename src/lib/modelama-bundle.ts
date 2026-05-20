@@ -621,6 +621,42 @@ export interface ModelamaScenarioVariant {
 }
 
 /**
+ * Pull the central tendency (in minutes) out of a Workstation's service
+ * distribution — mode for triangular, mean for exp/uniform/erlang/normal,
+ * etc. Falls back to `cycleS / 60` when no distribution is attached.
+ * Used by the analytical-KPI estimator below to derive a per-station SMV
+ * without dragging in the full sim engine.
+ */
+function serviceDistCentralMin(ws: Workstation): number {
+  const params = ws.block?.params;
+  const dist = params?.cycleDist;
+  if (dist) {
+    switch (dist.kind) {
+      case 'triangular':
+        return dist.mode;
+      case 'exp':
+      case 'uniform':
+      case 'erlang':
+      case 'normal':
+        return dist.mean;
+      case 'det':
+        return dist.value;
+      case 'lognormal':
+        // Median of a lognormal is exp(mu); good enough proxy for the
+        // "typical" service time used in throughput estimates.
+        return Math.exp(dist.mu);
+      case 'weibull':
+        return dist.scale;
+      case 'beta':
+        // Use min + scale·α/(α+β); fall back to scale when min/scale absent.
+        return (dist.min ?? 0) + (dist.scale ?? 1) * (dist.alpha / (dist.alpha + dist.betaParam));
+    }
+  }
+  const cycleS = params?.cycleS;
+  return typeof cycleS === 'number' && cycleS > 0 ? cycleS / 60 : 1;
+}
+
+/**
  * Compute a planned-efficiency throughput estimate for a built twin. Treats
  * each sewing line as PBS-balanced and uses the per-line bottleneck SMV +
  * the OB planned efficiency (60%) to derive realistic-looking KPIs without
@@ -657,7 +693,7 @@ export function estimateTwinKpis(
     const serversByOp = new Map<string, { count: number; smv: number; name: string }>();
     for (const ws of stations) {
       const opId = ws.operation.opId ?? `ws-${ws.id}`;
-      const smv = ws.block?.params?.cycleDist?.mode ?? (ws.block?.params?.cycleS ?? 60) / 60;
+      const smv = serviceDistCentralMin(ws);
       const row = serversByOp.get(opId) ?? { count: 0, smv, name: ws.name };
       row.count += 1;
       serversByOp.set(opId, row);
