@@ -3457,6 +3457,14 @@ function WorkstationSprite({
   const br = isoProj(ws.position.x + fw, ws.position.y + fd);
   const bl = isoProj(ws.position.x, ws.position.y + fd);
 
+  // Reveal the per-station detail layer (operation pill + operator chip)
+  // only on hover OR when the station is selected. With 270 stations on a
+  // dense floor, painting both for every sprite at once buries the iso
+  // geometry under text — the lens header pill and operator chip become
+  // an inspect-on-demand affordance instead.
+  const [hovered, setHovered] = useState(false);
+  const detailsOpen = hovered || selected;
+
   return (
     <g
       transform={`translate(${origin.sx}, ${origin.sy})`}
@@ -3469,6 +3477,8 @@ function WorkstationSprite({
         if (placing) return; // don't start a ws drag while a tool is armed
         onMouseDown(e);
       }}
+      onMouseEnter={() => setHovered(true)}
+      onMouseLeave={() => setHovered(false)}
       style={{ cursor: placing ? 'crosshair' : 'move' }}
     >
       {selected && (
@@ -3517,11 +3527,10 @@ function WorkstationSprite({
 
       {/* OPERATIONS lens badge — two-line pill so the user sees BOTH the
           bulletin code (top, mono) and the operation name (bottom, smaller).
-          The code alone is easy to mistake for an operator ID; pairing it
-          with the human-readable name removes that ambiguity. Width
-          auto-fits whichever line is longer; full opId still appears on
-          hover via the <title>. */}
-      {lens === 'operations' && (() => {
+          Gated on `detailsOpen` so the dense 270-station floor stays
+          readable by default; hover or click a sprite to reveal its
+          operation. Full opId still appears on hover via the <title>. */}
+      {lens === 'operations' && detailsOpen && (() => {
         const code = opMeta.code || '—';
         const name = opMeta.name || '';
         const widest = Math.max(code.length, name.length);
@@ -3564,15 +3573,15 @@ function WorkstationSprite({
         </g>
       )}
 
-      {/* OPERATOR chip — always on, regardless of lens. Shows the primary
-          operator's ID (e.g. "PRO-OP01") so the canvas distinguishes the
-          PERSON working at this station from the OPERATION being performed
-          on it (which is the pill above). A small ☻ head-icon sits on the
+      {/* OPERATOR chip — reveals on hover / selection (any lens). Shows the
+          primary operator's ID (e.g. "PRO-OP01") so the canvas distinguishes
+          the PERSON working at this station from the OPERATION being
+          performed on it (the pill above). A small ☻ head-icon sits on the
           left of the chip so it reads as "a person", brand-orange ring so
           it pops against the iso scene. When >1 operator is assigned, a
           "+N" badge appears to the right of the primary ID. Full roster
-          surfaces on hover. */}
-      {operatorCount > 0 && (() => {
+          surfaces on hover via the <title> tooltip. */}
+      {operatorCount > 0 && detailsOpen && (() => {
         const primary = operatorNames[0] ?? '';
         const idLabel = primary ? operatorIdLabel(primary) : `OP×${operatorCount}`;
         const extra = Math.max(0, operatorCount - 1);
