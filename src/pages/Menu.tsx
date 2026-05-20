@@ -15,7 +15,9 @@ import { fmtCalendar } from '../simulation/timeUnit';
 import {
   fetchModelamaBundle,
   buildModelamaTwin,
+  buildModelamaScenarioVariants,
 } from '../lib/modelama-bundle';
+import type { ScenarioKpis } from '../store/project';
 
 /**
  * Splash / main menu — entry point of the app. Two-column layout:
@@ -100,6 +102,7 @@ export function MenuPage() {
   // lands the user in Builder. The IndExc files live under public/modelama
   // so they ship with the build.
   const setGarmentEdit = useProject((s) => s.setGarmentEdit);
+  const saveScenario = useProject((s) => s.saveScenario);
   const [modelamaLoading, setModelamaLoading] = useState(false);
   const handleLoadModelamaFactory = async () => {
     if (atCap || modelamaLoading) return;
@@ -126,6 +129,28 @@ export function MenuPage() {
       if (!r.ok) {
         window.alert(`Could not load Modelama factory: ${r.reason}`);
         return;
+      }
+      // Seed line-swap scenarios so the Scenarios tab has something to
+      // compare from the moment the bundle finishes loading. KPIs start
+      // empty — the user runs Sim on each loaded scenario to fill them.
+      const variants = buildModelamaScenarioVariants(parsed);
+      const zeroKpis: ScenarioKpis = {
+        producedPieces: 0,
+        throughputPerHr: 0,
+        efficiencyPct: 0,
+        meanLeadTime: 0,
+        utilization: 0,
+        wipBundles: 0,
+        bottleneckOpName: '— run Sim to populate —',
+        bottleneckQueue: 0,
+      };
+      for (const v of variants) {
+        saveScenario({
+          name: v.name,
+          notes: v.notes,
+          twin: v.twin,
+          kpis: zeroKpis,
+        });
       }
       navigate('/builder');
     } catch (err) {

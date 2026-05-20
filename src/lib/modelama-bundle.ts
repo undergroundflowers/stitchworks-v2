@@ -56,8 +56,11 @@ export interface ModelamaStyle {
   label: string;
   /** OB xlsx URL (served from `public/modelama/`). */
   obUrl: string;
-  /** Layout xlsx URL. */
-  layoutUrl: string;
+  /** Layout xlsx URL. Optional — when missing, `buildModelamaTwin` still
+   *  places stations via the canonical zigzag geometry, since the layout
+   *  file is informational only. OB-only styles (e.g. the Ann Taylor
+   *  dress, supplied without a machine-layout sheet) work this way. */
+  layoutUrl?: string;
   /** True ⇒ this style is the demo headliner (top-left line, blue accent). */
   featured?: boolean;
   /** Line accent colour. */
@@ -94,6 +97,15 @@ export const MODELAMA_STYLES: ModelamaStyle[] = [
     layoutUrl: 'modelama/dress-layout.xlsx',
     color: 'yellow',
   },
+  {
+    // Ann Taylor dress · OPT-1 of style 774533. OB only — no machine
+    // layout sheet was supplied, so the bundle falls back to the
+    // canonical zigzag geometry shared by every line.
+    key: 'dress-opt1',
+    label: 'Dress OPT-1 · 774533 (Ann Taylor)',
+    obUrl: 'modelama/dress-opt1-ob.xlsx',
+    color: 'red',
+  },
 ];
 
 export interface ParsedModelamaStyle {
@@ -114,12 +126,22 @@ export async function fetchModelamaBundle(
   const out: ParsedModelamaStyle[] = [];
   for (const style of MODELAMA_STYLES) {
     try {
-      const [obBuf, layoutBuf] = await Promise.all([
-        fetchArrayBuffer(joinUrl(baseUrl, style.obUrl)),
-        fetchArrayBuffer(joinUrl(baseUrl, style.layoutUrl)),
-      ]);
+      const obBuf = await fetchArrayBuffer(joinUrl(baseUrl, style.obUrl));
       const garment = parseGarmentXlsx(obBuf, style.label);
-      const floor = parseBestFloorXlsx(layoutBuf, style.label);
+      // Layout is optional: an OB-only style still builds a valid line
+      // via the canonical zigzag geometry, so we stub an empty floor
+      // record when the layout file is absent or unreachable.
+      let floor: ImportedFloor;
+      if (style.layoutUrl) {
+        const layoutBuf = await fetchArrayBuffer(joinUrl(baseUrl, style.layoutUrl));
+        floor = parseBestFloorXlsx(layoutBuf, style.label);
+      } else {
+        floor = {
+          stations: [],
+          source: { fileName: '(none)', sheetName: '(none)', style: style.label },
+          warnings: [],
+        };
+      }
       // Namespace the garment id + operation ids by style key so that
       // identical OB row positions across the 4 bundled styles don't
       // collide on import (the OB parser numbers ops 1..N per workbook,
@@ -555,11 +577,92 @@ export function buildModelamaTwin(
     operators,
     assignments,
     notes:
-      'Modelama production factory · 4 styles imported from Modelama xlsx exports. ' +
+      `Modelama production factory · ${parsed.length} styles imported from Modelama xlsx exports. ` +
       'Each line maps one style; workstations carry the SMV from the operation bulletin.',
   };
 
   return { twin, garments, notes, styleSummaries };
+}
+
+// ── Scenario variants ─────────────────────────────────────────────────────
+
+export interface ModelamaScenarioVariant {
+  name: string;
+  notes: string;
+  twin: Twin;
+  /** Style key the scenario isolates / promotes. */
+  spotlightKey: string;
+}
+
+/**
+ * Build the comparison-tab scenarios for a Modelama bundle. Given the
+ * parsed styles, returns:
+ *
+ *   1. **Baseline** — every style on its own line (same twin as
+ *      `buildModelamaTwin(parsed)`).
+ *   2. **Spotlight** scenarios — one per "swappable" style (`spotlightKey`),
+ *      where the spotlight style replaces one of the canonical four
+ *      Modelama lines (Line A / B / C / D). Each scenario drops one of
+ *      the original styles and substitutes the spotlight, so the floor
+ *      keeps the same line-count but a different product mix.
+ *
+ * `spotlightKey` defaults to the LAST style in `parsed` (which is where
+ * the new OB-only style joins MODELAMA_STYLES). The user runs Sim on each
+ * loaded scenario to fill in KPIs, then compares them side-by-side on
+ * the Scenarios page.
+ */
+export function buildModelamaScenarioVariants(
+  parsed: ParsedModelamaStyle[],
+  spotlightKey?: string,
+): ModelamaScenarioVariant[] {
+  if (parsed.length < 2) return [];
+  const spotKey = spotlightKey ?? parsed[parsed.length - 1].style.key;
+  const spotlight = parsed.find((p) => p.style.key === spotKey);
+  if (!spotlight) return [];
+  const baseStyles = parsed.filter((p) => p.style.key !== spotKey);
+
+  const variants: ModelamaScenarioVariant[] = [];
+
+  // Baseline — the full bundle (all parsed styles, one line each).
+  const baseline = buildModelamaTwin(parsed, 'Modelama · Baseline (all lines)');
+  variants.push({
+    name: `Baseline · ${parsed.length} lines`,
+    notes:
+      `All ${parsed.length} Modelama styles on parallel PBS lines. ` +
+      `Run Sim to capture KPIs, then compare against the swap variants below.`,
+    twin: baseline.twin,
+    spotlightKey: spotKey,
+  });
+
+  // One scenario per base style being REPLACED by the spotlight at its slot.
+  // The resulting twin keeps the same line-count as the original Modelama
+  // factory (= `baseStyles.length`), but one slot is swapped.
+  for (let i = 0; i < baseStyles.length; i++) {
+    const dropped = baseStyles[i];
+    const swapped: ParsedModelamaStyle[] = baseStyles.map((s, j) =>
+      j === i ? spotlight : s,
+    );
+    const lineLetter = String.fromCharCode(65 + i); // A, B, C, D…
+    const factoryName = `Modelama · Line ${lineLetter} → ${spotlight.style.label}`;
+    const built = buildModelamaTwin(swapped, factoryName);
+    variants.push({
+      name: `Swap Line ${lineLetter} → ${stripLabelTail(spotlight.style.label)}`,
+      notes:
+        `Drops "${dropped.style.label}" from Line ${lineLetter} and runs ` +
+        `"${spotlight.style.label}" in its place. Floor keeps ${baseStyles.length} lines.`,
+      twin: built.twin,
+      spotlightKey: spotKey,
+    });
+  }
+
+  return variants;
+}
+
+/** Trim the "· 100230638" trailing identifier off a style label so it
+ *  fits in a scenario-card title. Keeps the human-readable garment name. */
+function stripLabelTail(label: string): string {
+  const i = label.indexOf(' · ');
+  return i > 0 ? label.slice(0, i) : label;
 }
 
 // ── Helpers ───────────────────────────────────────────────────────────────
