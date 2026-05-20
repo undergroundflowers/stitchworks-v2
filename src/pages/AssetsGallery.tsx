@@ -10,13 +10,14 @@
  * customWorkers / customProducts` and can be deleted outright.
  */
 
-import { useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import { useMemo, useRef, useState, type CSSProperties, type ReactNode } from 'react';
 import { SectionHeader, Tag, ToggleGroup, Button, HudSelect } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_SHADOWS } from '../design/tokens';
 import {
   WorkstationSprite,
   WorkerSprite,
   ProductSprite,
+  IsoMiniPreview,
   PRODUCT_KINDS,
   type WorkerSpriteStyle,
   type ProductKind,
@@ -161,9 +162,23 @@ function WorkstationsTab({
     return map;
   }, [machines.all]); // eslint-disable-line react-hooks/exhaustive-deps
 
+  const restoreMachine = useProject((s) => s.restoreMachine);
+
   return (
     <>
       <ToolbarRow onNew={onNew} newLabel="+ New workstation" />
+      <RestoreTray
+        label="workstations"
+        items={machines.hidden}
+        getId={(m) => m.code}
+        getLabel={(m) => `${m.code} · ${m.shortName}`}
+        onRestore={restoreMachine}
+        renderThumb={(m) =>
+          m.customImage
+            ? <img src={m.customImage} alt="" style={{ width: 24, height: 24, objectFit: 'contain' }} />
+            : <WorkstationSprite code={(('baseSprite' in m && m.baseSprite) ? m.baseSprite : (m.code as MachineCode))} size={24} state="idle" />
+        }
+      />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
         {[...groups, { label: 'Custom', cats: [] as MachineCategory[] }]
           .filter((g) => (groupedByCat.get(g.label)?.length ?? 0) > 0)
@@ -229,8 +244,80 @@ function MachineCard({
       onMouseLeave={(e) => { e.currentTarget.style.boxShadow = SW_SHADOWS.card; }}
     >
       <BadgeRow isCustom={isCustom} isEdited={isEdited} />
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 110, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, marginBottom: 10 }}>
-        <WorkstationSprite code={renderable as MachineCode} size={88} state="running" />
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: 6,
+          height: 110,
+          background: SW_COLORS.paperDeep,
+          borderRadius: SW_RADIUS.sm,
+          marginBottom: 10,
+          padding: 6,
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: SW_COLORS.paper,
+            borderRadius: 4,
+            border: `1px solid ${SW_COLORS.line}`,
+            position: 'relative',
+            overflow: 'hidden',
+          }}
+          title={spec.customImage ? 'Uploaded image' : 'Top-down sprite used in floor diagrams'}
+        >
+          {spec.customImage ? (
+            <img
+              src={spec.customImage}
+              alt={spec.label}
+              style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 6 }}
+            />
+          ) : (
+            <WorkstationSprite code={renderable as MachineCode} size={72} state="running" />
+          )}
+          <span
+            style={{
+              position: 'absolute',
+              top: 3,
+              left: 4,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 8,
+              fontWeight: 800,
+              color: SW_COLORS.muted,
+              letterSpacing: '0.06em',
+            }}
+          >
+            {spec.customImage ? 'IMG' : '2D'}
+          </span>
+        </div>
+        <div
+          style={{ position: 'relative' }}
+          title="Same block the Builder drops on the floor"
+        >
+          <IsoMiniPreview
+            machineCode={renderable}
+            size={94}
+            background={SW_COLORS.paper}
+            style={{ width: '100%', height: '100%' }}
+          />
+          <span
+            style={{
+              position: 'absolute',
+              top: 3,
+              left: 4,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 8,
+              fontWeight: 800,
+              color: SW_COLORS.muted,
+              letterSpacing: '0.06em',
+            }}
+          >
+            BUILDER
+          </span>
+        </div>
       </div>
       <div style={{ display: 'flex', alignItems: 'center', gap: 6, marginBottom: 4, flexWrap: 'wrap', minWidth: 0 }}>
         <Tag color={spec.color}>{spec.code}</Tag>
@@ -257,6 +344,7 @@ function WorkersTab({
   onNew: () => void;
 }) {
   const workers = useWorkers();
+  const restoreWorker = useProject((s) => s.restoreWorker);
   const [style, setStyle] = useState<WorkerSpriteStyle>('chibi');
   return (
     <>
@@ -275,6 +363,18 @@ function WorkersTab({
         </div>
         <Button variant="primary" size="sm" onClick={onNew}>+ New worker role</Button>
       </div>
+      <RestoreTray
+        label="worker roles"
+        items={workers.hidden}
+        getId={(w) => w.role}
+        getLabel={(w) => w.label}
+        onRestore={restoreWorker}
+        renderThumb={(w) =>
+          w.customImage
+            ? <img src={w.customImage} alt="" style={{ width: 24, height: 24, objectFit: 'contain' }} />
+            : <WorkerSprite role={(('baseSprite' in w && w.baseSprite) ? w.baseSprite : (w.role as WorkerRole))} size={28} style={style} state="idle" />
+        }
+      />
       <div
         style={{
           display: 'grid',
@@ -336,8 +436,80 @@ function WorkerCard({
       onMouseLeave={(e) => { e.currentTarget.style.boxShadow = SW_SHADOWS.card; }}
     >
       <BadgeRow isCustom={isCustom} isEdited={isEdited} />
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 130, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, marginBottom: 10 }}>
-        <WorkerSprite role={renderable as WorkerRole} size={110} style={spriteStyle} state="busy" />
+      <div
+        style={{
+          display: 'grid',
+          gridTemplateColumns: '1fr 1fr',
+          gap: 6,
+          height: 130,
+          background: SW_COLORS.paperDeep,
+          borderRadius: SW_RADIUS.sm,
+          marginBottom: 10,
+          padding: 6,
+        }}
+      >
+        <div
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: SW_COLORS.paper,
+            borderRadius: 4,
+            border: `1px solid ${SW_COLORS.line}`,
+            position: 'relative',
+            overflow: 'hidden',
+          }}
+          title={spec.customImage ? 'Uploaded image' : 'Front-facing chibi avatar'}
+        >
+          {spec.customImage ? (
+            <img
+              src={spec.customImage}
+              alt={spec.label}
+              style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 6 }}
+            />
+          ) : (
+            <WorkerSprite role={renderable as WorkerRole} size={104} style={spriteStyle} state="busy" />
+          )}
+          <span
+            style={{
+              position: 'absolute',
+              top: 3,
+              left: 4,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 8,
+              fontWeight: 800,
+              color: SW_COLORS.muted,
+              letterSpacing: '0.06em',
+            }}
+          >
+            {spec.customImage ? 'IMG' : 'FACE'}
+          </span>
+        </div>
+        <div
+          style={{ position: 'relative' }}
+          title="Iso operator block — the one placed on the Builder floor"
+        >
+          <IsoMiniPreview
+            workerRole={renderable}
+            size={120}
+            background={SW_COLORS.paper}
+            style={{ width: '100%', height: '100%' }}
+          />
+          <span
+            style={{
+              position: 'absolute',
+              top: 3,
+              left: 4,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 8,
+              fontWeight: 800,
+              color: SW_COLORS.muted,
+              letterSpacing: '0.06em',
+            }}
+          >
+            BUILDER
+          </span>
+        </div>
       </div>
       <div style={{ fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: SW_COLORS.ink, marginBottom: 4 }}>{spec.label}</div>
       <div style={{ fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4, minHeight: 30 }}>{spec.description}</div>
@@ -371,16 +543,32 @@ function ProductsTab({
     ];
     const out: { label: string; items: EffectiveProduct[] }[] = builtInGroups.map((g) => ({
       label: g.label,
-      items: g.kinds.map((k) => products.byKind[k]).filter(Boolean),
+      items: g.kinds
+        .map((k) => products.byKind[k])
+        .filter((p): p is EffectiveProduct => !!p && !products.isHidden(p.kind)),
     }));
     const customs = products.all.filter((p) => p.isCustom);
     if (customs.length) out.push({ label: 'Custom', items: customs });
     return out;
   }, [products]);
 
+  const restoreProduct = useProject((s) => s.restoreProduct);
+
   return (
     <>
       <ToolbarRow onNew={onNew} newLabel="+ New product" />
+      <RestoreTray
+        label="products"
+        items={products.hidden}
+        getId={(p) => p.kind}
+        getLabel={(p) => p.label}
+        onRestore={restoreProduct}
+        renderThumb={(p) =>
+          p.customImage
+            ? <img src={p.customImage} alt="" style={{ width: 24, height: 24, objectFit: 'contain' }} />
+            : <ProductSprite kind={p.baseSprite} size={28} color={p.color} />
+        }
+      />
       <div style={{ display: 'flex', flexDirection: 'column', gap: 24 }}>
         {groups.map((g) => (
           <div key={g.label}>
@@ -426,14 +614,34 @@ function ProductCard({ spec, onClick }: { spec: EffectiveProduct; onClick: () =>
       onMouseEnter={(e) => { e.currentTarget.style.boxShadow = SW_SHADOWS.pop; }}
       onMouseLeave={(e) => { e.currentTarget.style.boxShadow = SW_SHADOWS.card; }}
     >
-      <BadgeRow isCustom={spec.isCustom} isEdited={false} />
-      <div style={{ display: 'flex', alignItems: 'center', justifyContent: 'center', height: 120, background: SW_COLORS.paperDeep, borderRadius: SW_RADIUS.sm, marginBottom: 10 }}>
-        <ProductSprite
-          kind={spec.baseSprite}
-          size={92}
-          color={spec.color}
-          count={spec.baseSprite === 'bundle' ? 30 : spec.baseSprite === 'carton' ? 24 : undefined}
-        />
+      <BadgeRow isCustom={spec.isCustom} isEdited={!!spec.hasEdit} />
+      <div
+        style={{
+          display: 'flex',
+          alignItems: 'center',
+          justifyContent: 'center',
+          height: 120,
+          background: SW_COLORS.paperDeep,
+          borderRadius: SW_RADIUS.sm,
+          marginBottom: 10,
+          overflow: 'hidden',
+          position: 'relative',
+        }}
+      >
+        {spec.customImage ? (
+          <img
+            src={spec.customImage}
+            alt={spec.label}
+            style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 8 }}
+          />
+        ) : (
+          <ProductSprite
+            kind={spec.baseSprite}
+            size={92}
+            color={spec.color}
+            count={spec.baseSprite === 'bundle' ? 30 : spec.baseSprite === 'carton' ? 24 : undefined}
+          />
+        )}
       </div>
       <div style={{ fontFamily: SW_FONTS.body, fontSize: 13, fontWeight: 700, color: SW_COLORS.ink }}>{spec.label}</div>
       <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, marginTop: 4 }}>{spec.kind}</div>
@@ -493,7 +701,8 @@ function MachineEditor({ code, onClose }: { code: string; onClose: () => void })
   const patchMachine = useProject((s) => s.patchMachine);
   const resetMachine = useProject((s) => s.resetMachine);
   const patchCustomMachine = useProject((s) => s.patchCustomMachine);
-  const removeCustomMachine = useProject((s) => s.removeCustomMachine);
+  const deleteMachine = useProject((s) => s.deleteMachine);
+  const setMachineImage = useProject((s) => s.setMachineImage);
 
   if (!spec) return <DrawerHeader title="Workstation" subtitle="Not found" onClose={onClose} />;
 
@@ -509,14 +718,23 @@ function MachineEditor({ code, onClose }: { code: string; onClose: () => void })
         subtitle={isCustom ? 'Custom workstation' : isEdited ? 'Built-in · edited' : 'Built-in workstation'}
         onClose={onClose}
         right={
-          isCustom ? (
-            <Button variant="danger" size="sm" onClick={() => { removeCustomMachine(code); onClose(); }}>Delete</Button>
-          ) : isEdited ? (
-            <Button variant="ghost" size="sm" onClick={() => resetMachine(code)}>Reset</Button>
-          ) : null
+          <div style={{ display: 'flex', gap: 6 }}>
+            {!isCustom && isEdited && (
+              <Button variant="ghost" size="sm" onClick={() => resetMachine(code)}>Reset</Button>
+            )}
+            <Button variant="danger" size="sm" onClick={() => { deleteMachine(code); onClose(); }}>Delete</Button>
+          </div>
         }
       />
       <DrawerScroll>
+        <Section label="Image">
+          <ImageDropZone
+            value={spec.customImage}
+            onChange={(url) => setMachineImage(code, url)}
+            fallback={<WorkstationSprite code={(('baseSprite' in spec && spec.baseSprite) ? spec.baseSprite : (spec.code as MachineCode))} size={64} state="running" />}
+          />
+        </Section>
+
         <Section label="Identity">
           <Field label="Code">
             <TextInput value={spec.code} disabled />
@@ -603,7 +821,8 @@ function WorkerEditor({ role, onClose }: { role: string; onClose: () => void }) 
   const patchWorker = useProject((s) => s.patchWorker);
   const resetWorker = useProject((s) => s.resetWorker);
   const patchCustomWorker = useProject((s) => s.patchCustomWorker);
-  const removeCustomWorker = useProject((s) => s.removeCustomWorker);
+  const deleteWorker = useProject((s) => s.deleteWorker);
+  const setWorkerImage = useProject((s) => s.setWorkerImage);
 
   if (!spec) return <DrawerHeader title="Worker" subtitle="Not found" onClose={onClose} />;
 
@@ -618,6 +837,9 @@ function WorkerEditor({ role, onClose }: { role: string; onClose: () => void }) 
     apply({ [pool]: next } as Partial<EffectiveWorker>);
   };
 
+  const renderableRole: WorkerRole =
+    ('baseSprite' in spec && spec.baseSprite ? spec.baseSprite : (spec.role as WorkerRole));
+
   return (
     <>
       <DrawerHeader
@@ -625,14 +847,23 @@ function WorkerEditor({ role, onClose }: { role: string; onClose: () => void }) 
         subtitle={isCustom ? 'Custom worker role' : isEdited ? 'Built-in · edited' : 'Built-in worker role'}
         onClose={onClose}
         right={
-          isCustom ? (
-            <Button variant="danger" size="sm" onClick={() => { removeCustomWorker(role); onClose(); }}>Delete</Button>
-          ) : isEdited ? (
-            <Button variant="ghost" size="sm" onClick={() => resetWorker(role)}>Reset</Button>
-          ) : null
+          <div style={{ display: 'flex', gap: 6 }}>
+            {!isCustom && isEdited && (
+              <Button variant="ghost" size="sm" onClick={() => resetWorker(role)}>Reset</Button>
+            )}
+            <Button variant="danger" size="sm" onClick={() => { deleteWorker(role); onClose(); }}>Delete</Button>
+          </div>
         }
       />
       <DrawerScroll>
+        <Section label="Image">
+          <ImageDropZone
+            value={spec.customImage}
+            onChange={(url) => setWorkerImage(role, url)}
+            fallback={<WorkerSprite role={renderableRole} size={64} style="chibi" state="busy" />}
+          />
+        </Section>
+
         <Section label="Identity">
           <Field label="Role id">
             <TextInput value={spec.role} disabled />
@@ -690,66 +921,85 @@ function ProductEditor({ productKey, onClose }: { productKey: string; onClose: (
   const products = useProducts();
   const spec = products.byKind[productKey];
   const isCustom = products.isCustom(productKey);
+  const isEdited = products.hasEdit(productKey);
 
   const patchCustomProduct = useProject((s) => s.patchCustomProduct);
-  const removeCustomProduct = useProject((s) => s.removeCustomProduct);
+  const patchProduct = useProject((s) => s.patchProduct);
+  const resetProduct = useProject((s) => s.resetProduct);
+  const deleteProduct = useProject((s) => s.deleteProduct);
+  const setProductImage = useProject((s) => s.setProductImage);
 
   if (!spec) return <DrawerHeader title="Product" subtitle="Not found" onClose={onClose} />;
+
+  const setLabel = (v: string) => {
+    if (isCustom) patchCustomProduct(productKey, { label: v });
+    else patchProduct(productKey, { label: v });
+  };
+  const setDescription = (v: string) => {
+    if (isCustom) patchCustomProduct(productKey, { description: v });
+    else patchProduct(productKey, { description: v });
+  };
+  const setBaseSprite = (v: ProductKind) => {
+    if (isCustom) patchCustomProduct(productKey, { baseSprite: v });
+    else patchProduct(productKey, { baseSprite: v });
+  };
+  const setColor = (c: string) => {
+    if (isCustom) patchCustomProduct(productKey, { color: c });
+    else patchProduct(productKey, { color: c });
+  };
 
   return (
     <>
       <DrawerHeader
         title={spec.label}
-        subtitle={isCustom ? 'Custom product' : 'Built-in product · read-only'}
+        subtitle={isCustom ? 'Custom product' : isEdited ? 'Built-in · edited' : 'Built-in product'}
         onClose={onClose}
         right={
-          isCustom ? (
-            <Button variant="danger" size="sm" onClick={() => { removeCustomProduct(productKey); onClose(); }}>Delete</Button>
-          ) : null
+          <div style={{ display: 'flex', gap: 6 }}>
+            {!isCustom && isEdited && (
+              <Button variant="ghost" size="sm" onClick={() => resetProduct(productKey)}>Reset</Button>
+            )}
+            <Button variant="danger" size="sm" onClick={() => { deleteProduct(productKey); onClose(); }}>Delete</Button>
+          </div>
         }
       />
       <DrawerScroll>
+        <Section label="Image">
+          <ImageDropZone
+            value={spec.customImage}
+            onChange={(url) => setProductImage(productKey, url)}
+            fallback={<ProductSprite kind={spec.baseSprite} size={64} color={spec.color} />}
+          />
+        </Section>
         <Section label="Identity">
           <Field label="Kind id">
             <TextInput value={spec.kind} disabled />
           </Field>
           <Field label="Label">
-            <TextInput
-              value={spec.label}
-              onChange={(v) => isCustom && patchCustomProduct(productKey, { label: v })}
-              disabled={!isCustom}
+            <TextInput value={spec.label} onChange={setLabel} />
+          </Field>
+          <Field label="Description">
+            <TextArea
+              value={spec.description ?? ''}
+              onChange={setDescription}
             />
           </Field>
-          {isCustom && (
-            <Field label="Description">
-              <TextArea
-                value={spec.description ?? ''}
-                onChange={(v) => patchCustomProduct(productKey, { description: v })}
-              />
-            </Field>
-          )}
         </Section>
         <Section label="Appearance">
           <Field label="Base sprite">
             <Select
               value={spec.baseSprite}
-              onChange={(v) => isCustom && patchCustomProduct(productKey, { baseSprite: v as ProductKind })}
-              disabled={!isCustom}
+              onChange={(v) => setBaseSprite(v as ProductKind)}
               options={PRODUCT_KINDS.map((k) => ({ value: k, label: k }))}
             />
           </Field>
-          <Field label="Accent colour (custom only)">
+          <Field label="Accent colour">
             <ColorPicker
               value={spec.color ?? '#999999'}
-              onChange={(c) => isCustom && patchCustomProduct(productKey, { color: c })}
+              onChange={setColor}
             />
           </Field>
         </Section>
-        {!isCustom && (
-          <div style={{ padding: '0 18px 18px', fontSize: 12, color: SW_COLORS.muted, lineHeight: 1.5 }}>
-            Built-in products are hand-drawn SVG sprites and aren't tunable from the library. Create a custom product to remix the sprite with your own label and colour.
-          </div>
-        )}
       </DrawerScroll>
     </>
   );
@@ -1275,6 +1525,152 @@ function SkillGrid({ selected, onToggle }: { selected: SkillId[]; onToggle: (s: 
           </button>
         );
       })}
+    </div>
+  );
+}
+
+// ── Image upload control ─────────────────────────────────────────────────
+const MAX_IMAGE_BYTES = 1_500_000; // ~1.5 MB raw; resists data-URL bloat
+const IMAGE_PREVIEW_BG: CSSProperties = {
+  display: 'flex',
+  alignItems: 'center',
+  justifyContent: 'center',
+  background: SW_COLORS.paperDeep,
+  borderRadius: SW_RADIUS.sm,
+  border: `1px dashed ${SW_COLORS.line}`,
+  height: 120,
+  overflow: 'hidden',
+};
+
+function ImageDropZone({
+  value,
+  onChange,
+  fallback,
+}: {
+  value: string | undefined;
+  onChange: (dataUrl: string | null) => void;
+  fallback: ReactNode;
+}) {
+  const inputRef = useRef<HTMLInputElement | null>(null);
+  const [err, setErr] = useState<string | null>(null);
+
+  const pick = () => inputRef.current?.click();
+  const onFile = (f: File | undefined) => {
+    setErr(null);
+    if (!f) return;
+    if (!f.type.startsWith('image/')) return setErr('Please pick an image file.');
+    if (f.size > MAX_IMAGE_BYTES) return setErr(`Image is too large (${Math.round(f.size / 1024)} KB). Keep under ${Math.round(MAX_IMAGE_BYTES / 1024)} KB.`);
+    const r = new FileReader();
+    r.onload = () => onChange(typeof r.result === 'string' ? r.result : null);
+    r.onerror = () => setErr('Could not read the file.');
+    r.readAsDataURL(f);
+  };
+
+  return (
+    <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
+      <div
+        style={IMAGE_PREVIEW_BG}
+        onDragOver={(e) => { e.preventDefault(); }}
+        onDrop={(e) => {
+          e.preventDefault();
+          onFile(e.dataTransfer.files?.[0]);
+        }}
+      >
+        {value ? (
+          <img
+            src={value}
+            alt="Uploaded preview"
+            style={{ width: '100%', height: '100%', objectFit: 'contain', padding: 8 }}
+          />
+        ) : (
+          <div style={{ display: 'flex', flexDirection: 'column', alignItems: 'center', gap: 6, color: SW_COLORS.muted, fontSize: 11 }}>
+            {fallback}
+            <span>Drop an image or click Upload</span>
+          </div>
+        )}
+      </div>
+      <input
+        ref={inputRef}
+        type="file"
+        accept="image/*"
+        style={{ display: 'none' }}
+        onChange={(e) => onFile(e.target.files?.[0] ?? undefined)}
+      />
+      <div style={{ display: 'flex', gap: 8 }}>
+        <Button variant="ghost" size="sm" onClick={pick}>{value ? 'Replace image' : 'Upload image'}</Button>
+        {value && (
+          <Button variant="ghost" size="sm" onClick={() => onChange(null)}>Remove</Button>
+        )}
+      </div>
+      {err && <div style={{ fontSize: 11, color: SW_COLORS.alarm }}>{err}</div>}
+      {!err && (
+        <div style={{ fontSize: 10, color: SW_COLORS.muted, lineHeight: 1.4 }}>
+          PNG / JPG / SVG up to {Math.round(MAX_IMAGE_BYTES / 1024)} KB. Uploaded images replace the card preview; the Builder still draws the 3D iso block from the underlying spec.
+        </div>
+      )}
+    </div>
+  );
+}
+
+// ── Restore tray for hidden built-ins ────────────────────────────────────
+function RestoreTray<T extends { customImage?: string }>({
+  label,
+  items,
+  getId,
+  getLabel,
+  onRestore,
+  renderThumb,
+}: {
+  label: string;
+  items: T[];
+  getId: (item: T) => string;
+  getLabel: (item: T) => string;
+  onRestore: (id: string) => void;
+  renderThumb: (item: T) => ReactNode;
+}) {
+  const [open, setOpen] = useState(false);
+  if (items.length === 0) return null;
+  return (
+    <div style={{ marginBottom: 14, border: `1px dashed ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, background: SW_COLORS.paperDeep }}>
+      <button
+        type="button"
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          width: '100%', textAlign: 'left',
+          padding: '8px 12px',
+          background: 'transparent',
+          border: 'none', cursor: 'pointer',
+          fontFamily: SW_FONTS.mono, fontSize: 11, fontWeight: 700,
+          color: SW_COLORS.muted, letterSpacing: 1.2, textTransform: 'uppercase',
+          display: 'flex', alignItems: 'center', justifyContent: 'space-between',
+        }}
+      >
+        <span>{items.length} hidden {label}</span>
+        <span>{open ? '−' : '+'}</span>
+      </button>
+      {open && (
+        <div style={{ padding: '4px 12px 12px', display: 'flex', flexWrap: 'wrap', gap: 8 }}>
+          {items.map((it) => {
+            const id = getId(it);
+            return (
+              <div
+                key={id}
+                style={{
+                  display: 'flex', alignItems: 'center', gap: 8,
+                  padding: '6px 10px',
+                  background: SW_COLORS.paper,
+                  border: `1px solid ${SW_COLORS.line}`,
+                  borderRadius: SW_RADIUS.sm,
+                }}
+              >
+                <div style={{ width: 28, height: 28, display: 'flex', alignItems: 'center', justifyContent: 'center' }}>{renderThumb(it)}</div>
+                <span style={{ fontSize: 12, color: SW_COLORS.ink }}>{getLabel(it)}</span>
+                <Button variant="ghost" size="sm" onClick={() => onRestore(id)}>Restore</Button>
+              </div>
+            );
+          })}
+        </div>
+      )}
     </div>
   );
 }

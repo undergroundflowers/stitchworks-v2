@@ -8,6 +8,7 @@ export {
   PRODUCT_GROUPS,
   type ProductKind,
 } from './products';
+export { IsoMiniPreview } from './iso-preview';
 
 /** Loose-typed product sprite used by the asset library so user-authored
  *  product kinds (string ids) can still be rendered by piggy-backing on a

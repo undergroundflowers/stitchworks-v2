@@ -5,6 +5,7 @@
  */
 
 import type { Operation } from './operations';
+import type { ProductionSystem } from './routings';
 
 /** Total SAM (sum of operation SMVs) for a bulletin. */
 export function totalSam(ops: Operation[]): number {
@@ -25,29 +26,49 @@ export function lineEfficiency(opts: {
   return denom > 0 ? ((opts.producedPieces * opts.sam) / denom) * 100 : 0;
 }
 
+/** A station row may either be a bare SMV (current callers) or a tuple
+ *  carrying an explicit `shareFrac` so the balance math can inflate the
+ *  effective load when one operator covers N stations. Same rule the PML
+ *  engine uses: effective SMV = nominal / shareFrac. */
+export type StationLoad = number | { smv: number; shareFrac?: number };
+
+function effectiveSmvForBalance(s: StationLoad): number {
+  if (typeof s === 'number') return s;
+  const sf = s.shareFrac ?? 1;
+  return sf > 0 && sf < 1 ? s.smv / sf : s.smv;
+}
+
 /**
  * Balance loss % = (Σ(longestStation - station_i) / (operators × longestStation)) × 100
  * Captures how much idle time the line carries because of an unbalanced bulletin.
  * 0% = perfectly balanced, no slack. >25% is generally considered poor.
+ *
+ * When a station row carries `shareFrac < 1`, its SMV is inflated by
+ * 1/shareFrac before the max is taken — matches engine cycle inflation so
+ * the balance KPI doesn't claim "well-balanced" while one operator covers
+ * two stations at half-time each.
  */
-export function balanceLoss(stationSmvs: number[]): number {
+export function balanceLoss(stationSmvs: StationLoad[]): number {
   if (stationSmvs.length === 0) return 0;
-  const longest = Math.max(...stationSmvs);
+  const effs = stationSmvs.map(effectiveSmvForBalance);
+  const longest = Math.max(...effs);
   if (longest === 0) return 0;
-  const idleSum = stationSmvs.reduce((s, v) => s + (longest - v), 0);
-  return (idleSum / (stationSmvs.length * longest)) * 100;
+  const idleSum = effs.reduce((s, v) => s + (longest - v), 0);
+  return (idleSum / (effs.length * longest)) * 100;
 }
 
 /**
  * Line balance ratio (LBR) % = (sumOfStationSmvs / (longestStation × operators)) × 100
- * The complement of balance loss; sometimes reported instead.
+ * The complement of balance loss; sometimes reported instead. Same shareFrac
+ * inflation rule as `balanceLoss`.
  */
-export function lineBalanceRatio(stationSmvs: number[]): number {
+export function lineBalanceRatio(stationSmvs: StationLoad[]): number {
   if (stationSmvs.length === 0) return 0;
-  const longest = Math.max(...stationSmvs);
+  const effs = stationSmvs.map(effectiveSmvForBalance);
+  const longest = Math.max(...effs);
   if (longest === 0) return 0;
-  const sum = stationSmvs.reduce((s, v) => s + v, 0);
-  return (sum / (stationSmvs.length * longest)) * 100;
+  const sum = effs.reduce((s, v) => s + v, 0);
+  return (sum / (effs.length * longest)) * 100;
 }
 
 /**
@@ -125,10 +146,11 @@ export function compositeLayoutScore(opts: {
  * RPW heuristic typically achieves SI in the 0.15–0.25 range on realistic
  * apparel bulletins.
  */
-export function smoothnessIndex(stationSmvs: number[], cycleTime: number): number {
+export function smoothnessIndex(stationSmvs: StationLoad[], cycleTime: number): number {
   const n = stationSmvs.length;
   if (n === 0 || cycleTime <= 0) return 0;
-  const sumSq = stationSmvs.reduce((s, t) => s + (cycleTime - t) ** 2, 0);
+  const effs = stationSmvs.map(effectiveSmvForBalance);
+  const sumSq = effs.reduce((s, t) => s + (cycleTime - t) ** 2, 0);
   return Math.sqrt(sumSq) / (cycleTime * n);
 }
 
@@ -173,6 +195,148 @@ export function labourRequired(opts: {
     (100 / opts.utilisationPct) *
     (100 / opts.bsiPct)
   );
+}
+
+/**
+ * Crew size required to staff a line under a specific production system.
+ * The `labourRequired` formula above is system-agnostic — it answers "how
+ * much labour is required to hit this demand" but doesn't reflect that
+ * different systems STAFF that labour differently:
+ *
+ *   • PBS / bundle / straight / synchro / UPS / unit_handle — fixed-station
+ *     systems, so the crew must cover every operation even when one
+ *     operator could in theory handle two short ops. Floor at opCount.
+ *   • modular / clump — multi-skilled rotation cells run lean: a 25-op
+ *     T-shirt cell typically runs with 5–8 operators, not 25. We size the
+ *     cell at ~40 % of opCount, clamped to a realistic 3–8 operator range.
+ *   • make_through — one operator owns the whole garment, so crew is
+ *     purely throughput-bound (pcs/hr × SAM/60).
+ *
+ * Returns a positive integer. Callers should pass realistic attendance /
+ * utilisation / BSI margins when computing `demandPerHour` upstream.
+ */
+export function crewSizeFor(opts: {
+  productionSystem: ProductionSystem;
+  sam: number;
+  opCount: number;
+  demandPerHour: number;
+  attendancePct?: number;
+  utilisationPct?: number;
+  bsiPct?: number;
+}): number {
+  const attendancePct = opts.attendancePct ?? 90;
+  const utilisationPct = opts.utilisationPct ?? 80;
+  const bsiPct = opts.bsiPct ?? 95;
+  const basicLabour = labourRequired({
+    sam: opts.sam,
+    demandPerHour: opts.demandPerHour,
+    attendancePct,
+    utilisationPct,
+    bsiPct,
+  });
+  switch (opts.productionSystem) {
+    case 'make_through':
+      // One operator builds the whole garment; total crew = throughput ÷
+      // per-operator output rate. With 8 h shifts this collapses to the
+      // basic labour estimate without the per-station floor.
+      return Math.max(1, Math.ceil(basicLabour));
+    case 'modular':
+    case 'clump': {
+      // Cell-based: 5–8 multi-skilled operators is the literature norm.
+      // 40 % of opCount lands a 25-op bulletin at 10 operators; we clamp
+      // to the realistic 3–8 range so the recommendation is honest about
+      // the cell size constraint.
+      const sized = Math.ceil(opts.opCount * 0.4);
+      return Math.max(3, Math.min(8, sized));
+    }
+    case 'PBS':
+    case 'bundle':
+    case 'straight':
+    case 'synchro':
+    case 'UPS':
+    case 'unit_handle':
+    default:
+      // Fixed-station: must cover every operation. If demand exceeds the
+      // 1:1 ceiling, basic labour wins — that's the multi-shift / parallel
+      // station case.
+      return Math.max(opts.opCount, Math.ceil(basicLabour));
+  }
+}
+
+/**
+ * Quick gut-check that the chosen production system fits the order's
+ * size and complexity. Returns a short, user-facing warning string when
+ * the pairing is off, or `null` when the choice is reasonable.
+ *
+ * Used by the Orders wizard's recommendation card so the user gets a
+ * concrete reason to reconsider before they ship. Not exhaustive — covers
+ * the common mismatches (too small for PBS, too complex for modular,
+ * too high-volume for make-through).
+ */
+export function systemFeasibilityHint(opts: {
+  productionSystem: ProductionSystem;
+  qty: number;
+  days: number;
+  opCount: number;
+}): { severity: 'warn' | 'error'; message: string } | null {
+  const dailyDemand = opts.qty / Math.max(1, opts.days);
+  switch (opts.productionSystem) {
+    case 'make_through':
+      // One operator per garment caps at roughly 60 pcs/day for a typical
+      // 8 min SMV top. Larger orders need a multi-station line.
+      if (dailyDemand > 100) {
+        return {
+          severity: 'warn',
+          message:
+            'Make-Through scales linearly with operators — large orders saturate the labour pool. Consider Modular or PBS for > 100 pcs/day.',
+        };
+      }
+      return null;
+    case 'modular':
+    case 'clump':
+      // Cells max out around 8 ops; 25-op garments either need a giant
+      // (un-rotatable) cell or two cells running in parallel.
+      if (opts.opCount > 12) {
+        return {
+          severity: 'warn',
+          message: `${opts.opCount} ops is large for a rotation cell — operators may not stay cross-trained on every station. Consider splitting into two cells or moving to PBS.`,
+        };
+      }
+      return null;
+    case 'PBS':
+    case 'bundle':
+      // PBS pays a setup cost in bundle ticketing + balancing. For short
+      // runs that overhead never amortises.
+      if (opts.qty < 100) {
+        return {
+          severity: 'warn',
+          message:
+            'PBS has a long setup tail (balancing, bundle tickets, line bring-up). Short runs typically suit Make-Through or Modular better.',
+        };
+      }
+      return null;
+    case 'synchro':
+      if (dailyDemand < 200) {
+        return {
+          severity: 'warn',
+          message:
+            'Synchro / takt lines need stable, high demand to keep the belt loaded. Consider Modular for variable mid-volume runs.',
+        };
+      }
+      return null;
+    case 'UPS':
+    case 'unit_handle':
+      if (opts.qty < 500) {
+        return {
+          severity: 'warn',
+          message:
+            'UPS / overhead-rail capex is hard to justify on small runs. Consider PBS or Modular.',
+        };
+      }
+      return null;
+    default:
+      return null;
+  }
 }
 
 /**
