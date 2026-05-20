@@ -665,32 +665,6 @@ export function LiveSimPage() {
         </div>
         <TimeDisplay kind="WALL" surface="dark" primarySize={12} primary={wallStr} compact />
 
-        {/* View toggle */}
-        <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
-        <div style={{ display: 'flex', gap: 2, background: '#ffffff08', padding: 2, borderRadius: 6 }}>
-          {(['iso', 'top', 'heat', 'logic', 'pml'] as const).map((v) => (
-            <button
-              key={v}
-              onClick={() => setView(v)}
-              style={{
-                background: view === v ? SW_COLORS.brand : 'transparent',
-                color: view === v ? '#fff' : '#ffffffaa',
-                border: 'none',
-                cursor: 'pointer',
-                padding: '6px 14px',
-                fontFamily: SW_FONTS.display,
-                fontSize: 10,
-                fontWeight: 900,
-                letterSpacing: '0.1em',
-                borderRadius: 4,
-              }}
-              title={v === 'pml' ? 'PML — block-graph snapshot of the active twin' : undefined}
-            >
-              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : v === 'heat' ? 'HEAT' : v === 'logic' ? 'LOGIC' : '⚙ PML'}
-            </button>
-          ))}
-        </div>
-
         <div style={{ flex: 1 }} />
 
         {/* EDIT IN BUILDER — opens a fresh, isolated Builder draft in a new
@@ -876,6 +850,50 @@ export function LiveSimPage() {
             />
           </PanZoomViewport>
         )}
+
+        {/* VIEW TOGGLE — floats over the top-center of the canvas so the
+            mode picker sits with the thing it controls (the floor) instead
+            of buried in the HUD strip. Same pill styling as before; just
+            absolutely-positioned and given a translucent backdrop so it
+            stays legible over any view. */}
+        <div
+          style={{
+            position: 'absolute',
+            top: 16,
+            left: '50%',
+            transform: 'translateX(-50%)',
+            display: 'flex',
+            gap: 2,
+            background: '#0a0d12cc',
+            border: '1px solid #ffffff20',
+            padding: 3,
+            borderRadius: 8,
+            backdropFilter: 'blur(6px)',
+            zIndex: 6,
+          }}
+        >
+          {(['iso', 'top', 'heat', 'logic', 'pml'] as const).map((v) => (
+            <button
+              key={v}
+              onClick={() => setView(v)}
+              style={{
+                background: view === v ? SW_COLORS.brand : 'transparent',
+                color: view === v ? '#fff' : '#ffffffaa',
+                border: 'none',
+                cursor: 'pointer',
+                padding: '6px 14px',
+                fontFamily: SW_FONTS.display,
+                fontSize: 10,
+                fontWeight: 900,
+                letterSpacing: '0.1em',
+                borderRadius: 4,
+              }}
+              title={v === 'pml' ? 'PML — block-graph snapshot of the active twin' : undefined}
+            >
+              {v === 'iso' ? 'ISO 3D' : v === 'top' ? 'TOP 2D' : v === 'heat' ? 'HEAT' : v === 'logic' ? 'LOGIC' : '⚙ PML'}
+            </button>
+          ))}
+        </div>
 
         {/* Legend overlay — view-aware key for every glyph on the floor. */}
         <SimLegend view={view} />
