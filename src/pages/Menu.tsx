@@ -17,7 +17,6 @@ import {
   buildModelamaTwin,
   buildModelamaScenarioVariants,
 } from '../lib/modelama-bundle';
-import type { ScenarioKpis } from '../store/project';
 
 /**
  * Splash / main menu — entry point of the app. Two-column layout:
@@ -131,25 +130,39 @@ export function MenuPage() {
         return;
       }
       // Seed line-swap scenarios so the Scenarios tab has something to
-      // compare from the moment the bundle finishes loading. KPIs start
-      // empty — the user runs Sim on each loaded scenario to fill them.
+      // compare from the moment the bundle finishes loading. Each variant
+      // ships with analytical KPIs (planned-efficiency throughput from the
+      // OB SMVs) so the comparison view shows real numbers immediately;
+      // the user can still click Load → Sim to overwrite with simulated
+      // values.
       const variants = buildModelamaScenarioVariants(parsed);
-      const zeroKpis: ScenarioKpis = {
-        producedPieces: 0,
-        throughputPerHr: 0,
-        efficiencyPct: 0,
-        meanLeadTime: 0,
-        utilization: 0,
-        wipBundles: 0,
-        bottleneckOpName: '— run Sim to populate —',
-        bottleneckQueue: 0,
-      };
+      const twinStore = useTwin.getState();
       for (const v of variants) {
         saveScenario({
           name: v.name,
           notes: v.notes,
           twin: v.twin,
-          kpis: zeroKpis,
+          garmentTemplateId: v.garmentTemplateId,
+          operators: v.operators,
+          kpis: {
+            producedPieces: v.kpis.producedPieces,
+            throughputPerHr: v.kpis.throughputPerHr,
+            efficiencyPct: v.kpis.efficiencyPct,
+            meanLeadTime: v.kpis.meanLeadTime,
+            utilization: v.kpis.utilization,
+            wipBundles: v.kpis.wipBundles,
+            bottleneckOpName: v.kpis.bottleneckOpName,
+            bottleneckQueue: v.kpis.bottleneckQueue,
+          },
+        });
+        // Also register the variant in the twin store so the Builder's
+        // scenario picker shows it from the start — without this the
+        // dropdown only sees the canonical until the user clicks Load.
+        twinStore.createScenarioFromTwin({
+          name: v.name,
+          notes: v.notes,
+          twin: v.twin,
+          activate: false,
         });
       }
       navigate('/builder');
