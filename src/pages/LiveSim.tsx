@@ -1928,12 +1928,19 @@ function PanZoomViewport({ viewKey, children }: { viewKey: string; children: Rea
         cursor: panning ? 'grabbing' : 'grab',
       }}
     >
+      {/* Sizing-based zoom (vs CSS `transform: scale`) so SVG children
+          re-render at the zoomed pixel resolution and stay vector-sharp.
+          CSS scale would rasterize the layer at 1× and stretch the bitmap,
+          which is what was causing the blur at higher zoom levels. */}
       <div
         style={{
           position: 'absolute',
-          inset: 0,
+          top: 0,
+          left: 0,
+          width: `${tf.s * 100}%`,
+          height: `${tf.s * 100}%`,
+          transform: `translate(${tf.x}px, ${tf.y}px)`,
           transformOrigin: '0 0',
-          transform: `translate(${tf.x}px, ${tf.y}px) scale(${tf.s})`,
         }}
       >
         {children}
