@@ -425,7 +425,18 @@ export interface ProjectState {
    *  When `twin` is supplied, the scenario stores a deep clone of the
    *  active factory layout so Load can restore it side-by-side with
    *  the per-garment config. */
-  saveScenario: (input: { name: string; notes?: string; kpis: ScenarioKpis; twin?: Twin }) => Scenario;
+  saveScenario: (input: {
+    name: string;
+    notes?: string;
+    kpis: ScenarioKpis;
+    twin?: Twin;
+    /** Override the captured garmentTemplateId — e.g. when seeding
+     *  bundle scenarios where the live `selectedGarmentId` isn't what
+     *  the scenario card should display. */
+    garmentTemplateId?: string;
+    /** Override the captured operator count for the same reason. */
+    operators?: number;
+  }) => Scenario;
   /** Remove a scenario by id. */
   deleteScenario: (id: string) => void;
   /** Rename a scenario in place. */
@@ -798,17 +809,23 @@ export const useProject = create<ProjectState>()(
       saveScenario: (input) => {
         const cur = get();
         const id = `scn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
+        const garmentTemplateId = input.garmentTemplateId ?? cur.selectedGarmentId;
+        const operators = input.operators ?? cur.defaultOperators;
+        // When the caller overrides garmentTemplateId, look up yamazumi
+        // against that key — falling back to none when there's no override
+        // saved for the new garment.
+        const yamSource = cur.yamazumiOverrides[garmentTemplateId];
         const scenario: Scenario = {
           id,
           name: input.name || `Scenario ${cur.scenarios.length + 1}`,
           notes: input.notes,
           createdAt: new Date().toISOString(),
           config: {
-            garmentTemplateId: cur.selectedGarmentId,
-            operators: cur.defaultOperators,
+            garmentTemplateId,
+            operators,
             skillMatrix: JSON.parse(JSON.stringify(cur.skillMatrix)) as SkillMatrix,
-            yamazumiOverride: cur.yamazumiOverrides[cur.selectedGarmentId]
-              ? JSON.parse(JSON.stringify(cur.yamazumiOverrides[cur.selectedGarmentId])) as YamazumiAssignment[]
+            yamazumiOverride: yamSource
+              ? JSON.parse(JSON.stringify(yamSource)) as YamazumiAssignment[]
               : undefined,
             twin: input.twin ? (JSON.parse(JSON.stringify(input.twin)) as Twin) : undefined,
           },

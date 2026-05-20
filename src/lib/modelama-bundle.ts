@@ -586,12 +586,114 @@ export function buildModelamaTwin(
 
 // ── Scenario variants ─────────────────────────────────────────────────────
 
+/**
+ * Lightweight ScenarioKpis shape — kept in sync with the project store but
+ * declared here to avoid a circular import. Only the fields seeded at
+ * bundle-load time are listed; the store fills the rest as `undefined`.
+ */
+export interface SeededScenarioKpis {
+  producedPieces: number;
+  throughputPerHr: number;
+  efficiencyPct: number;
+  meanLeadTime: number;
+  utilization: number;
+  wipBundles: number;
+  bottleneckOpName: string;
+  bottleneckQueue: number;
+}
+
 export interface ModelamaScenarioVariant {
   name: string;
   notes: string;
   twin: Twin;
+  /** Garment template id to display on the scenario card (resolves to a
+   *  human-readable label via the garments registry). For swap variants
+   *  this is the spotlight garment so the card reflects what changed. */
+  garmentTemplateId: string;
+  /** Operator headcount for the scenario card — sum across all lines in
+   *  the variant twin. */
+  operators: number;
   /** Style key the scenario isolates / promotes. */
   spotlightKey: string;
+  /** Analytical KPIs derived from the twin's SMVs + station counts so the
+   *  Scenarios comparison shows meaningful numbers before any sim run. */
+  kpis: SeededScenarioKpis;
+}
+
+/**
+ * Compute a planned-efficiency throughput estimate for a built twin. Treats
+ * each sewing line as PBS-balanced and uses the per-line bottleneck SMV +
+ * the OB planned efficiency (60%) to derive realistic-looking KPIs without
+ * running the discrete-event sim. Used to pre-fill scenario cards so the
+ * comparison view has data immediately.
+ */
+export function estimateTwinKpis(
+  twin: Twin,
+  plannedEfficiency: number = 0.6,
+): SeededScenarioKpis {
+  const shiftMin = 480;
+  // Index workstations by line, ignoring the source/sink/pool blocks
+  // (their block.kind is not 'Service' so they don't carry an SMV).
+  const stationsByLine = new Map<string, Workstation[]>();
+  for (const ws of twin.workstations) {
+    if (!ws.lineId) continue;
+    if (ws.block?.kind !== 'Service') continue;
+    const arr = stationsByLine.get(ws.lineId) ?? [];
+    arr.push(ws);
+    stationsByLine.set(ws.lineId, arr);
+  }
+
+  let totalThroughputPerHr = 0;
+  let slowestLineSmv = 0;
+  let slowestLineName = '—';
+  for (const [lineId, stations] of stationsByLine.entries()) {
+    if (stations.length === 0) continue;
+    // Bottleneck SMV for this line = max effective per-server cycle time.
+    // With c parallel servers, each op's effective cycle is smv / c, so a
+    // 0.6-SMV op with 2 servers limits the line at 0.3 min/pc.
+    let lineBottleneck = 0;
+    let bottleneckLabel = '';
+    // Group servers per opId so duplicated stations share their c.
+    const serversByOp = new Map<string, { count: number; smv: number; name: string }>();
+    for (const ws of stations) {
+      const opId = ws.operation.opId ?? `ws-${ws.id}`;
+      const smv = ws.block?.params?.cycleDist?.mode ?? (ws.block?.params?.cycleS ?? 60) / 60;
+      const row = serversByOp.get(opId) ?? { count: 0, smv, name: ws.name };
+      row.count += 1;
+      serversByOp.set(opId, row);
+    }
+    for (const [, row] of serversByOp.entries()) {
+      const effective = row.smv / row.count;
+      if (effective > lineBottleneck) {
+        lineBottleneck = effective;
+        bottleneckLabel = `${row.name} (${row.smv.toFixed(2)} min × ${row.count})`;
+      }
+    }
+    if (lineBottleneck <= 0) continue;
+    const linePphAt100 = 60 / lineBottleneck;
+    totalThroughputPerHr += linePphAt100 * plannedEfficiency;
+    if (lineBottleneck > slowestLineSmv) {
+      slowestLineSmv = lineBottleneck;
+      const lineName = twin.lines.find((l) => l.id === lineId)?.name ?? lineId;
+      slowestLineName = `${lineName} → ${bottleneckLabel}`;
+    }
+  }
+
+  const throughputPerHr = totalThroughputPerHr;
+  const producedPieces = Math.round(throughputPerHr * (shiftMin / 60));
+  // Mean lead time = bundle traverse through the slowest line's bottleneck
+  // ≈ bundleSize × bottleneckSmv. Rough but useful for ranking variants.
+  const meanLeadTime = Math.round(slowestLineSmv * 20 * 10) / 10; // bundle 20 pcs
+  return {
+    producedPieces,
+    throughputPerHr: Math.round(throughputPerHr * 10) / 10,
+    efficiencyPct: Math.round(plannedEfficiency * 100),
+    meanLeadTime,
+    utilization: Math.round(plannedEfficiency * 100),
+    wipBundles: stationsByLine.size, // ~1 bundle per line in steady state
+    bottleneckOpName: slowestLineName,
+    bottleneckQueue: 0,
+  };
 }
 
 /**
@@ -629,9 +731,12 @@ export function buildModelamaScenarioVariants(
     name: `Baseline · ${parsed.length} lines`,
     notes:
       `All ${parsed.length} Modelama styles on parallel PBS lines. ` +
-      `Run Sim to capture KPIs, then compare against the swap variants below.`,
+      `Baseline for the swap comparisons below.`,
     twin: baseline.twin,
+    garmentTemplateId: spotlight.garment.garment.id,
+    operators: countPrimaryOperators(baseline.twin),
     spotlightKey: spotKey,
+    kpis: estimateTwinKpis(baseline.twin),
   });
 
   // One scenario per base style being REPLACED by the spotlight at its slot.
@@ -651,11 +756,20 @@ export function buildModelamaScenarioVariants(
         `Drops "${dropped.style.label}" from Line ${lineLetter} and runs ` +
         `"${spotlight.style.label}" in its place. Floor keeps ${baseStyles.length} lines.`,
       twin: built.twin,
+      garmentTemplateId: spotlight.garment.garment.id,
+      operators: countPrimaryOperators(built.twin),
       spotlightKey: spotKey,
+      kpis: estimateTwinKpis(built.twin),
     });
   }
 
   return variants;
+}
+
+/** Sum of primary-role assignments on a built twin — i.e. distinct
+ *  operators the line is staffed for. */
+function countPrimaryOperators(twin: Twin): number {
+  return (twin.assignments ?? []).filter((a) => a.role === 'primary').length;
 }
 
 /** Trim the "· 100230638" trailing identifier off a style label so it
