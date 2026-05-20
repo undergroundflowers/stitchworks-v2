@@ -41,6 +41,15 @@ export interface ImportedStation {
   catalogId: string;
   /** Aisle side. 'L' = top facing row, 'R' = bottom facing row. */
   side: 'L' | 'R';
+  /**
+   * 0-based index of the data row this station came from on the sheet.
+   * Both an L and an R station drawn from the same sheet row share the
+   * same `rowIndex` — that's how we know they physically face each other
+   * across the aisle, regardless of how their `codeNo` values compare.
+   * (On Modelama PBS sheets the codeNo snakes between sides, so two
+   * facing stations almost always have different codeNos.)
+   */
+  rowIndex: number;
 }
 
 export interface ImportedFloor {
@@ -171,8 +180,13 @@ export function parseLayoutRows(rows: unknown[][], fileName: string, sheetName: 
   source.sheetName = sheetName;
 
   const stations: ImportedStation[] = [];
+  // `rowIndex` is a compressed counter — only sheet rows that actually
+  // contributed at least one station bump it, so visually-blank spacer
+  // rows in the workbook don't create empty columns on the canvas.
+  let rowIndex = 0;
   for (let r = headerRow + 1; r < rows.length; r++) {
     const row = rows[r] ?? [];
+    let pushedFromThisRow = false;
     // LEFT side
     const lName = toString(row[COL_L_NAME]);
     const lMach = toString(row[COL_L_M]);
@@ -186,7 +200,9 @@ export function parseLayoutRows(rows: unknown[][], fileName: string, sheetName: 
         rawMachine: lMach,
         catalogId,
         side: 'L',
+        rowIndex,
       });
+      pushedFromThisRow = true;
     }
     // RIGHT side
     const rName = toString(row[COL_R_NAME]);
@@ -201,8 +217,11 @@ export function parseLayoutRows(rows: unknown[][], fileName: string, sheetName: 
         rawMachine: rMach,
         catalogId,
         side: 'R',
+        rowIndex,
       });
+      pushedFromThisRow = true;
     }
+    if (pushedFromThisRow) rowIndex++;
   }
 
   if (stations.length === 0) {
@@ -291,10 +310,31 @@ function toNumber(v: unknown): number | null {
  * Returns the relative placement positions; the caller adds an origin
  * offset so multiple imports don't stack on top of each other.
  *
- * Geometry: codeNo runs continuously across both sides (e.g. L=64, R=62,
- * L=63, R=60…) — we use codeNo as the "position along the line" so that
- * physically-adjacent stations on the sheet end up physically adjacent on
- * the canvas. Side ⇒ top row (L) or bottom row (R, across the aisle).
+ * Geometry rules (this is the part that has to match the source sheet):
+ *
+ *   • **Sheet row ⇒ X column.** Both the L and the R cell on the same
+ *     sheet row are *physically facing each other across the aisle* in the
+ *     factory — they belong at the same X on the canvas, just on opposite
+ *     sides of the aisle. We bucket stations by `rowIndex` and give every
+ *     bucket one X column.
+ *
+ *   • **Representative codeNo orders the columns.** Modelama PBS sheets
+ *     are usually laid out tail-at-top / head-at-bottom (FINAL TABLE up
+ *     top, codeNo 1 down low). We sort the row buckets by their smallest
+ *     codeNo so the canvas reads line-head → tail left-to-right, which is
+ *     the convention everywhere else in the app.
+ *
+ *   • **Side ⇒ Y row.** `L` sits on the top facing row, `R` on the bottom
+ *     facing row, separated by the aisle.
+ *
+ *   • **codeNo ⇒ seq.** The flow connectors that wire workstations
+ *     together still follow codeNo ascending — the snake path the sheet
+ *     encodes — independent of X placement.
+ *
+ * Earlier this used codeNo for X directly, which broke visual fidelity:
+ * a sheet row showing L=58 / R=57 (two operators across the aisle from
+ * each other) ended up at X=58 and X=57 — two completely different
+ * columns. The canvas no longer matched what the user saw in Excel.
  */
 export interface PlacedStation extends ImportedStation {
   /** Cell offset within the new line's bounding rect. */
@@ -320,37 +360,71 @@ const STATION_STRIDE = 3;      // Cells between adjacent stations along X
 const AISLE_WIDTH = 4;          // Cells separating the two facing rows
 
 export function placeLayoutStations(parsed: ImportedFloor): LayoutPlacement {
-  // Sort by codeNo ascending so flow goes from low codes (line head) to
-  // high codes (final inspection at the tail). Stations missing codeNo
-  // are pushed to the end in the order they appeared.
-  const withCode = parsed.stations.filter((s) => s.codeNo != null);
-  const sansCode = parsed.stations.filter((s) => s.codeNo == null);
-  withCode.sort((a, b) => (a.codeNo! - b.codeNo!));
-  const ordered = [...withCode, ...sansCode];
-
-  // Build a column index by codeNo so left + right stations sharing a
-  // codeNo (rare but plausible) line up at the same X.
-  const codePositions = new Map<number, number>();
-  let nextCol = 0;
-  for (const s of ordered) {
-    if (s.codeNo == null) continue;
-    if (!codePositions.has(s.codeNo)) codePositions.set(s.codeNo, nextCol++);
+  // 1) Bucket stations by their sheet `rowIndex` so the L and R cells on
+  //    the same data row always land at the same X column.
+  const byRow = new Map<number, ImportedStation[]>();
+  for (const s of parsed.stations) {
+    const arr = byRow.get(s.rowIndex);
+    if (arr) arr.push(s);
+    else byRow.set(s.rowIndex, [s]);
   }
-  const fallbackBase = nextCol;
 
+  // 2) Compute one representative codeNo per row (the smaller of the two
+  //    sides — that's the one closer to the line head on a snake path).
+  //    Rows with no codeNo at all sort to the right edge in original sheet
+  //    order — they're things like blank trailers or "FINAL TABLE" stubs
+  //    with the codeNo column missing, which conventionally sit at the
+  //    tail anyway.
+  type RowMeta = { rowIndex: number; rep: number; stations: ImportedStation[] };
+  const rowMetas: RowMeta[] = [];
+  for (const [rowIndex, stations] of byRow.entries()) {
+    const codes = stations
+      .map((s) => s.codeNo)
+      .filter((c): c is number => c != null);
+    const rep = codes.length ? Math.min(...codes) : Number.POSITIVE_INFINITY;
+    rowMetas.push({ rowIndex, rep, stations });
+  }
+  rowMetas.sort((a, b) => {
+    if (a.rep === b.rep) return a.rowIndex - b.rowIndex;
+    return a.rep - b.rep;
+  });
+
+  // 3) Assign every row a column index, then materialise stations at
+  //    (col × stride, side-based Y). L on top row, R across the aisle.
   const placed: PlacedStation[] = [];
-  let seqCounter = 0;
-  let fallbackCounter = 0;
-  for (const s of ordered) {
-    const col = s.codeNo != null
-      ? (codePositions.get(s.codeNo) ?? 0)
-      : (fallbackBase + fallbackCounter++);
-    const x = col * STATION_STRIDE;
-    const y = s.side === 'L' ? 0 : AISLE_WIDTH;
-    placed.push({ ...s, x, y, seq: seqCounter++ });
-  }
+  rowMetas.forEach((rm, col) => {
+    for (const s of rm.stations) {
+      placed.push({
+        ...s,
+        x: col * STATION_STRIDE,
+        y: s.side === 'L' ? 0 : AISLE_WIDTH,
+        seq: 0, // filled in step 4
+      });
+    }
+  });
 
-  const widthCells = (Math.max(0, fallbackBase + fallbackCounter - 1)) * STATION_STRIDE + 3;
+  // 4) Flow sequence (`seq`) is driven by codeNo independent of X — that
+  //    keeps the connector graph snaking the way the sheet's codeNos
+  //    intend. Within a tied codeNo, L precedes R as a deterministic
+  //    tiebreaker. Stations missing codeNo go to the end in placement
+  //    order.
+  const seqOrder = [...placed].sort((a, b) => {
+    const ac = a.codeNo ?? Number.POSITIVE_INFINITY;
+    const bc = b.codeNo ?? Number.POSITIVE_INFINITY;
+    if (ac !== bc) return ac - bc;
+    if (a.side !== b.side) return a.side === 'L' ? -1 : 1;
+    return 0;
+  });
+  seqOrder.forEach((s, i) => {
+    s.seq = i;
+  });
+
+  // 5) Sort the returned list by seq so `commitFloorImport`'s neighbour
+  //    wiring (wsIds[i] → wsIds[i+1]) follows the bundle path.
+  placed.sort((a, b) => a.seq - b.seq);
+
+  const colCount = Math.max(1, rowMetas.length);
+  const widthCells = (colCount - 1) * STATION_STRIDE + 3;
   const depthCells = AISLE_WIDTH + 3;
   const styleLabel = parsed.source.style ?? parsed.source.sheetName ?? 'Imported';
   const lineLabel = parsed.source.lineNo != null ? `Line ${parsed.source.lineNo}` : 'Imported line';
