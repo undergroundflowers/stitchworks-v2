@@ -341,11 +341,26 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
     modelTimeUnit: opts.modelTimeUnit ?? 'minute',
   };
 
+  // Seed operators — prefer distinct assignment-driven operator count when
+  // the twin carries assignments. Falls back to `workersRequired` sums for
+  // legacy twins. After a SHARE gesture the assignment count goes down
+  // even though `workersRequired` doesn't; without this branch the engine
+  // pool would be inflated relative to the staffing the user authored.
+  const distinctAssignedOps = (() => {
+    const wsSet = new Set(kept.map((w) => w.id));
+    const ops = new Set<string>();
+    for (const a of twin.assignments ?? []) {
+      if (wsSet.has(a.wsId)) ops.add(a.operatorId);
+    }
+    return ops.size;
+  })();
+  const seedOperatorsForMeta = distinctAssignedOps > 0 ? distinctAssignedOps : totalWorkers;
+
   const meta: BuildFromTwinMeta = {
     simulatedWsIds: kept.map((w) => w.id),
     skipped,
     infrastructure,
-    seedOperators: totalWorkers,
+    seedOperators: seedOperatorsForMeta,
     seedBundleSize,
     topologySource,
     stations,

@@ -59,10 +59,14 @@ export interface BalancerResult {
 }
 
 /** Per-operator bucket. Carries `id` so the result drops directly into
- *  the existing Yamazumi `OperatorAssignment` shape. */
+ *  the existing Yamazumi `OperatorAssignment` shape. When present,
+ *  `shareFrac` < 1 means this bucket's operator covers multiple stations —
+ *  the balance KPIs inflate the bucket's effective SMV by 1/shareFrac so
+ *  the line balance number reflects the actual cycle the engine will run. */
 export interface OperatorBucket {
   id: string;
   operations: Operation[];
+  shareFrac?: number;
 }
 
 /** Common balancer options surface — every heuristic accepts these. */

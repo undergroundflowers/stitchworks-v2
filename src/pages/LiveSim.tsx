@@ -42,7 +42,7 @@ import {
   unitToSeconds,
 } from '../simulation/timeUnit';
 import { useProject, useGarments, type OrderDraft } from '../store';
-import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, PRODUCTION_SYSTEMS, MACHINE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
+import { isoProj, ptsToStr, CuboidFaces, SW_PAL, shade, PRODUCTION_SYSTEMS, MACHINE_CATALOG, ISO_FIXTURE_CATALOG, type MachineCode, type ProductionSystem } from '../domain';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { runPmlOnTwin, type RunReport } from '../simulation/pml-runner';
 import { getBlockSpec, apparelRoleFor } from '../domain/pml';
@@ -52,9 +52,13 @@ import {
   type Twin,
   type Workstation,
 } from '../domain/twin';
-import { buildSeededDraftTwin } from '../lib/build-draft-twin';
+import {
+  buildSeededDraftTwin,
+  buildSimReadyOrderTwin,
+  mapToLineSystem,
+} from '../lib/build-draft-twin';
 import { REFERENCE_MODELS, REFERENCE_MODELS_BY_SLUG, type ReferenceModel } from '../domain/reference-models';
-import { buildReferenceTwin, buildGarmentTwin } from '../domain/reference-twin';
+import { buildGarmentTwin } from '../domain/reference-twin';
 import type { GarmentTemplate } from '../domain/garments';
 import { useReferenceContext } from '../store/reference';
 
@@ -167,13 +171,12 @@ export function LiveSimPage() {
   const [view, setView] = useState<SimView>('iso');
 
   // ── Reference-model picker state ────────────────────────────────────────
-  // Lets the user load any published case study (paper × variant/scenario)
-  // straight into the PML view for a side-by-side comparison vs. the paper.
-  // Read first so we can fold it into the legacy SimEngine inputs below —
-  // that way the ISO/TOP/HEAT/LOGIC views also reflect the loaded reference.
-  const loadCanonical = useTwin((s) => s.loadCanonical);
+  // Reference context — set by the Reference Models page (LOAD & SIMULATE
+  // strip). Sim reads it to fold the loaded paper into the engine inputs;
+  // ISO/TOP/HEAT/LOGIC views also reflect the loaded reference. Sim doesn't
+  // author refs anymore (the picker bar moved out), so we only need the
+  // read + clear selectors here.
   const refCtx = useReferenceContext();
-  const setRefContext = useReferenceContext((s) => s.setContext);
   const clearRefContext = useReferenceContext((s) => s.clear);
 
   // When a reference is loaded, its garment bulletin + operator pool drive the
@@ -333,12 +336,25 @@ export function LiveSimPage() {
       base = selectedLineId
         ? scopedTwinForLine(activeTwin, selectedLineId)
         : activeTwin;
+    } else if (garment) {
+      // Order / garment fallback — route through the same per-system seed
+      // helper the Build-in-Builder button uses so picking modular gives
+      // the user a U-cell in the sim, not a snaking grid. The helper
+      // tacks Source / ResourcePool / Sink onto the seeded line so the
+      // PML engine still has a closed graph to run.
+      base =
+        buildSimReadyOrderTwin({
+          draftName: garment.name,
+          productionSystem: mapToLineSystem(productionSystemId),
+          garment,
+          operators: effectiveOperators,
+        }) ?? EMPTY_TWIN;
     } else {
-      base = buildGarmentTwin(garment, effectiveOperators) ?? EMPTY_TWIN;
+      base = EMPTY_TWIN;
     }
     if (!bundleOverride || bundleOverride <= 0) return base;
     return overrideBundleSize(base, bundleOverride);
-  }, [useTwinSource, refOverride, selectedLineId, activeTwin, garment, effectiveOperators, bundleOverride]);
+  }, [useTwinSource, refOverride, selectedLineId, activeTwin, garment, effectiveOperators, bundleOverride, productionSystemId]);
   // Captured for future PML wiring — neither flows into the engine today
   // because the twin already encodes both. `systemBundleSize` is read by the
   // HUD's BUNDLE chip; opEfficiency is mirrored back into the skill matrix
@@ -447,111 +463,47 @@ export function LiveSimPage() {
     ? 'All lines'
     : garment.name;
 
-  const [refSlug, setRefSlug] = useState<string>(
-    refCtx.slug ?? REFERENCE_MODELS[0].slug,
-  );
-  const [refVariantKey, setRefVariantKey] = useState<string>(
-    refCtx.variantKey ?? 'baseline',
-  );
-  const [refLoadFlash, setRefLoadFlash] = useState<string | null>(null);
-  // Reference-line row collapses by default so the sim chrome stays quiet.
-  // Persisted so power-users who prefer it open don't toggle every visit.
-  const [refRowOpen, setRefRowOpen] = useState<boolean>(() => {
-    try {
-      return localStorage.getItem('sw.livesim.refRowOpen') === '1';
-    } catch {
-      return false;
-    }
-  });
-  useEffect(() => {
-    try {
-      localStorage.setItem('sw.livesim.refRowOpen', refRowOpen ? '1' : '0');
-    } catch {
-      /* ignore */
-    }
-  }, [refRowOpen]);
-
-  const refModel: ReferenceModel = useMemo(
-    () =>
-      REFERENCE_MODELS.find((m) => m.slug === refSlug) ?? REFERENCE_MODELS[0],
-    [refSlug],
-  );
-
-  // Variant menu derived from the chosen paper.
-  const variantOptions = useMemo(() => {
-    const opts: { key: string; label: string; tag: string }[] = [
-      {
-        key: 'baseline',
-        label: `Baseline · ${refModel.baseline.operators} operators${
-          refModel.baseline.throughputPerDayPcs
-            ? ` · ${refModel.baseline.throughputPerDayPcs}/day`
-            : ''
-        }`,
-        tag: 'BASE',
-      },
-    ];
-    if (refModel.proposed) {
-      opts.push({
-        key: 'proposed',
-        label: `Proposed · ${refModel.proposed.operators} operators${
-          refModel.proposed.throughputPerDayPcs
-            ? ` · ${refModel.proposed.throughputPerDayPcs}/day`
-            : ''
-        }`,
-        tag: 'PROP',
+  // Ambient workstations — everything the user placed in Factory Builder that
+  // *isn't* a sewing-op-bearing engine station. Spreaders, cutters, QC tables,
+  // inline irons, packing benches, fabric racks, bundle trolleys, supervisors,
+  // helpers, conveyors — all of it. The Sim views render these as static iso
+  // cuboids behind the engine stations so the floor reads as a full factory.
+  // Without this, only the sewing line shows up in the simulation and the
+  // rest of the factory user authored seems to disappear.
+  const ambientWorkstations = useMemo<AmbientWorkstationInput[]>(() => {
+    if (!useTwinSource || !activeTwin?.workstations) return [];
+    const simulatedSet = new Set(effectiveTwinMeta?.simulatedWsIds ?? []);
+    const deptById = new Map(
+      (activeTwin.departments ?? []).map((d) => [d.id, d] as const),
+    );
+    return activeTwin.workstations
+      .filter((ws) => !simulatedSet.has(ws.id))
+      .map((ws): AmbientWorkstationInput => {
+        const fix = ISO_FIXTURE_CATALOG.find((f) => f.id === ws.catalogId);
+        const dept = deptById.get(ws.deptId);
+        const deptColor = dept ? (DEPT_LINE_COLORS[dept.color] ?? '#888') : '#888';
+        return {
+          wsId: ws.id,
+          catalogId: ws.catalogId,
+          name: ws.name,
+          gx: ws.position.x,
+          gy: ws.position.y,
+          w: fix?.w ?? 1,
+          d: fix?.d ?? 1,
+          h: fix?.h ?? 1,
+          rotation: ws.rotation ?? 0,
+          deptColor,
+          cat: fix?.cat ?? 'fix',
+          lineId: ws.lineId,
+        };
       });
-    }
-    if (refModel.scenarios) {
-      for (const s of refModel.scenarios) {
-        opts.push({
-          key: s.id,
-          label: `${s.id} · ${s.name} · ${s.operators} operators · ${s.throughputPerDayPcs}/day (+${s.upliftPct}%)`,
-          tag: s.id,
-        });
-      }
-    }
-    return opts;
-  }, [refModel]);
+  }, [useTwinSource, activeTwin, effectiveTwinMeta]);
 
-  // Reset variant when paper changes if previous key is no longer valid.
-  useEffect(() => {
-    if (!variantOptions.some((o) => o.key === refVariantKey)) {
-      setRefVariantKey(variantOptions[0].key);
-    }
-  }, [variantOptions, refVariantKey]);
-
-  function handleLoadReference() {
-    const opts =
-      refVariantKey === 'baseline' || refVariantKey === 'proposed'
-        ? { variant: refVariantKey as 'baseline' | 'proposed' }
-        : { scenarioId: refVariantKey };
-    const twin = buildReferenceTwin(refModel, opts);
-    if (!twin) {
-      setRefLoadFlash('This paper has no enumerated operations — twin not built.');
-      return;
-    }
-    const r = loadCanonical(twin);
-    if (!r.ok) {
-      setRefLoadFlash(`Could not load twin: ${r.reason}`);
-      return;
-    }
-    setRefContext({ slug: refModel.slug, variantKey: refVariantKey });
-    setView('pml');
-    const variantLabel =
-      refVariantKey === 'baseline'
-        ? 'Baseline'
-        : refVariantKey === 'proposed'
-          ? 'Proposed'
-          : refVariantKey;
-    setRefLoadFlash(`Loaded · ${refModel.authorYear} · ${variantLabel}`);
-    setTimeout(() => setRefLoadFlash(null), 3000);
-  }
-
-  function handleClearReference() {
-    clearRefContext();
-    setRefLoadFlash(null);
-  }
-
+  // The reference-line picker (paper + variant + LOAD & SIMULATE) used to
+  // live here as a sim-toolbar strip. It now lives on the Reference Models
+  // page so authoring + loading happens in one place and the Sim chrome
+  // stays focused on observing. We still resolve `refLoadedLabel` from
+  // `refCtx` because the Sim source picker surfaces it as a source option.
   const refLoadedLabel =
     refCtx.slug && refCtx.variantKey
       ? (() => {
@@ -629,7 +581,12 @@ export function LiveSimPage() {
         width: '100%',
         height: '100%',
         display: 'grid',
-        gridTemplateRows: 'auto auto auto 1fr auto',
+        // 4 row tracks for the 4 top-level children: HUD, sewing-lines
+        // strip, simulation floor (fills remaining height), playback bar.
+        // Keeping a fifth track here is what caused the canvas to collapse
+        // after the reference-picker row was lifted to Reference Models —
+        // the floor div landed in an `auto` track and zeroed its height.
+        gridTemplateRows: 'auto auto 1fr auto',
         background: SW_COLORS.ink,
         color: SW_COLORS.paper,
       }}
@@ -734,177 +691,6 @@ export function LiveSimPage() {
           ))}
         </div>
 
-        <div style={{ width: 1, height: 20, background: '#ffffff20' }} />
-        <div style={{ display: 'flex', alignItems: 'center', gap: 10, fontFamily: SW_FONTS.body, fontSize: 11 }}>
-          <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>GARMENT</span>
-          {(() => {
-            // When the active twin pins a dominant garment (workstations carry
-            // a garmentId), `buildSimConfigFromTwin` runs against that garment
-            // regardless of the dropdown — so showing the project's default
-            // garment label here is a lie. Surface the twin's actual garment
-            // and lock the control so the user can't pick something that
-            // would be silently ignored.
-            const twinGarment = twinBuild?.meta.garment ?? null;
-            // Only treat the dropdown as locked when the twin actually pinned
-            // a garment via a workstation. When no workstation pins (e.g. an
-            // empty twin or a freshly-painted one), the dropdown's value is
-            // still the engine's `defaultGarmentId`, so leave it editable.
-            const twinPins =
-              !!twinGarment && !refOverride && !!twinBuild?.meta.garmentPinned;
-            const displayedValue = refOverride
-              ? '__ref__'
-              : twinPins
-                ? twinGarment.id
-                : garmentId;
-            // Reference garments live in `garments.byId` for resolution but
-            // are kept OUT of `garments.all` so the picker doesn't bloat to
-            // 30+ rows. Splice the twin's garment in here only when it isn't
-            // already a visible option, so the trigger can show its label.
-            const visibleHasTwinGarment =
-              twinPins && garments.all.some((g) => g.id === twinGarment.id);
-            // Reference garment names use the parenthetical to disambiguate
-            // (e.g. "Polo (Morshed 2014, work-share)"), so keep the full name
-            // here rather than stripping it like the canonical labels do.
-            const twinExtraOption =
-              twinPins && !visibleHasTwinGarment
-                ? [{
-                    value: twinGarment.id,
-                    label: twinGarment.name,
-                    tag: 'TWIN',
-                    disabled: true,
-                  }]
-                : [];
-            const options = [
-              ...(refOverride
-                ? [{
-                    value: '__ref__',
-                    label: refOverride.garment.name.replace(/\s*\(.*\)/, ''),
-                    tag: 'REF',
-                    disabled: true,
-                  }]
-                : []),
-              ...twinExtraOption,
-              ...garments.all.map((g) => ({
-                value: g.id,
-                label: g.name.replace(/\s*\(.*\)/, ''),
-                tag: twinPins && g.id === twinGarment.id ? 'TWIN' : undefined,
-                disabled: twinPins,
-              })),
-            ];
-            const title = twinPins
-              ? `Garment is pinned by the workstations in Factory Builder (${twinGarment.name}). Change the workstation operation in Builder to switch garments.`
-              : refOverride
-                ? 'Garment is pinned by the loaded reference scenario. Clear the reference (× on the source chip) to pick freely.'
-                : undefined;
-            return (
-              <HudSelect
-                value={displayedValue}
-                minWidth={220}
-                mono
-                disabled={twinPins || !!refOverride}
-                title={title}
-                options={options}
-                onChange={(id) => {
-                  if (id === '__ref__') return;
-                  if (refOverride) clearRefContext();
-                  setGarmentId(id);
-                }}
-              />
-            );
-          })()}
-        </div>
-
-        <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: SW_FONTS.body, fontSize: 11 }}>
-          <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>OPERATORS</span>
-          <input
-            type="number"
-            min={4}
-            max={80}
-            value={effectiveOperators}
-            onChange={(e) => {
-              const next = Math.max(4, Math.min(80, parseInt(e.target.value) || 4));
-              // Manual edit detaches from the active reference variant so the
-              // user can tweak operator count without snapping back.
-              if (refOverride) clearRefContext();
-              setOperators(next);
-            }}
-            style={{
-              width: 56,
-              padding: '4px 8px',
-              border: '1px solid #ffffff20',
-              background: '#ffffff10',
-              borderRadius: SW_RADIUS.sm,
-              fontFamily: SW_FONTS.mono,
-              fontWeight: 700,
-              fontSize: 13,
-              color: '#fff',
-            }}
-          />
-          {twinBuild && (
-            <span style={{ color: '#ffffff60', fontFamily: SW_FONTS.mono, fontSize: 10 }}>
-              · seed {twinBuild.meta.seedOperators}
-            </span>
-          )}
-        </div>
-
-        {twinBuild && (
-          <div style={{ display: 'flex', alignItems: 'center', gap: 8, fontFamily: SW_FONTS.body, fontSize: 11 }}>
-            <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700 }}>BUNDLE</span>
-            <input
-              type="number"
-              min={1}
-              max={200}
-              value={bundleOverride ?? twinBuild.meta.seedBundleSize}
-              onChange={(e) => {
-                const next = Math.max(1, Math.min(200, parseInt(e.target.value) || 1));
-                setBundleOverride(next === twinBuild.meta.seedBundleSize ? null : next);
-              }}
-              style={{
-                width: 56,
-                padding: '4px 8px',
-                border: '1px solid #ffffff20',
-                background: '#ffffff10',
-                borderRadius: SW_RADIUS.sm,
-                fontFamily: SW_FONTS.mono,
-                fontWeight: 700,
-                fontSize: 13,
-                color: '#fff',
-              }}
-            />
-            <span style={{ color: '#ffffff60', fontFamily: SW_FONTS.mono, fontSize: 10 }}>
-              · seed {twinBuild.meta.seedBundleSize}
-            </span>
-          </div>
-        )}
-
-        {/* Production-system chip — shows the layout the Orders wizard
-            committed to, so the user can confirm the sim respects their
-            pick. Reference runs hide this since they ship their own
-            paper-specific bundle profile. */}
-        {!refOverride && (
-          <div
-            title={`${productionSystemDef.label} · bundle size ${productionSystemDef.typicalBatchSize}\n${productionSystemDef.description}`}
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '4px 10px',
-              border: `1px solid ${SW_COLORS.brand}55`,
-              background: `${SW_COLORS.brand}1a`,
-              borderRadius: SW_RADIUS.sm,
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 700,
-              color: '#fff',
-              cursor: 'help',
-            }}
-          >
-            <span style={{ color: SW_COLORS.brand, letterSpacing: '0.1em' }}>SYSTEM</span>
-            <span>{productionSystemDef.short}</span>
-            <span style={{ color: '#ffffff70' }}>·</span>
-            <span style={{ color: '#ffffffaa' }}>bundle {productionSystemDef.typicalBatchSize}</span>
-          </div>
-        )}
         <div style={{ flex: 1 }} />
 
         {/* EDIT IN BUILDER — opens a fresh, isolated Builder draft in a new
@@ -998,194 +784,6 @@ export function LiveSimPage() {
         })()}
       </div>
 
-      {/* REFERENCE-LINE PICKER ─────────────────────────────────────────────
-          Compact strip that lets the user materialise any published case
-          study (paper × variant/scenario) into the active twin and jump
-          straight to the PML view for replication. Collapses to a single
-          header row so the sim chrome stays quiet when the user isn't
-          loading a reference; chevron toggles the body. The "ACTIVE · …"
-          chip stays visible in the collapsed header so the user can still
-          see (and clear) the loaded reference without expanding. */}
-      <div
-        style={{
-          padding: '10px 24px',
-          borderBottom: '1px solid #ffffff15',
-          background: '#ffffff04',
-          display: 'flex',
-          alignItems: 'center',
-          gap: 12,
-          flexWrap: 'wrap',
-        }}
-      >
-        <button
-          type="button"
-          onClick={() => setRefRowOpen((v) => !v)}
-          aria-expanded={refRowOpen}
-          aria-controls="ref-line-body"
-          title={refRowOpen ? 'Hide reference-line picker' : 'Show reference-line picker'}
-          style={{
-            display: 'inline-flex',
-            alignItems: 'center',
-            gap: 8,
-            background: 'transparent',
-            border: 'none',
-            padding: '2px 6px 2px 0',
-            cursor: 'pointer',
-            color: SW_COLORS.brand,
-            fontFamily: SW_FONTS.mono,
-            fontSize: 10,
-            fontWeight: 800,
-            letterSpacing: '2px',
-          }}
-        >
-          <span
-            aria-hidden="true"
-            style={{
-              display: 'inline-block',
-              transform: refRowOpen ? 'rotate(0deg)' : 'rotate(-90deg)',
-              transition: 'transform 180ms cubic-bezier(0.22, 1, 0.36, 1)',
-              fontSize: 11,
-              lineHeight: 1,
-              opacity: 0.85,
-            }}
-          >
-            ▾
-          </span>
-          📚 REFERENCE LINE
-        </button>
-
-        {/* Collapsed header keeps the ACTIVE chip visible so users still see
-            (and can clear) the loaded reference without expanding the row. */}
-        {!refRowOpen && refLoadedLabel && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '4px 10px',
-              border: `1px solid ${SW_COLORS.brand}55`,
-              background: `${SW_COLORS.brand}18`,
-              borderRadius: SW_RADIUS.sm,
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 700,
-              color: SW_COLORS.brand,
-              letterSpacing: '1px',
-            }}
-          >
-            ACTIVE · {refLoadedLabel}
-            <button
-              onClick={handleClearReference}
-              title="Clear reference context"
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: SW_COLORS.brand,
-                cursor: 'pointer',
-                fontSize: 14,
-                lineHeight: 1,
-                padding: 0,
-              }}
-            >
-              ×
-            </button>
-          </div>
-        )}
-
-        {refRowOpen && (
-          <div id="ref-line-body" style={{ display: 'contents' }}>
-        <HudSelect
-          value={refSlug}
-          onChange={setRefSlug}
-          minWidth={300}
-          options={REFERENCE_MODELS.map((m) => ({
-            value: m.slug,
-            label: `${m.authorYear} — ${m.title}`,
-          }))}
-        />
-
-        <HudSelect
-          value={refVariantKey}
-          onChange={setRefVariantKey}
-          minWidth={320}
-          options={variantOptions.map((o) => ({
-            value: o.key,
-            label: o.label,
-            tag: o.tag,
-          }))}
-        />
-
-        <Button variant="primary" size="sm" icon="▶" onClick={handleLoadReference}>
-          LOAD & SIMULATE
-        </Button>
-
-        {refLoadedLabel && (
-          <div
-            style={{
-              display: 'flex',
-              alignItems: 'center',
-              gap: 8,
-              padding: '4px 10px',
-              border: `1px solid ${SW_COLORS.brand}55`,
-              background: `${SW_COLORS.brand}18`,
-              borderRadius: SW_RADIUS.sm,
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 700,
-              color: SW_COLORS.brand,
-              letterSpacing: '1px',
-            }}
-          >
-            ACTIVE · {refLoadedLabel}
-            <button
-              onClick={handleClearReference}
-              title="Clear reference context"
-              style={{
-                background: 'transparent',
-                border: 'none',
-                color: SW_COLORS.brand,
-                cursor: 'pointer',
-                fontSize: 14,
-                lineHeight: 1,
-                padding: 0,
-              }}
-            >
-              ×
-            </button>
-          </div>
-        )}
-
-        {refLoadFlash && (
-          <span
-            style={{
-              fontFamily: SW_FONTS.mono,
-              fontSize: 11,
-              fontWeight: 700,
-              color: SW_COLORS.ok,
-            }}
-          >
-            ✓ {refLoadFlash}
-          </span>
-        )}
-
-        <div style={{ flex: 1 }} />
-
-        <span
-          style={{
-            fontSize: 11,
-            color: '#ffffff80',
-            fontFamily: SW_FONTS.mono,
-            maxWidth: 280,
-            lineHeight: 1.4,
-          }}
-        >
-          Load builds Source → {refModel.garmentTemplate.operations.length} operations → Sink
-          with a {variantOptions.find((o) => o.key === refVariantKey)?.tag ?? '—'}-sized operator pool.
-        </span>
-          </div>
-        )}
-      </div>
-
       {/* SEWING LINES STRIP ────────────────────────────────────────────────
           One card per sewing line in the active twin. Click a card to scope
           the engine + visuals to just that line; click ALL LINES to widen the
@@ -1225,6 +823,7 @@ export function LiveSimPage() {
               simTime={state.time}
               system={productionSystemId}
               twinMeta={effectiveTwinMeta}
+              ambientWorkstations={ambientWorkstations}
             />
           </PanZoomViewport>
         )}
@@ -1237,6 +836,7 @@ export function LiveSimPage() {
               simTime={state.time}
               system={productionSystemId}
               twinMeta={effectiveTwinMeta}
+              ambientWorkstations={ambientWorkstations}
             />
           </PanZoomViewport>
         )}
@@ -1249,6 +849,7 @@ export function LiveSimPage() {
               simTime={state.time}
               system={productionSystemId}
               twinMeta={effectiveTwinMeta}
+              ambientWorkstations={ambientWorkstations}
             />
           </PanZoomViewport>
         )}
@@ -1261,6 +862,7 @@ export function LiveSimPage() {
               simTime={state.time}
               system={productionSystemId}
               twinMeta={effectiveTwinMeta}
+              ambientWorkstations={ambientWorkstations}
             />
           </PanZoomViewport>
         )}
@@ -1321,7 +923,144 @@ export function LiveSimPage() {
             </button>
             {hudOpen && (
               <div style={{ display: 'flex', flexDirection: 'column', gap: 8 }}>
-                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(4, auto)', gap: 12 }}>
+                {/* ── RUNNING context ──────────────────────────────────────
+                    Read-only: what the sim is running against. Authoring
+                    happens in Factory Builder; this section just confirms
+                    garment / operator count / bundle / system topology.
+                    BUNDLE here is the actual emitted bundle from the twin's
+                    Source block (single source of truth); SYSTEM only names
+                    the layout topology. Placed BELOW the KPI grid so the
+                    headline numbers come first; context is reference info. */}
+                <div
+                  style={{
+                    display: 'flex',
+                    flexDirection: 'column',
+                    gap: 6,
+                    padding: '8px 12px',
+                    background: 'rgba(255,255,255,0.03)',
+                    border: '1px solid rgba(255,255,255,0.082)',
+                    borderRadius: SW_RADIUS.sm,
+                    fontFamily: SW_FONTS.body,
+                    fontSize: 11,
+                    order: 2,
+                  }}
+                >
+                  {/* GARMENT — full-width row, label on top so the select can
+                      take the full panel width without colliding with the label. */}
+                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
+                    <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
+                      GARMENT
+                    </span>
+                    {(() => {
+                      // When the active twin pins a dominant garment (workstations carry
+                      // a garmentId), `buildSimConfigFromTwin` runs against that garment
+                      // regardless of the dropdown — so showing the project's default
+                      // garment label here is a lie. Surface the twin's actual garment
+                      // and lock the control so the user can't pick something that
+                      // would be silently ignored.
+                      const twinGarment = twinBuild?.meta.garment ?? null;
+                      const twinPins =
+                        !!twinGarment && !refOverride && !!twinBuild?.meta.garmentPinned;
+                      const displayedValue = refOverride
+                        ? '__ref__'
+                        : twinPins
+                          ? twinGarment.id
+                          : garmentId;
+                      const visibleHasTwinGarment =
+                        twinPins && garments.all.some((g) => g.id === twinGarment.id);
+                      const twinExtraOption =
+                        twinPins && !visibleHasTwinGarment
+                          ? [{
+                              value: twinGarment.id,
+                              label: twinGarment.name,
+                              tag: 'TWIN',
+                              disabled: true,
+                            }]
+                          : [];
+                      const options = [
+                        ...(refOverride
+                          ? [{
+                              value: '__ref__',
+                              label: refOverride.garment.name.replace(/\s*\(.*\)/, ''),
+                              tag: 'REF',
+                              disabled: true,
+                            }]
+                          : []),
+                        ...twinExtraOption,
+                        ...garments.all.map((g) => ({
+                          value: g.id,
+                          label: g.name.replace(/\s*\(.*\)/, ''),
+                          tag: twinPins && g.id === twinGarment.id ? 'TWIN' : undefined,
+                          disabled: twinPins,
+                        })),
+                      ];
+                      const title = twinPins
+                        ? `Garment is pinned by the workstations in Factory Builder (${twinGarment.name}). Change the workstation operation in Builder to switch garments.`
+                        : refOverride
+                          ? 'Garment is pinned by the loaded reference scenario. Clear the reference (× on the source chip) to pick freely.'
+                          : undefined;
+                      return (
+                        <HudSelect
+                          value={displayedValue}
+                          minWidth={180}
+                          mono
+                          disabled={twinPins || !!refOverride}
+                          title={title}
+                          options={options}
+                          onChange={(id) => {
+                            if (id === '__ref__') return;
+                            if (refOverride) clearRefContext();
+                            setGarmentId(id);
+                          }}
+                        />
+                      );
+                    })()}
+                  </div>
+
+                  {/* Read-only OPERATORS / BUNDLE / SYSTEM rows. Sim observes
+                      the twin — authoring lives in Factory Builder. */}
+                  <div
+                    title="Operator count — edit in Factory Builder"
+                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 2 }}
+                  >
+                    <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
+                      OPERATORS
+                    </span>
+                    <span style={{ color: '#fff', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 12 }}>
+                      {effectiveOperators}
+                    </span>
+                  </div>
+
+                  {twinBuild && (
+                    <div
+                      title="Bundle size — edit in Factory Builder (Source block)"
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}
+                    >
+                      <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
+                        BUNDLE
+                      </span>
+                      <span style={{ color: '#fff', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 12 }}>
+                        {twinBuild.meta.seedBundleSize}
+                      </span>
+                    </div>
+                  )}
+
+                  {!refOverride && (
+                    <div
+                      title={`${productionSystemDef.label}\n${productionSystemDef.description}`}
+                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, cursor: 'help' }}
+                    >
+                      <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
+                        SYSTEM
+                      </span>
+                      <span style={{ color: '#fff', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 12 }}>
+                        {productionSystemDef.short}
+                      </span>
+                    </div>
+                  )}
+                </div>
+
+                <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 12, order: 1 }}>
                   <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
                   <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
                   <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
@@ -2537,6 +2276,49 @@ interface StationLayout {
   /** Stable per-cell React key. Falls back to opId when one cell per op; in
    *  workstation mode multiple cells share an opId so we key by wsId. */
   cellKey?: string;
+  /** Sewing-line membership when the cell came from a Builder-authored
+   *  workstation. Used by the SimIsoView/SimTopView chaining logic to avoid
+   *  drawing a stray conveyor between the last cell of Line A and the first
+   *  cell of Line B in multi-line scope. */
+  lineId?: string;
+}
+
+/** A non-simulated Builder workstation rendered as ambient floor context so
+ *  the simulation view reads as a full factory — spreaders, cutters, QC
+ *  tables, presses, fabric racks, buffers — not just the sewing line. */
+interface AmbientLayout {
+  wsId: string;
+  catalogId: string;
+  name: string;
+  gx: number;
+  gy: number;
+  w: number;
+  d: number;
+  h: number;
+  rotation: number;
+  /** Department accent colour (from DEPT_COLOR_HEX), used as a faint tint so
+   *  the dept zones read at a glance. */
+  deptColor: string;
+  /** Asset family — 'sew' / 'cut' / 'fix' / 'store' / 'mh' / 'buf' / 'op' / … */
+  cat: string;
+  lineId?: string;
+}
+
+/** Caller-side shape for ambient workstations passed into layoutStations.
+ *  Same fields as `AmbientLayout` but in world-grid coords (pre-rebase). */
+interface AmbientWorkstationInput {
+  wsId: string;
+  catalogId: string;
+  name: string;
+  gx: number;
+  gy: number;
+  w: number;
+  d: number;
+  h: number;
+  rotation: number;
+  deptColor: string;
+  cat: string;
+  lineId?: string;
 }
 
 /**
@@ -2585,14 +2367,16 @@ function layoutStations(
   stations: StationView[],
   system: ProductionSystem,
   twinMeta?: BuildFromTwinMeta | null,
+  ambientWorkstations?: AmbientWorkstationInput[],
 ): {
   cells: StationLayout[];
+  ambientCells: AmbientLayout[];
   gridW: number;
   gridH: number;
   perRow: number;
 } {
   const n = stations.length;
-  if (n === 0) return { cells: [], gridW: 1, gridH: 1, perRow: 1 };
+  if (n === 0) return { cells: [], ambientCells: [], gridW: 1, gridH: 1, perRow: 1 };
 
   // Twin workstation path — honour every physical machine the user placed in
   // Factory Builder. One cell per workstation; cells that share an opId all
@@ -2605,12 +2389,20 @@ function layoutStations(
     for (const s of stations) stationByOpId.set(s.opId, s);
     const placed = twinMeta.workstations.filter((wc) => stationByOpId.has(wc.opId));
     if (placed.length > 0) {
+      // Compute the world-grid extent across BOTH simulated cells and ambient
+      // service blocks so the iso floor fits everything the user authored.
       let minX = Infinity, minY = Infinity, maxX = -Infinity, maxY = -Infinity;
       for (const wc of placed) {
         if (wc.gx < minX) minX = wc.gx;
         if (wc.gy < minY) minY = wc.gy;
         if (wc.gx > maxX) maxX = wc.gx;
         if (wc.gy > maxY) maxY = wc.gy;
+      }
+      for (const aw of ambientWorkstations ?? []) {
+        if (aw.gx < minX) minX = aw.gx;
+        if (aw.gy < minY) minY = aw.gy;
+        if (aw.gx + aw.w > maxX) maxX = aw.gx + aw.w;
+        if (aw.gy + aw.d > maxY) maxY = aw.gy + aw.d;
       }
       const cells: StationLayout[] = placed.map((wc) => ({
         s: stationByOpId.get(wc.opId)!,
@@ -2622,10 +2414,25 @@ function layoutStations(
         w: 0.9,
         d: 1.4,
         cellKey: wc.wsId,
+        lineId: wc.lineId,
+      }));
+      const ambientCells: AmbientLayout[] = (ambientWorkstations ?? []).map((aw) => ({
+        wsId: aw.wsId,
+        catalogId: aw.catalogId,
+        name: aw.name,
+        gx: 2 + (aw.gx - minX),
+        gy: 2 + (aw.gy - minY),
+        w: aw.w,
+        d: aw.d,
+        h: aw.h,
+        rotation: aw.rotation,
+        deptColor: aw.deptColor,
+        cat: aw.cat,
+        lineId: aw.lineId,
       }));
       const gridW = Math.max(8, 2 + (maxX - minX) + 4);
       const gridH = Math.max(6, 2 + (maxY - minY) + 4);
-      return { cells, gridW, gridH, perRow: cells.length };
+      return { cells, ambientCells, gridW, gridH, perRow: cells.length };
     }
   }
 
@@ -2662,7 +2469,7 @@ function layoutStations(
       });
       const gridW = Math.max(8, 2 + (maxX - minX) + 4);
       const gridH = Math.max(6, 2 + (maxY - minY) + 4);
-      return { cells, gridW, gridH, perRow: stations.length };
+      return { cells, ambientCells: [], gridW, gridH, perRow: stations.length };
     }
   }
 
@@ -2686,6 +2493,7 @@ function layoutStations(
     void bottomCount;
     return {
       cells,
+      ambientCells: [],
       gridW: 2 + topCount * stride + 2,
       gridH: bottomY + 4,
       perRow: topCount,
@@ -2706,6 +2514,7 @@ function layoutStations(
     });
     return {
       cells,
+      ambientCells: [],
       gridW: 4 + cols * stride + 4,
       gridH: 2 + rows * stride + 2,
       perRow: cols,
@@ -2733,6 +2542,7 @@ function layoutStations(
     const perGroupRows = Math.ceil(Math.ceil(n / clumps) / 2);
     return {
       cells,
+      ambientCells: [],
       gridW: 2 + clumps * between + 2,
       gridH: 2 + perGroupRows * (inner + 1) + 2,
       perRow: clumps * 2,
@@ -2759,7 +2569,7 @@ function layoutStations(
   });
   const gridW = 2 + perRow * stride + 2;
   const gridH = 2 + rows * (stride + 1) + 2;
-  return { cells, gridW, gridH, perRow };
+  return { cells, ambientCells: [], gridW, gridH, perRow };
 }
 
 // ============================================================================
@@ -2775,12 +2585,16 @@ interface SimViewProps {
   /** When present, the view uses Builder-authored workstation positions
    *  instead of the canonical system-based line layout. */
   twinMeta?: BuildFromTwinMeta | null;
+  /** Authored workstations that aren't tied to a sewing operation — spreaders,
+   *  cutters, QC tables, presses, fabric racks, buffers, operators. Rendered
+   *  as static floor context so the simulation reads as the full factory. */
+  ambientWorkstations?: AmbientWorkstationInput[];
 }
 
-function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system, twinMeta }: SimViewProps) {
+function SimIsoView({ stations, bottleneckOpIndex, simTime, system, twinMeta, ambientWorkstations }: SimViewProps) {
   if (stations.length === 0) return <svg style={{ width: '100%', height: '100%' }} />;
 
-  const { cells, gridW, gridH } = layoutStations(stations, system, twinMeta);
+  const { cells, ambientCells, gridW, gridH } = layoutStations(stations, system, twinMeta, ambientWorkstations);
   // Workstation mode = more cells than engine stations. The synthetic conveyor
   // and travelling-WIP markers chain consecutive cells, which is meaningful
   // when cells are placed in op order along a row but degenerates into noise
@@ -2838,13 +2652,29 @@ function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system,
         );
       })}
 
+      {/* Ambient service blocks — non-sewing workstations (spreaders, cutters,
+          QC tables, presses, fabric racks, buffers, operators) authored in
+          Builder. Drawn behind the engine stations as muted iso cuboids so
+          the floor reads as a full factory, not just a sewing line. They
+          don't carry live state — they're scene context. */}
+      {[...ambientCells]
+        .sort((a, b) => a.gx + a.gy - (b.gx + b.gy))
+        .map((a) => (
+          <IsoAmbientBlock key={`amb-${a.wsId}`} amb={a} simTime={simTime} />
+        ))}
+
       {/* Conveyor between rows of stations — only meaningful when cells are
           laid out in op order along a row. In workstation mode the cells
           reflect arbitrary Builder positions, so chaining them with a dashed
-          line just produces visual noise. */}
+          line just produces visual noise. Multi-line mode: skip segments that
+          cross a lineId boundary (otherwise we'd draw a stray conveyor from
+          Line A's last station to Line B's first station). */}
       {oneCellPerOp && cells.length > 1 &&
         cells.slice(0, -1).map((c, i) => {
           const next = cells[i + 1];
+          // Same-line guard — if either cell carries a lineId, both must match
+          // before we draw the connecting conveyor.
+          if (c.lineId && next.lineId && c.lineId !== next.lineId) return null;
           const a = isoProj(c.gx + c.w / 2, c.gy + c.d + 0.2);
           const b = isoProj(next.gx + next.w / 2, next.gy + next.d + 0.2);
           return (
@@ -2876,43 +2706,56 @@ function SimIsoView({ stations, bottleneckOpIndex, garmentName, simTime, system,
         ))}
 
       {/* Travelling WIP bundles between adjacent stations — same caveat as
-          the conveyor; only honest in op-ordered single-row mode. */}
+          the conveyor; only honest in op-ordered single-row mode. We render
+          MULTIPLE bundles per segment so the flow reads as continuous WIP
+          rather than a single dot, and we phase by the downstream station's
+          queue length so a backed-up cell visibly accumulates material. */}
       {oneCellPerOp && cells.length > 1 &&
-        cells.slice(0, -1).map((c, i) => {
+        cells.slice(0, -1).flatMap((c, i) => {
           const next = cells[i + 1];
-          const phase = ((simTime * 0.04 + i * 0.27) % 1 + 1) % 1;
-          const x = c.gx + c.w / 2 + (next.gx + next.w / 2 - (c.gx + c.w / 2)) * phase;
-          const y = c.gy + c.d / 2 + (next.gy + next.d / 2 - (c.gy + c.d / 2)) * phase;
-          const p = isoProj(x, y, 0.3);
+          // Same-line guard — skip cross-line segments (otherwise bundles
+          // would visibly hop from the end of Line A to the start of Line B).
+          if (c.lineId && next.lineId && c.lineId !== next.lineId) return [];
           const colors = [SW_COLORS.thread, SW_COLORS.fabric, SW_COLORS.bobbin, SW_COLORS.trim];
-          return (
-            <rect
-              key={`wip-${i}`}
-              x={p.sx - 4}
-              y={p.sy - 4}
-              width={8}
-              height={8}
-              fill={colors[i % colors.length]}
-              stroke="#0F1419"
-              strokeWidth={0.6}
-              opacity={0.92}
-            />
-          );
+          // Bundle density tied to the downstream station's queue: 1 bundle
+          // when idle, up to 4 when the queue is deep. Caps at 4 so the
+          // flow stays legible in heavy-WIP conditions.
+          const qLen = next.s?.queueLen ?? 0;
+          const count = Math.max(1, Math.min(4, 1 + Math.floor(qLen / 3)));
+          return Array.from({ length: count }, (_, k) => {
+            const offset = k / count;
+            const phase = ((simTime * 0.06 + i * 0.27 + offset) % 1 + 1) % 1;
+            const x = c.gx + c.w / 2 + (next.gx + next.w / 2 - (c.gx + c.w / 2)) * phase;
+            const y = c.gy + c.d / 2 + (next.gy + next.d / 2 - (c.gy + c.d / 2)) * phase;
+            const p = isoProj(x, y, 0.3);
+            return (
+              <g key={`wip-${i}-${k}`} pointerEvents="none">
+                {/* Bundle shadow on the floor — sells the height. */}
+                <ellipse cx={p.sx} cy={p.sy + 4} rx={5} ry={1.6} fill="#0F141944" />
+                <rect
+                  x={p.sx - 4}
+                  y={p.sy - 4}
+                  width={8}
+                  height={8}
+                  fill={colors[(i + k) % colors.length]}
+                  stroke="#0F1419"
+                  strokeWidth={0.6}
+                  opacity={0.92}
+                />
+                {/* Tie-string on top of the bundle so it reads as fabric. */}
+                <line
+                  x1={p.sx - 3}
+                  y1={p.sy - 4}
+                  x2={p.sx + 3}
+                  y2={p.sy - 4}
+                  stroke="#0F1419"
+                  strokeWidth={0.5}
+                  opacity={0.7}
+                />
+              </g>
+            );
+          });
         })}
-
-      {/* Title */}
-      <text
-        x={(minX + maxX) / 2}
-        y={minY + 30}
-        textAnchor="middle"
-        fill="#ffffff80"
-        fontFamily={SW_FONTS.mono}
-        fontSize={12}
-        fontWeight={800}
-        letterSpacing="2px"
-      >
-        {garmentName.toUpperCase()} · LIVE DES SIMULATION · ISO 3D
-      </text>
 
       <rect x={minX} y={minY} width={maxX - minX} height={maxY - minY} fill="url(#sim-vig)" pointerEvents="none" />
     </svg>
@@ -3067,17 +2910,73 @@ function IsoSewingStation({
         );
       })()}
 
-      {/* Operators bobbing in front of the table */}
+      {/* Walking operators in front of the table. Each worker runs a short
+          fetch-and-return loop: they walk from a rest position behind the
+          station to the machine head, dwell while their stitch cycle runs,
+          then walk back to swap bundles. Animation phase is per-worker so
+          a 3-server station reads as three independent crew members rather
+          than a synchronised chorus. Idle workers (k >= busy) stand still
+          at the rest position; busy ones move. */}
       {Array.from({ length: Math.min(s.serversTotal, 3) }).map((_, k) => {
-        const slot = (k - (Math.min(s.serversTotal, 3) - 1) / 2) * 0.45;
+        const headCount = Math.min(s.serversTotal, 3);
+        const slot = (k - (headCount - 1) / 2) * 0.45;
         const isWorking = k < s.busy;
-        const ph = (simTime * 1.6 + k * 0.7 + index * 0.3) % (Math.PI * 2);
+        // Per-worker walk cycle — 6-second period. Phase ∈ [0,1):
+        //   0.0 → 0.4   walk OUT  (rest position → machine head)
+        //   0.4 → 0.6   dwell AT  (sewing)
+        //   0.6 → 1.0   walk BACK (machine head → rest position)
+        // Bottleneck stations cycle faster (operator under pressure).
+        const period = isHot ? 4 : 6;
+        const t = ((simTime + k * 1.7 + index * 0.9) % period) / period;
+        let walkPhase: number;
+        if (t < 0.4) walkPhase = t / 0.4;                   // 0 → 1 (walk out)
+        else if (t < 0.6) walkPhase = 1;                    // dwell at machine
+        else walkPhase = 1 - (t - 0.6) / 0.4;               // 1 → 0 (walk back)
+        // Rest position sits BEHIND the station footprint; work position is
+        // a hair in front of the machine head. Idle workers stand at rest.
+        const restOy = d + 0.6;
+        const workOy = d * 0.55;
+        const oy = isWorking
+          ? restOy + (workOy - restOy) * walkPhase
+          : restOy;
         const ox = w / 2 + slot;
-        const oy = d + 0.5 + (isWorking ? Math.sin(ph) * 0.08 : 0);
-        const p = isoProj(ox, oy, 0);
+        // Subtle vertical bob while actually working (at the machine, dwelling).
+        const bob = isWorking && walkPhase > 0.95
+          ? Math.sin(simTime * 6 + k) * 0.05
+          : 0;
+        const p = isoProj(ox, oy + bob, 0);
+        // Walking workers gait — alternate left/right step accent on their
+        // shadow so the eye reads them as moving, not sliding.
+        const stride = isWorking && walkPhase > 0 && walkPhase < 1
+          ? Math.sin(simTime * 8 + k * 1.3) * 1.4
+          : 0;
         return (
           <g key={k} transform={`translate(${p.sx}, ${p.sy})`}>
-            <ellipse cx={0} cy={3} rx={6} ry={2.4} fill="#0F141944" />
+            {/* Stretched shadow during the walk; tight when standing still. */}
+            <ellipse
+              cx={stride}
+              cy={3}
+              rx={Math.abs(stride) > 0.2 ? 7 : 6}
+              ry={2.4}
+              fill="#0F141944"
+            />
+            {/* Carried bundle — small fabric square the worker brings to the
+                machine on the way out and returns empty-handed. Only visible
+                during the OUTBOUND half of the walk cycle. */}
+            {isWorking && walkPhase > 0 && walkPhase < 0.95 && (
+              <rect
+                x={-3}
+                y={-2}
+                width={6}
+                height={4}
+                fill={SW_COLORS.thread}
+                stroke="#0F1419"
+                strokeWidth={0.4}
+                opacity={0.95}
+                transform={`translate(${stride * 0.3}, 0)`}
+              />
+            )}
+            {/* Body */}
             <circle
               cx={0}
               cy={-4}
@@ -3086,8 +2985,10 @@ function IsoSewingStation({
               stroke="#fff"
               strokeWidth={1}
             />
+            {/* Head */}
             <circle cx={0} cy={-9} r={3} fill="#F0C49B" stroke="#0F1419" strokeWidth={0.6} />
-            {isWorking && (
+            {/* Working aura — visible only during the dwell-at-machine phase. */}
+            {isWorking && walkPhase > 0.9 && (
               <circle
                 cx={0}
                 cy={-4}
@@ -3138,6 +3039,103 @@ function IsoSewingStation({
             </circle>
             <text x={0} y={3} textAnchor="middle" fontFamily={SW_FONTS.display} fontSize={10} fontWeight={900} fill="#fff">
               !
+            </text>
+          </g>
+        );
+      })()}
+    </g>
+  );
+}
+
+/**
+ * Iso-projected ambient service block — a non-sewing workstation drawn as
+ * scene context behind the engine stations. Colour comes from the asset
+ * family (`cat`) so a fabric rack reads differently from a press table
+ * which reads differently from an inspect bench. Static — no live state.
+ */
+function IsoAmbientBlock({ amb, simTime }: { amb: AmbientLayout; simTime: number }) {
+  const origin = isoProj(amb.gx, amb.gy);
+
+  // Asset-family palette — keeps service blocks visually grouped on the
+  // floor while staying distinct from the brand-coloured sewing line.
+  const palette: Record<string, { top: string; left: string; right: string; label: string }> = {
+    cut:   { top: SW_PAL.green,  left: shade(SW_PAL.green, -0.25), right: SW_PAL.green,  label: 'CUT'   },
+    fix:   { top: SW_PAL.cream,  left: SW_PAL.creamLo,             right: SW_PAL.cream,  label: 'FIX'   },
+    store: { top: SW_PAL.yellow, left: SW_PAL.yellowLo,            right: SW_PAL.yellow, label: 'STORE' },
+    mh:    { top: SW_PAL.steel,  left: shade(SW_PAL.steel, -0.25), right: SW_PAL.steel,  label: 'MH'    },
+    buf:   { top: SW_PAL.blue,   left: SW_PAL.blueLo,              right: SW_PAL.blue,   label: 'BUF'   },
+    op:    { top: SW_PAL.red,    left: SW_PAL.redLo,               right: SW_PAL.red,    label: 'OPR'   },
+    conv:  { top: SW_PAL.metal,  left: SW_PAL.metalLo,             right: SW_PAL.metal,  label: 'CONV'  },
+    zone:  { top: SW_PAL.blue,   left: SW_PAL.blueLo,              right: SW_PAL.blue,   label: 'ZONE'  },
+    arch:  { top: SW_PAL.steel,  left: SW_PAL.creamLo,             right: SW_PAL.steel,  label: 'ARCH'  },
+    util:  { top: SW_PAL.steel,  left: shade(SW_PAL.steel, -0.3),  right: SW_PAL.steel,  label: 'UTIL'  },
+    pml:   { top: SW_PAL.blue,   left: SW_PAL.blueLo,              right: SW_PAL.blue,   label: 'PML'   },
+    sew:   { top: SW_PAL.cream,  left: SW_PAL.creamLo,             right: SW_PAL.cream,  label: 'SEW'   },
+  };
+  const pal = palette[amb.cat] ?? palette.fix;
+
+  // Buffers, mat-handling carts and operators sit at floor level — short
+  // height so they don't overpower the engine stations.
+  const h = Math.max(0.2, Math.min(amb.h, 1.6));
+
+  // Operators get a tiny walking jitter so the scene feels alive even when
+  // the sewing line is idle — the spreader / packer / supervisor crews
+  // sway around their post.
+  const jitterX = amb.cat === 'op' ? Math.cos(simTime * 1.2 + amb.gx) * 0.08 : 0;
+  const jitterY = amb.cat === 'op' ? Math.sin(simTime * 1.2 + amb.gy) * 0.08 : 0;
+
+  return (
+    <g transform={`translate(${origin.sx}, ${origin.sy})`} opacity={0.78} pointerEvents="none">
+      {/* Shadow under the block — sells the height. */}
+      {(() => {
+        const c = isoProj(amb.w / 2 + jitterX, amb.d / 2 + jitterY, 0);
+        const o = isoProj(0, 0, 0);
+        return (
+          <ellipse
+            cx={c.sx - o.sx}
+            cy={c.sy - o.sy + 3}
+            rx={amb.w * 14}
+            ry={amb.d * 6}
+            fill="#0F141955"
+          />
+        );
+      })()}
+      {/* Body — short cuboid in the asset-family palette. */}
+      <g
+        transform={(() => {
+          const a = isoProj(jitterX, jitterY, 0);
+          const o = isoProj(0, 0, 0);
+          return `translate(${a.sx - o.sx}, ${a.sy - o.sy})`;
+        })()}
+      >
+        {CuboidFaces({
+          w: amb.w,
+          d: amb.d,
+          h,
+          top: pal.top,
+          left: pal.left,
+          right: pal.right,
+        })}
+      </g>
+      {/* Small category-tag pip on top — a 6×6 brand-coloured square that
+          encodes the block role so the user can scan the floor and tell
+          a rack from a cart from a press. */}
+      {(() => {
+        const p = isoProj(amb.w / 2, amb.d / 2, h + 0.15);
+        return (
+          <g transform={`translate(${p.sx}, ${p.sy})`}>
+            <rect x={-12} y={-9} width={24} height={10} rx={2} fill="#0a0d12cc" stroke={amb.deptColor} strokeWidth={0.8} />
+            <text
+              x={0}
+              y={-2}
+              textAnchor="middle"
+              fontFamily={SW_FONTS.mono}
+              fontSize={6}
+              fontWeight={900}
+              fill={amb.deptColor}
+              letterSpacing="0.1em"
+            >
+              {pal.label}
             </text>
           </g>
         );

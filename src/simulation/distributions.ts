@@ -149,6 +149,34 @@ function gammaSample(shape: number, rng: () => number): number {
   return d; // pathological — fall back to the mean
 }
 
+/**
+ * Return a new ServiceDist with every time / location parameter multiplied
+ * by `factor`. Variance is preserved as a fraction of the mean (CV stays
+ * constant). Used to inflate a station's nominal service distribution by
+ * 1/shareFactor when an operator is shared across N stations — the
+ * analytical KPI model then sees the same effective mean the PML engine
+ * already enforces via `cycleMinFor`.
+ *
+ * For lognormal, scaling the mean by f leaves σ unchanged and bumps μ by
+ * ln(f); the shift parameter (linear) is multiplied directly. For Beta /
+ * Triangular / Uniform, every "time" knob is scaled in place.
+ */
+export function scaleServiceDist(d: ServiceDist, factor: number): ServiceDist {
+  const f = Number.isFinite(factor) && factor > 0 ? factor : 1;
+  if (f === 1) return d;
+  switch (d.kind) {
+    case 'exp':       return { ...d, mean: d.mean * f };
+    case 'det':       return { ...d, value: d.value * f };
+    case 'uniform':   return { ...d, mean: d.mean * f };
+    case 'erlang':    return { ...d, mean: d.mean * f };
+    case 'normal':    return { ...d, mean: d.mean * f, std: d.std * f };
+    case 'triangular':return { ...d, min: d.min * f, mode: d.mode * f, max: d.max * f, shift: (d.shift ?? 0) * f };
+    case 'lognormal': return { ...d, mu: d.mu + Math.log(f), shift: (d.shift ?? 0) * f };
+    case 'weibull':   return { ...d, scale: d.scale * f, shift: (d.shift ?? 0) * f };
+    case 'beta':      return { ...d, min: (d.min ?? 0) * f, scale: (d.scale ?? 1) * f, shift: (d.shift ?? 0) * f };
+  }
+}
+
 /** Analytical mean of the distribution (E[S]). */
 export function meanOf(d: ServiceDist): number {
   switch (d.kind) {
