@@ -1,0 +1,459 @@
+/**
+ * Excel → Builder-line importer. Reads "Machine Layout" sheets exported
+ * by Modelama (and similar Asian-factory line-plan templates) and
+ * produces a flat list of stations ready to materialize as a SewingLine
+ * + Workstations on the canonical Twin.
+ *
+ * Source shape (what the parser expects to find on the chosen sheet):
+ *
+ *   Row 0       MACHINE LAYOUT
+ *   Rows 1-4    metadata block:
+ *                 DESCRIPTION | DRESS | LINE NO. | 6   | MACHINE     | 45
+ *                 Style No.   | 100…  |          |     | MACHINE SMV | 26.45
+ *                 Buyer       | INC   |          |     | No of Work  | 62
+ *                 Quantity    | 6250  | FINAL INSPECTION TABLE | … | Target 8 Hrs | 61.24
+ *   Row 6       header:
+ *                 OPERATION | CODE NO. | TYPE OF M/C |   | TYPE OF M/C | CODE NO. | OPERATION
+ *   Rows 7..n   alternating data + visually-blank spacer rows. Each data
+ *               row may carry a station on the LEFT half (cols 0..2), the
+ *               RIGHT half (cols 4..6), both, or neither.
+ *
+ * The two halves represent physically facing rows on a Progressive-
+ * Bundle (PBS) sewing line — operators sit on either side of an aisle.
+ * Importantly, codeNo runs *continuously across both halves* (e.g.
+ * left=63, right=62, left=64, right=60…), not within one column.
+ * We treat codeNo as "position along the line" and use it for X
+ * placement; `side` decides which row (Y).
+ */
+
+import * as XLSX from 'xlsx';
+import { useTwin, selectActiveTwin } from '../store/twin';
+import type { DepartmentColorKey } from '../domain/twin';
+
+export interface ImportedStation {
+  /** "Code No." from the sheet — Modelama's station-position number. */
+  codeNo?: number;
+  /** Operation label (e.g. "BOTTOM HEM SHELL"). */
+  name: string;
+  /** Raw machine string from the sheet (e.g. "SN", "OL-5", "TABLE"). */
+  rawMachine: string;
+  /** Mapped ISO_FIXTURE_CATALOG id (e.g. `a_snls`, `a_bartack`). */
+  catalogId: string;
+  /** Aisle side. 'L' = top facing row, 'R' = bottom facing row. */
+  side: 'L' | 'R';
+}
+
+export interface ImportedFloor {
+  stations: ImportedStation[];
+  source: {
+    fileName: string;
+    sheetName: string;
+    style?: string;
+    description?: string;
+    buyer?: string;
+    lineNo?: number;
+    machineCount?: number;
+    workstationCount?: number;
+    machineSmv?: number;
+    quantity?: number;
+    target?: number;
+  };
+  warnings: string[];
+}
+
+// ── Modelama machine vernacular → ISO_FIXTURE_CATALOG id ─────────────────
+// Long/specific patterns first; falls through to a_op_desk if nothing
+// matches so unrecognised cells still place a station (and we surface a
+// warning). Each entry covers the abbreviations Modelama actually uses on
+// these layout sheets — see the four xlsx samples in MODELAMA DATA/.
+const FIXTURE_PATTERNS: { pattern: RegExp; catalogId: string; label: string }[] = [
+  // Overlocks first — they're the most ambiguous if we let SN match early
+  { pattern: /\bo\s*\/?\s*l\s*5\b|\bol[-\s]?5\b|\b5\s*o\s*\/?\s*l/i, catalogId: 'a_5ol', label: '5-thread overlock' },
+  { pattern: /\bo\s*\/?\s*l\s*4\b|\bol[-\s]?4\b|\b4\s*o\s*\/?\s*l/i, catalogId: 'a_4ol', label: '4-thread overlock' },
+  { pattern: /\bo\s*\/?\s*l\s*3\b|\bol[-\s]?3\b|\b3\s*o\s*\/?\s*l/i, catalogId: 'a_4ol', label: '3-thread overlock → 4-thread' },
+  { pattern: /\bover[\s-]*lock|\bo\/l\b|\bol\b/i, catalogId: 'a_4ol', label: 'overlock (unspecified)' },
+  // Speciality sewing
+  { pattern: /\bbartack|\bbt\b/i, catalogId: 'a_bartack', label: 'bartack' },
+  { pattern: /\bbutton\s*hole|\bbh\b/i, catalogId: 'a_buttonhole', label: 'buttonhole' },
+  { pattern: /\bbutton\s*(sew|stitch|stch|attach)|\bbs\b/i, catalogId: 'a_buttonsew', label: 'button sew' },
+  { pattern: /\bembroid|\bemb\b/i, catalogId: 'a_embroidery', label: 'embroidery' },
+  // Flatlock / cover / feed-of-arm / kansai
+  { pattern: /\b(coverstitch|cover\s*stitch|flat\s*lock|flatlock|\bfl\b)/i, catalogId: 'a_flatlock', label: 'flatlock' },
+  { pattern: /\b(feed\s*of\s*arm|foa|\bfb\b)/i, catalogId: 'a_foa', label: 'feed-of-arm' },
+  { pattern: /\bkansai|\bks\b/i, catalogId: 'a_kansai', label: 'kansai' },
+  // Cutting / spreading
+  { pattern: /\bcad\b/i, catalogId: 'a_cnc_cutter', label: 'CAD cutter' },
+  { pattern: /\b(cutter|cut\b|straight\s*knife|band\s*knife)/i, catalogId: 'a_knife_straight', label: 'cutter' },
+  { pattern: /\bspread/i, catalogId: 'a_spread_auto', label: 'spreader' },
+  // Pressing / fusing / steam
+  { pattern: /\bfusing\b|\bfuse\b/i, catalogId: 'a_iron_inline', label: 'fusing' },
+  { pattern: /\bsteam\s*tunnel\b|\bsteam\b/i, catalogId: 'a_iron_inline', label: 'steam' },
+  { pattern: /\biron\b|\bpress\b/i, catalogId: 'a_iron_inline', label: 'iron / press' },
+  // Inspection
+  { pattern: /\btable\b/i, catalogId: 'a_inspect_table', label: 'inspection table' },
+  { pattern: /\binspect|\bqc\b|\baql\b/i, catalogId: 'a_inspect_table', label: 'inspection' },
+  // Sewing — double then single, both AFTER speciality so BH/BS/BT take precedence
+  { pattern: /\bdnl(s|m|c|ec)?\b|\bdn\b|\bdouble\s*needle/i, catalogId: 'a_dnls', label: 'double needle' },
+  { pattern: /\bsn(l|e|k|c|ec)?\w*\b|\bsn\b|\bsingle\s*needle|\block\s*stitch/i, catalogId: 'a_snls', label: 'single needle' },
+  // Manual helper / hand
+  { pattern: /\bhd\b|\bhelper\b|\bhand\b|\bmnl\b|\bmanual\b/i, catalogId: 'a_op_desk', label: 'manual / helper' },
+];
+
+// ── Public API ────────────────────────────────────────────────────────────
+/**
+ * Parse an .xlsx and return EVERY Machine Layout sheet inside it.
+ * Modelama workbooks sometimes carry stale template layouts alongside the
+ * file's real layout (e.g. `100225286 LINE-6.xlsx` has both a `7800`
+ * carry-over and the actual `1893` sheet for style 100225286) — surfacing
+ * every layout lets the user pick which ones to keep on import.
+ */
+export function parseFloorXlsx(input: ArrayBuffer | Uint8Array, fileName = 'imported.xlsx'): ImportedFloor[] {
+  const wb = XLSX.read(input, { type: 'array', cellDates: false });
+  const layouts: ImportedFloor[] = [];
+  for (const name of wb.SheetNames) {
+    const ws = wb.Sheets[name];
+    if (!ws) continue;
+    const rows = XLSX.utils.sheet_to_json<unknown[]>(ws, { header: 1, defval: null, blankrows: false });
+    if (findLayoutHeaderRow(rows) < 0) continue;
+    try {
+      const parsed = parseLayoutRows(rows, fileName, name);
+      // Filter out sheets that match the header structure but have zero
+      // stations under it (defensive — parseLayoutRows already throws on 0).
+      if (parsed.stations.length > 0) layouts.push(parsed);
+    } catch {
+      // Skip — empty-table sheets shouldn't poison the batch.
+    }
+  }
+  if (layouts.length === 0) {
+    throw new Error('No Machine Layout sheets found in this workbook.');
+  }
+  return layouts;
+}
+
+/** Pick a single best layout from a workbook — used when the caller only
+ *  wants one result. Prefers the sheet whose internal Style No. matches
+ *  the leading numeric token in the filename; falls back to row count. */
+export function parseBestFloorXlsx(input: ArrayBuffer | Uint8Array, fileName = 'imported.xlsx'): ImportedFloor {
+  const all = parseFloorXlsx(input, fileName);
+  const fileStyle = (fileName.match(/^\s*(\d{4,})/) || [])[1];
+  if (fileStyle) {
+    const exact = all.find((f) => normaliseStyle(f.source.style) === normaliseStyle(fileStyle));
+    if (exact) return exact;
+  }
+  // Score-based fallback: prefer sheet with the most stations.
+  return all.slice().sort((a, b) => b.stations.length - a.stations.length)[0];
+}
+
+function normaliseStyle(s: string | undefined): string {
+  if (!s) return '';
+  return s.toLowerCase().replace(/[^a-z0-9]+/g, '');
+}
+
+export function parseLayoutRows(rows: unknown[][], fileName: string, sheetName: string): ImportedFloor {
+  const warnings: string[] = [];
+  const headerRow = findLayoutHeaderRow(rows);
+  if (headerRow < 0) {
+    throw new Error('Could not find the layout header row (needs "TYPE OF M/C" + "OPERATION" / "CODE NO.").');
+  }
+  // Column layout per Modelama spec — header is *symmetric* around column 3
+  // (an empty gutter). We hardcode the offsets because the sheets we've
+  // seen all match this exact 7-col grid; if a future sheet deviates we can
+  // map columns by header text.
+  const COL_L_NAME = 0;
+  const COL_L_CODE = 1;
+  const COL_L_M = 2;
+  const COL_R_M = 4;
+  const COL_R_CODE = 5;
+  const COL_R_NAME = 6;
+
+  const source = readLayoutMetadata(rows.slice(0, headerRow));
+  source.fileName = fileName;
+  source.sheetName = sheetName;
+
+  const stations: ImportedStation[] = [];
+  for (let r = headerRow + 1; r < rows.length; r++) {
+    const row = rows[r] ?? [];
+    // LEFT side
+    const lName = toString(row[COL_L_NAME]);
+    const lMach = toString(row[COL_L_M]);
+    const lCode = toNumber(row[COL_L_CODE]);
+    if (lName && lMach) {
+      const { catalogId, matched } = resolveCatalogId(lMach);
+      if (!matched) warnings.push(`Left col row ${r + 1}: machine "${lMach}" unmapped — fell back to ${catalogId}.`);
+      stations.push({
+        codeNo: lCode ?? undefined,
+        name: lName,
+        rawMachine: lMach,
+        catalogId,
+        side: 'L',
+      });
+    }
+    // RIGHT side
+    const rName = toString(row[COL_R_NAME]);
+    const rMach = toString(row[COL_R_M]);
+    const rCode = toNumber(row[COL_R_CODE]);
+    if (rName && rMach) {
+      const { catalogId, matched } = resolveCatalogId(rMach);
+      if (!matched) warnings.push(`Right col row ${r + 1}: machine "${rMach}" unmapped — fell back to ${catalogId}.`);
+      stations.push({
+        codeNo: rCode ?? undefined,
+        name: rName,
+        rawMachine: rMach,
+        catalogId,
+        side: 'R',
+      });
+    }
+  }
+
+  if (stations.length === 0) {
+    throw new Error('Found a Machine Layout header but no stations under it.');
+  }
+
+  return { stations, source, warnings };
+}
+
+// ── Helpers ───────────────────────────────────────────────────────────────
+function findLayoutHeaderRow(rows: unknown[][]): number {
+  // Look in the first ~40 rows for one that has "TYPE OF M/C" along with
+  // "OPERATION" or "CODE NO." — these three header labels uniquely identify
+  // Modelama's Machine Layout header row.
+  for (let r = 0; r < Math.min(rows.length, 40); r++) {
+    const norm = (rows[r] ?? []).map((c) => normaliseHeaderText(c));
+    const hasTypeMc = norm.some((c) => c === 'typeofmc' || c === 'typemc');
+    const hasOperation = norm.some((c) => c === 'operation' || c === 'operationname');
+    const hasCode = norm.some((c) => c === 'codeno' || c === 'code');
+    if (hasTypeMc && (hasOperation || hasCode)) return r;
+  }
+  return -1;
+}
+
+function readLayoutMetadata(headerRows: unknown[][]): ImportedFloor['source'] {
+  const src: ImportedFloor['source'] = { fileName: '', sheetName: '' };
+  for (const row of headerRows) {
+    for (let c = 0; c < row.length; c++) {
+      const label = normaliseHeaderText(row[c]);
+      if (!label) continue;
+      const v = pickNextValue(row, c);
+      const num = toNumber(v);
+      if (label === 'description' && v) src.description ??= v;
+      else if (label === 'styleno' && v) src.style ??= v;
+      else if (label === 'buyer' && v) src.buyer ??= v;
+      else if (label === 'quantity' && num != null) src.quantity ??= num;
+      else if ((label === 'lineno' || label === 'line') && num != null) src.lineNo ??= num;
+      else if (label === 'machine' && num != null) src.machineCount ??= num;
+      else if (label === 'machinesmv' && num != null) src.machineSmv ??= num;
+      else if (label === 'noofworkstations' && num != null) src.workstationCount ??= num;
+      else if (label.startsWith('target') && num != null) src.target ??= num;
+    }
+  }
+  return src;
+}
+
+function pickNextValue(row: unknown[], from: number): string | undefined {
+  for (let c = from + 1; c < Math.min(row.length, from + 6); c++) {
+    const v = toString(row[c]);
+    if (v) return v;
+  }
+  return undefined;
+}
+
+function resolveCatalogId(raw: string): { catalogId: string; matched: boolean } {
+  const cleaned = (raw ?? '').toString().trim();
+  if (!cleaned) return { catalogId: 'a_op_desk', matched: false };
+  for (const { pattern, catalogId } of FIXTURE_PATTERNS) {
+    if (pattern.test(cleaned)) return { catalogId, matched: true };
+  }
+  return { catalogId: 'a_op_desk', matched: false };
+}
+
+function normaliseHeaderText(v: unknown): string {
+  if (v == null) return '';
+  return String(v).toLowerCase().replace(/[^a-z0-9]+/g, '').trim();
+}
+
+function toString(v: unknown): string | undefined {
+  if (v == null) return undefined;
+  const s = String(v).trim();
+  return s.length ? s : undefined;
+}
+
+function toNumber(v: unknown): number | null {
+  if (v == null || v === '') return null;
+  if (typeof v === 'number') return Number.isFinite(v) ? v : null;
+  const s = String(v).replace(/[, ]+/g, '');
+  const n = Number(s);
+  return Number.isFinite(n) ? n : null;
+}
+
+// ── Twin materialiser ────────────────────────────────────────────────────
+/**
+ * Lay the parsed stations out as a two-row facing line in Twin grid space.
+ * Returns the relative placement positions; the caller adds an origin
+ * offset so multiple imports don't stack on top of each other.
+ *
+ * Geometry: codeNo runs continuously across both sides (e.g. L=64, R=62,
+ * L=63, R=60…) — we use codeNo as the "position along the line" so that
+ * physically-adjacent stations on the sheet end up physically adjacent on
+ * the canvas. Side ⇒ top row (L) or bottom row (R, across the aisle).
+ */
+export interface PlacedStation extends ImportedStation {
+  /** Cell offset within the new line's bounding rect. */
+  x: number;
+  y: number;
+  /** Order along the line, ascending (0 = head, N-1 = tail). */
+  seq: number;
+}
+
+export interface LayoutPlacement {
+  /** Stations with x/y resolved, sorted in flow order (head→tail). */
+  stations: PlacedStation[];
+  /** Bounding rect width / depth in cells. */
+  widthCells: number;
+  depthCells: number;
+  /** Suggested name for the new SewingLine. */
+  lineName: string;
+  /** Suggested name for the new Department hosting the line. */
+  deptName: string;
+}
+
+const STATION_STRIDE = 3;      // Cells between adjacent stations along X
+const AISLE_WIDTH = 4;          // Cells separating the two facing rows
+
+export function placeLayoutStations(parsed: ImportedFloor): LayoutPlacement {
+  // Sort by codeNo ascending so flow goes from low codes (line head) to
+  // high codes (final inspection at the tail). Stations missing codeNo
+  // are pushed to the end in the order they appeared.
+  const withCode = parsed.stations.filter((s) => s.codeNo != null);
+  const sansCode = parsed.stations.filter((s) => s.codeNo == null);
+  withCode.sort((a, b) => (a.codeNo! - b.codeNo!));
+  const ordered = [...withCode, ...sansCode];
+
+  // Build a column index by codeNo so left + right stations sharing a
+  // codeNo (rare but plausible) line up at the same X.
+  const codePositions = new Map<number, number>();
+  let nextCol = 0;
+  for (const s of ordered) {
+    if (s.codeNo == null) continue;
+    if (!codePositions.has(s.codeNo)) codePositions.set(s.codeNo, nextCol++);
+  }
+  const fallbackBase = nextCol;
+
+  const placed: PlacedStation[] = [];
+  let seqCounter = 0;
+  let fallbackCounter = 0;
+  for (const s of ordered) {
+    const col = s.codeNo != null
+      ? (codePositions.get(s.codeNo) ?? 0)
+      : (fallbackBase + fallbackCounter++);
+    const x = col * STATION_STRIDE;
+    const y = s.side === 'L' ? 0 : AISLE_WIDTH;
+    placed.push({ ...s, x, y, seq: seqCounter++ });
+  }
+
+  const widthCells = (Math.max(0, fallbackBase + fallbackCounter - 1)) * STATION_STRIDE + 3;
+  const depthCells = AISLE_WIDTH + 3;
+  const styleLabel = parsed.source.style ?? parsed.source.sheetName ?? 'Imported';
+  const lineLabel = parsed.source.lineNo != null ? `Line ${parsed.source.lineNo}` : 'Imported line';
+
+  return {
+    stations: placed,
+    widthCells,
+    depthCells,
+    lineName: `${lineLabel} · ${styleLabel}`,
+    deptName: `Imported · ${styleLabel}`,
+  };
+}
+
+// ── Commit ───────────────────────────────────────────────────────────────
+/**
+ * Materialise a parsed layout into the active Twin. Creates a new
+ * Department to host the line (positioned to the right of all existing
+ * departments so multiple imports don't stack), the SewingLine itself,
+ * one Workstation per station, and a flow connector between every
+ * adjacent pair on the line (head → tail).
+ *
+ * Returns a summary so the caller can surface counts in a toast.
+ */
+export interface CommittedFloor {
+  deptId: string;
+  lineId: string;
+  workstationCount: number;
+  connectorCount: number;
+}
+
+type TwinStore = ReturnType<typeof useTwin.getState>;
+
+export function commitFloorImport(
+  store: TwinStore,
+  _parsed: ImportedFloor,
+  placement: LayoutPlacement,
+  options?: { color?: DepartmentColorKey; productionSystem?: 'PBS' | 'straight' | 'modular' | 'UPS' | 'synchro' },
+): CommittedFloor {
+  const color: DepartmentColorKey = options?.color ?? 'blue';
+  const productionSystem = options?.productionSystem ?? 'PBS';
+
+  // Find an empty patch of the grid for the new department — sit it to
+  // the right of everything that already exists, with a 4-cell gutter.
+  const active = selectActiveTwin(store);
+  if (!active) throw new Error('No active twin to import into.');
+  const gutter = 4;
+  let originX = 0;
+  let originY = 0;
+  if (active.departments.length > 0) {
+    for (const d of active.departments) {
+      const right = d.bounds.x + d.bounds.w;
+      if (right > originX) originX = right;
+    }
+    originX += gutter;
+  }
+  // Width: stretches across all station columns. Depth: aisle + 4-cell rows
+  // top & bottom.
+  const w = Math.max(placement.widthCells + 2, 8);
+  const h = placement.depthCells + 2;
+
+  const deptId = store.addDepartment({
+    name: placement.deptName,
+    kind: 'sewing',
+    color,
+    bounds: { x: originX, y: originY, w, h },
+  });
+
+  const lineId = store.addLine({
+    deptId,
+    name: placement.lineName,
+    productionSystem,
+    color,
+    operatorTarget: placement.stations.length,
+  });
+
+  // Drop each workstation, remembering the new id so we can wire flow
+  // connectors between them afterwards.
+  const wsIds: string[] = [];
+  for (const s of placement.stations) {
+    const id = store.addWorkstation({
+      deptId,
+      catalogId: s.catalogId,
+      // Inset by 1 cell so stations sit *inside* the dept bounds rather
+      // than flush against the border.
+      position: { x: originX + 1 + s.x, y: originY + 1 + s.y },
+      name: s.name,
+    });
+    // Assign to the line.
+    store.updateWorkstation(id, { lineId });
+    wsIds.push(id);
+  }
+
+  // Flow connectors head → tail (sequentially along the line). Use a
+  // bundle carrier since these layouts come from PBS lines.
+  let connectorCount = 0;
+  for (let i = 0; i < wsIds.length - 1; i++) {
+    const cid = store.addConnector({
+      kind: 'flow',
+      fromWsId: wsIds[i],
+      toWsId: wsIds[i + 1],
+    });
+    if (cid) connectorCount++;
+  }
+
+  return { deptId, lineId, workstationCount: wsIds.length, connectorCount };
+}
