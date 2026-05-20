@@ -2918,6 +2918,18 @@ function CanvasSVG(props: CanvasSVGProps) {
           const sharedPct = sharedAsgn
             ? Math.round((sharedAsgn.shareFrac ?? 1) * 100)
             : null;
+          // Count operators primarily assigned to this workstation. This is
+          // the c (server count) the queue analysis will use, so showing it
+          // on every tile keeps the Builder visually honest with the report.
+          const wsAssignments = (twin.assignments ?? []).filter(
+            (a) => a.wsId === w.id && a.role !== 'floater',
+          );
+          const operatorCount = wsAssignments.length > 0
+            ? wsAssignments.length
+            : (w.resources?.workersRequired ?? 0);
+          const operatorNames = wsAssignments
+            .map((a) => (twin.operators ?? []).find((o) => o.id === a.operatorId)?.name ?? null)
+            .filter((n): n is string => !!n);
           return (
             <g
               key={w.id}
@@ -2930,6 +2942,8 @@ function CanvasSVG(props: CanvasSVGProps) {
                 lens={lens}
                 placing={props.drop.kind !== 'none'}
                 sharedPct={sharedPct}
+                operatorCount={operatorCount}
+                operatorNames={operatorNames}
                 onClick={(e) => props.onSelect({ kind: 'ws', id: w.id }, { shift: e.shiftKey })}
                 onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
               />
@@ -3329,6 +3343,8 @@ function WorkstationSprite({
   lens,
   placing,
   sharedPct = null,
+  operatorCount = 0,
+  operatorNames = [],
   onClick,
   onMouseDown,
 }: {
@@ -3344,6 +3360,13 @@ function WorkstationSprite({
    *  them out — adding a pill on every rotation station would just
    *  clutter the canvas. */
   sharedPct?: number | null;
+  /** Operators assigned to this workstation (= c, the server count the
+   *  queue analysis uses). Drives the always-on operator chip below
+   *  the sprite so the Builder makes the c-count visible without the
+   *  user having to switch to the RESOURCES lens. */
+  operatorCount?: number;
+  /** Operator names — surfaced on hover for traceability. */
+  operatorNames?: string[];
   onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
@@ -3456,6 +3479,56 @@ function WorkstationSprite({
           <text x={0} y={1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
             {ws.kpiObserved ? `${Math.round(ws.kpiObserved.utilizationPct)}% util` : 'no run'}
           </text>
+        </g>
+      )}
+
+      {/* OPERATOR chip — always on, regardless of lens. Shows the c that
+          the queue analysis will use as the parallel-server count, plus
+          tiny dots for the first ≤6 operators. Operator names appear in
+          a SVG <title> tooltip so hover reveals the roster. Sits below
+          the sprite so it doesn't collide with the per-lens header pill
+          above. */}
+      {operatorCount > 0 && (
+        <g transform="translate(0, 22)" style={{ pointerEvents: 'all' }}>
+          <title>
+            {operatorNames.length > 0
+              ? `Operators: ${operatorNames.join(', ')}`
+              : `${operatorCount} operator${operatorCount === 1 ? '' : 's'} required`}
+          </title>
+          <rect
+            x={-22}
+            y={-8}
+            width={44}
+            height={14}
+            rx={7}
+            fill={SW_COLORS.ink}
+            fillOpacity={0.78}
+            stroke={SW_COLORS.brand}
+            strokeOpacity={0.55}
+            strokeWidth={0.7}
+          />
+          <text
+            x={-10}
+            y={3}
+            textAnchor="middle"
+            fontFamily={SW_FONTS.mono}
+            fontSize={9}
+            fontWeight={800}
+            fill="#fff"
+            style={{ letterSpacing: '0.04em' }}
+          >
+            {`☻×${operatorCount}`}
+          </text>
+          {Array.from({ length: Math.min(operatorCount, 6) }, (_, i) => (
+            <circle
+              key={i}
+              cx={2 + i * 3}
+              cy={0}
+              r={1.4}
+              fill={SW_COLORS.brand}
+              fillOpacity={0.95}
+            />
+          ))}
         </g>
       )}
 
