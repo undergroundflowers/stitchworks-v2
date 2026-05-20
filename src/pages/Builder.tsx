@@ -39,13 +39,14 @@ import {
   ptsToStr,
   type ApparelCategoryId,
   type IsoFixture,
+  type GarmentTemplate,
 } from '../domain';
 import {
   useTwin,
   selectActiveTwin,
   type DepartmentColorKey,
 } from '../store/twin';
-import { useProject, useFactoryLibrary } from '../store';
+import { useProject, useFactoryLibrary, useGarments } from '../store';
 import type {
   Assignment,
   Department,
@@ -2676,6 +2677,10 @@ function workstationScreenCenter(ws: Workstation): { sx: number; sy: number } {
 
 function CanvasSVG(props: CanvasSVGProps) {
   const { twin, lens, hoverCell, drop, selected, selectedWsIds, selectRect, zoom, pan, stageSize, clipboardGhost } = props;
+  // OPERATIONS-lens labels resolve through the garment template (bulletin code
+  // or short name) instead of the noisy namespaced opId. Pulled once here so
+  // the per-station map below is a cheap dictionary lookup.
+  const garmentsById = useGarments().byId;
 
   // Focus-dim: when there's an active selection, fade everything that isn't
   // the focused entity so the user sees what they've picked. `focusActive` is
@@ -2944,6 +2949,7 @@ function CanvasSVG(props: CanvasSVGProps) {
                 sharedPct={sharedPct}
                 operatorCount={operatorCount}
                 operatorNames={operatorNames}
+                opLabel={opLabelFor(w, garmentsById)}
                 onClick={(e) => props.onSelect({ kind: 'ws', id: w.id }, { shift: e.shiftKey })}
                 onMouseDown={(e) => props.onStartDrag('ws', w.id, e)}
               />
@@ -3336,6 +3342,33 @@ function SewingLineBand({
 
 // ── WORKSTATION sprite ────────────────────────────────────────────────────────
 
+/**
+ * Short label for the OPERATIONS-lens pill above a station. The raw opId
+ * carries four namespacing layers (`mod-{style}-imp-{code}-{idx}`) for
+ * uniqueness; on the canvas we only want the bulletin-recognised handle
+ * — the op's authored `code`, falling back to a truncated `name`, then
+ * to a stripped opId when the garment template can't resolve it.
+ */
+function opLabelFor(
+  ws: Workstation,
+  garmentsById: Record<string, GarmentTemplate>,
+): string {
+  const { opId, garmentId, freeText } = ws.operation;
+  if (!opId) return freeText ?? '—';
+  const op = garmentId
+    ? garmentsById[garmentId]?.operations.find((o) => o.id === opId)
+    : undefined;
+  if (op?.code) return op.code;
+  if (op?.name) {
+    const n = op.name.trim();
+    return n.length > 14 ? n.slice(0, 13) + '…' : n;
+  }
+  return opId
+    .replace(/^mod-[a-z0-9]+-/i, '')
+    .replace(/^imp-/i, '')
+    .replace(/-\d+$/, '');
+}
+
 function WorkstationSprite({
   ws,
   selected,
@@ -3345,6 +3378,7 @@ function WorkstationSprite({
   sharedPct = null,
   operatorCount = 0,
   operatorNames = [],
+  opLabel = '—',
   onClick,
   onMouseDown,
 }: {
@@ -3367,6 +3401,9 @@ function WorkstationSprite({
   operatorCount?: number;
   /** Operator names — surfaced on hover for traceability. */
   operatorNames?: string[];
+  /** Short OPERATIONS-lens label (bulletin code, short name, or stripped opId).
+   *  Resolved upstream so the sprite stays free of garment-template lookups. */
+  opLabel?: string;
   onClick: (e: React.MouseEvent) => void;
   onMouseDown: (e: React.MouseEvent) => void;
 }) {
@@ -3452,15 +3489,22 @@ function WorkstationSprite({
         />
       )}
 
-      {/* OPERATIONS lens badge */}
-      {lens === 'operations' && (
-        <g transform="translate(0, -28)">
-          <rect x={-30} y={-9} width={60} height={14} rx={3} fill={SW_COLORS.ink} fillOpacity={0.85} />
-          <text x={0} y={1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
-            {ws.operation.opId ?? ws.operation.freeText ?? '—'}
-          </text>
-        </g>
-      )}
+      {/* OPERATIONS lens badge — pill width auto-fits the resolved label
+          (bulletin code or short name) so long opIds don't bleed past the
+          rect. Full opId stays available on hover via the <title>. */}
+      {lens === 'operations' && (() => {
+        const label = opLabel || '—';
+        const pillW = Math.max(28, Math.min(110, label.length * 6 + 12));
+        return (
+          <g transform="translate(0, -28)">
+            <title>{ws.operation.opId ?? ws.operation.freeText ?? ''}</title>
+            <rect x={-pillW / 2} y={-9} width={pillW} height={14} rx={3} fill={SW_COLORS.ink} fillOpacity={0.85} />
+            <text x={0} y={1} textAnchor="middle" fontFamily={SW_FONTS.mono} fontSize={9} fontWeight={700} fill="#fff" style={{ letterSpacing: '0.04em' }}>
+              {label}
+            </text>
+          </g>
+        );
+      })()}
 
       {/* RESOURCES lens badge — worker count */}
       {lens === 'resources' && ws.resources.workersRequired > 0 && (
