@@ -281,6 +281,14 @@ export function parseRows(rows: unknown[][], fileName: string, sheetName: string
       category,
       notes: composeNotes(parsed),
     };
+    // Carry the OB's "Planned W/S" hint onto the Operation so downstream
+    // builders (modelama bundle, line-balance auto-layout) can spin up the
+    // same number of parallel servers the IE planned. Round 0.5 → 1 because
+    // sub-station shares are modelled as a full workstation with shareFrac
+    // on the operator side, not half a machine.
+    if (parsed.plannedWs && parsed.plannedWs > 0) {
+      op.servers = Math.max(1, Math.round(parsed.plannedWs));
+    }
     ops.push(op);
   }
 

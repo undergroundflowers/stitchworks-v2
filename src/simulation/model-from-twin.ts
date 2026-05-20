@@ -270,19 +270,45 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
   let totalWorkers = 0;
   const bundleSizeSamples: number[] = [];
 
+  // Distinct operator IDs (via `Assignment` rows) per workstation. Drives
+  // the queue analysis's `c` so it matches the operator badges the Builder
+  // renders on each tile. Falls back to `workersRequired` when no
+  // assignment row exists, which matches the legacy implicit-assignment
+  // path for older twins.
+  const assignedByWs = new Map<string, Set<string>>();
+  for (const a of opts.twin.assignments ?? []) {
+    if (a.role === 'floater') continue;
+    const set = assignedByWs.get(a.wsId) ?? new Set<string>();
+    set.add(a.operatorId);
+    assignedByWs.set(a.wsId, set);
+  }
+  const operatorsAtWs = (ws: Workstation): number => {
+    const assigned = assignedByWs.get(ws.id)?.size ?? 0;
+    if (assigned > 0) return assigned;
+    return Math.max(1, ws.resources.workersRequired ?? 1);
+  };
+
   for (const opId of orderedOpIds) {
     const op = opById[opId];
     const wsList = byOpId.get(opId) ?? [];
     if (wsList.length === 0) continue;
 
     operations.push(op);
-    stationServers.push(wsList.length);
+    // c = sum of operators across every workstation on this op. Each
+    // operator can run one machine in parallel, so the queue-theory c
+    // matches what the Builder visualises on the tiles. Earlier this was
+    // `wsList.length`, which silently dropped the operator count when a
+    // workstation carried `workersRequired > 1` (multi-operator helper
+    // bench) and overcounted when `workersRequired = 0` (the station was
+    // unstaffed). Both cases broke the Reports-vs-OB validation.
+    const cForOp = wsList.reduce((s, ws) => s + operatorsAtWs(ws), 0);
+    stationServers.push(Math.max(1, cForOp));
 
     let workersAtOp = 0;
     let sumX = 0;
     let sumY = 0;
     for (const ws of wsList) {
-      const w = ws.resources.workersRequired ?? 1;
+      const w = operatorsAtWs(ws);
       workersAtOp += w;
       sumX += ws.position.x;
       sumY += ws.position.y;

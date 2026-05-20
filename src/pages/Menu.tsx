@@ -12,6 +12,10 @@ import {
 } from '../store';
 import { buildReferenceFactoryTwin } from '../domain/reference-twin';
 import { fmtCalendar } from '../simulation/timeUnit';
+import {
+  fetchModelamaBundle,
+  buildModelamaTwin,
+} from '../lib/modelama-bundle';
 
 /**
  * Splash / main menu — entry point of the app. Two-column layout:
@@ -91,6 +95,47 @@ export function MenuPage() {
   // fresh canonical with the multi-line reference twin (Hossain ·
   // Elnaggar · Morshed · Kursun · Koç stacked on one floor). Lands the
   // user in Builder so they can browse the seeded lines immediately.
+  // One-click Modelama factory: fetches the four bundled .xlsx files,
+  // parses them into garments + layouts, assembles a 4-line twin and
+  // lands the user in Builder. The IndExc files live under public/modelama
+  // so they ship with the build.
+  const setGarmentEdit = useProject((s) => s.setGarmentEdit);
+  const [modelamaLoading, setModelamaLoading] = useState(false);
+  const handleLoadModelamaFactory = async () => {
+    if (atCap || modelamaLoading) return;
+    const proceed =
+      typeof window === 'undefined'
+        ? true
+        : window.confirm(
+            'Load the Modelama factory? Your current factory will be archived to the SAVED FACTORIES library first. The Modelama bundle ships 4 styles (1-pkt Shirt, Shorts, Blouse, Dress) on one floor.',
+          );
+    if (!proceed) return;
+    setModelamaLoading(true);
+    try {
+      const parsed = await fetchModelamaBundle(import.meta.env.BASE_URL ?? '');
+      if (parsed.length === 0) {
+        window.alert('Could not load Modelama bundle — the bundled xlsx files were not reachable.');
+        return;
+      }
+      archiveAndStartFresh('Modelama · Garment Factory');
+      const { twin, garments } = buildModelamaTwin(parsed, 'Modelama · Garment Factory');
+      // Register imported garments so workstations can resolve their opIds
+      // through `useGarments()` downstream.
+      for (const g of garments) setGarmentEdit(g.id, g);
+      const r = useTwin.getState().loadCanonical(twin);
+      if (!r.ok) {
+        window.alert(`Could not load Modelama factory: ${r.reason}`);
+        return;
+      }
+      navigate('/builder');
+    } catch (err) {
+      console.error('Modelama load failed', err);
+      window.alert(`Modelama load failed: ${err instanceof Error ? err.message : String(err)}`);
+    } finally {
+      setModelamaLoading(false);
+    }
+  };
+
   const handleLoadReferenceFactory = () => {
     if (atCap) return;
     const proceed =
@@ -151,6 +196,15 @@ export function MenuPage() {
             disabled={atCap}
           >
             CREATE NEW DIGITAL FACTORY
+          </Button>
+          <Button
+            variant="secondary"
+            size="lg"
+            onClick={handleLoadModelamaFactory}
+            icon={modelamaLoading ? '…' : '🧵'}
+            disabled={atCap || modelamaLoading}
+          >
+            {modelamaLoading ? 'LOADING…' : 'LOAD MODELAMA FACTORY'}
           </Button>
           <Button variant="secondary" size="lg" onClick={() => navigate('/reference')} icon="📖">
             REFERENCE MODELS

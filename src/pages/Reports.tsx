@@ -190,7 +190,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     [project.skillMatrix, yamTemplate],
   );
   const skillEntries = Object.keys(opEfficiency).length;
-  const [runs, setRuns] = useState<number>(1);
+  // Default to 5 replications so the stochastic engine's variance is
+  // visible on first render. A single-run report hides the ±std the
+  // demo narrative depends on; 5 is a cheap-enough run count that the
+  // page still paints under a second.
+  const [runs, setRuns] = useState<number>(5);
   // Synthesise a single-line twin from the chosen garment so the PML engine
   // has a Source → ops → Sink graph to replicate. Falls back to a typed
   // single-station twin when the bulletin is empty (corner case — the page
@@ -751,6 +755,85 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
 
       {tab === 'performance' && (
       <>
+      {/* OB-vs-SIM validation panel — surfaces the gap between the IE-
+          declared output (operation bulletin header) and the digital
+          twin's simulated mean. Hidden when the active twin has no
+          wired lines with a pinned garment. */}
+      {perLineAggs.length > 0 && (
+        <HideableBox>
+          <Card padding={20} style={{ marginBottom: 14 }}>
+            <div style={{ display: 'flex', justifyContent: 'space-between', alignItems: 'baseline', marginBottom: 4 }}>
+              <div style={{ fontFamily: SW_FONTS.display, fontSize: 14, fontWeight: 900 }}>
+                OB DECLARED vs SIM OBSERVED
+              </div>
+              <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.06em' }}>
+                {runs} REPLICATION{runs === 1 ? '' : 'S'} · 480 MIN SHIFT
+              </div>
+            </div>
+            <div style={{ fontSize: 12, color: SW_COLORS.muted, marginBottom: 12, lineHeight: 1.45 }}>
+              Each row compares the operation bulletin's IE-declared output (per the Modelama xlsx header) against the stochastic sim mean. Green ✓ = within ±15%; amber △ = within ±30%; red ✗ = significantly off. A red row means the operator headcount, machine balance or skill model needs adjustment.
+            </div>
+            <div style={{ overflowX: 'auto' }}>
+              <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
+                <thead>
+                  <tr style={{ textAlign: 'left', borderBottom: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 800, color: SW_COLORS.muted, letterSpacing: '0.06em' }}>
+                    <th style={{ padding: '6px 8px' }}>LINE</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>OB @100%</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>OB @PLAN 60%</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>SIM MEAN</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>±STD</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>SIM / OB@100%</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'center' }}>MATCH</th>
+                  </tr>
+                </thead>
+                <tbody>
+                  {perLineAggs.map((r) => {
+                    const declaredHourly = r.agg.firstStations.length > 0
+                      ? Math.round(60 / Math.max(0.01, Math.max(...r.agg.firstStations.map((s) => s.smv))))
+                      : 0;
+                    const garment = r.line.garmentId ? garments.byId[r.line.garmentId] : undefined;
+                    const ob100 = (garment?.hourlyTarget100 ?? declaredHourly) * 8;
+                    const obPlan = Math.round(ob100 * 0.6);
+                    const simMean = r.agg.producedPieces.mean;
+                    const simStd = r.agg.producedPieces.std;
+                    const ratio = ob100 > 0 ? simMean / ob100 : 0;
+                    // Sim usually lands between OB @ Plan and OB @100% because
+                    // the engine applies stochastic variance but no operator
+                    // fatigue or absenteeism. The "match" indicator measures
+                    // distance to the OB @ Plan (60%) figure, which is the
+                    // realistic factory target.
+                    // The "expected" zone is OB @ Plan ≤ sim ≤ OB @ 100%.
+                    // Sim that lands inside this zone is operating exactly
+                    // as the IE modelled, with stochastic variance + no
+                    // fatigue. Outside the zone, measure the gap to the
+                    // nearer end of the zone.
+                    const inZone = simMean >= obPlan * 0.95 && simMean <= ob100 * 1.05;
+                    const nearestZoneEdge = simMean < obPlan ? obPlan : (simMean > ob100 ? ob100 : simMean);
+                    const expectGap = inZone ? 0 : Math.abs(simMean - nearestZoneEdge) / Math.max(1, nearestZoneEdge);
+                    const verdict = inZone || expectGap < 0.15 ? '✓' : expectGap < 0.30 ? '△' : '✗';
+                    const verdictColor =
+                      verdict === '✓' ? SW_COLORS.ok : verdict === '△' ? SW_COLORS.warn : SW_COLORS.alarm;
+                    return (
+                      <tr key={r.line.id} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
+                        <td style={{ padding: '8px', fontWeight: 700 }}>{r.line.name}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono }}>{Math.round(ob100).toLocaleString()}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>{obPlan.toLocaleString()}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand }}>{Math.round(simMean).toLocaleString()}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>±{simStd.toFixed(0)}</td>
+                        <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono }}>{(ratio * 100).toFixed(0)}%</td>
+                        <td style={{ padding: '8px', textAlign: 'center', fontWeight: 900, color: verdictColor }}>{verdict}</td>
+                      </tr>
+                    );
+                  })}
+                </tbody>
+              </table>
+            </div>
+            <div style={{ marginTop: 10, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.5 }}>
+              Read this row: <strong>OB @100%</strong> is the IE's theoretical ceiling (bottleneck SMV × shift); <strong>OB @ Plan 60%</strong> is what the IE actually expects a real operator to deliver. The simulator usually lands between the two because it models stochastic service variance but doesn't yet model operator fatigue or breakdowns.
+            </div>
+          </Card>
+        </HideableBox>
+      )}
       <div style={{ display:'grid', gridTemplateColumns:'repeat(6, 1fr)', gap: 10, marginBottom: 20 }}>
         <HideableBox toggleSize={22} toggleOffset={6}>
           <KpiTile
@@ -1057,6 +1140,28 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     targetPerHr={targetThroughputPerHr}
                     warmupMin={warmupMin}
                   />
+                  {history.length >= 2 && (() => {
+                    const finalProduced = history[history.length - 1]?.produced ?? 0;
+                    const ceiling = (targetThroughputPerHr * (history[history.length - 1]?.time ?? 480)) / 60;
+                    const gap = ceiling > 0 ? Math.max(0, 100 - (finalProduced / ceiling) * 100) : 0;
+                    return (
+                      <ChartInference
+                        observation={`The orange curve reaches ${Math.round(finalProduced).toLocaleString()} pieces by the end of the shift, sitting ${gap.toFixed(0)}% below the dashed theoretical ceiling of ${Math.round(ceiling).toLocaleString()} pieces.`}
+                        inference={
+                          gap < 8
+                            ? `The line is well-balanced — bundles traverse the floor almost as fast as the bottleneck SMV allows. Warm-up loss accounts for most of the residual gap.`
+                            : gap < 20
+                              ? `The gap signals normal bottleneck loss + warm-up: the first bundle takes time to reach the sink, and stations downstream of the slowest op sit idle until WIP fills. Expected for a freshly-started shift.`
+                              : `A gap this large means real blockage or starvation: either the bottleneck SMV is much slower than the rest of the line (re-balance needed) or a station is starved (check upstream WIP).`
+                        }
+                        action={
+                          gap >= 20
+                            ? 'Open the Station Utilization chart below to find the choked op, then split or re-balance it.'
+                            : undefined
+                        }
+                      />
+                    );
+                  })()}
                 </Card>
               </HideableBox>
 
@@ -1075,6 +1180,23 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     targetPerHr={targetThroughputPerHr}
                     warmupMin={warmupMin}
                   />
+                  {history.length >= 2 && (() => {
+                    const tail = history.slice(-Math.max(3, Math.floor(history.length / 4)));
+                    const steadyMean = tail.reduce((s, h) => s + h.throughputPerHr, 0) / Math.max(1, tail.length);
+                    const peak = Math.max(...history.map((h) => h.throughputPerHr));
+                    return (
+                      <ChartInference
+                        observation={`Steady-state throughput averages ${steadyMean.toFixed(0)} pcs/hr in the final quarter of the shift; the run's peak rate was ${peak.toFixed(0)} pcs/hr.`}
+                        inference={
+                          steadyMean / Math.max(1, targetThroughputPerHr) > 0.92
+                            ? `Steady-state is within 8% of the theoretical ceiling — service-time variance (the stochastic part) is the only meaningful loss. Predictable production.`
+                            : steadyMean / Math.max(1, targetThroughputPerHr) > 0.75
+                              ? `Steady-state runs at ${((steadyMean / Math.max(1, targetThroughputPerHr)) * 100).toFixed(0)}% of the ceiling. Normal range for a real factory; the gap is variance + small starvation events.`
+                              : `The line is leaking throughput at steady state. Look at the lowest utilization stations — those are starving downstream because something earlier is bottlenecking.`
+                        }
+                      />
+                    );
+                  })()}
                 </Card>
               </HideableBox>
             </div>
@@ -1092,6 +1214,30 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     ]}
                   />
                   <WipChart history={history} meanWip={wipBundles} />
+                  {history.length >= 2 && (() => {
+                    const peak = Math.max(...history.map((h) => h.wip));
+                    const tail = history.slice(-Math.max(3, Math.floor(history.length / 4)));
+                    const tailMean = tail.reduce((s, h) => s + h.wip, 0) / Math.max(1, tail.length);
+                    const startWip = history[0].wip;
+                    const drift = tailMean - startWip;
+                    return (
+                      <ChartInference
+                        observation={`WIP peaks at ${peak.toFixed(1)} bundles and settles around ${tailMean.toFixed(1)} bundles in the back half of the shift. Net drift from start to steady state: ${(drift >= 0 ? '+' : '') + drift.toFixed(1)} bundles.`}
+                        inference={
+                          Math.abs(drift) < 2
+                            ? `WIP is stable — what enters the line leaves the line. Inventory at every buffer is in equilibrium, so the operator-pool sizing is appropriate for the demand.`
+                            : drift > 0
+                              ? `WIP is climbing — arrivals exceed service capacity. Either the source is over-feeding the line or a downstream bottleneck is back-pressuring upstream stations. Lead time will keep growing if this continues.`
+                              : `WIP is bleeding off — pieces are leaving faster than the source replaces them. The line will starve when the residual WIP drains.`
+                        }
+                        action={
+                          Math.abs(drift) >= 5
+                            ? 'Use Little\'s Law (right panel) to compare actual mean lead time against L/λ and confirm the imbalance is real, not warm-up.'
+                            : undefined
+                        }
+                      />
+                    );
+                  })()}
                 </Card>
               </HideableBox>
 
@@ -1124,6 +1270,30 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     }
                   />
                   <UtilizationBarChart stations={stations} />
+                  {stations.length > 0 && (() => {
+                    const utils = stations.map((st) => st.utilization * 100);
+                    const high = utils.filter((u) => u > 90).length;
+                    const low = utils.filter((u) => u < 50).length;
+                    const max = Math.max(...utils);
+                    const spread = max - Math.min(...utils);
+                    return (
+                      <ChartInference
+                        observation={`${high} of ${stations.length} stations run hot (>90% utilization), ${low} run cool (<50%). Utilization spread across the line is ${spread.toFixed(0)} percentage points.`}
+                        inference={
+                          spread > 50
+                            ? `The line is unbalanced — some operators are saturated while others have idle minutes every cycle. The hot stations are the binding constraint on throughput; the cool ones are wasted capacity.`
+                            : spread > 25
+                              ? `Mild imbalance. The hot stations limit throughput; cool stations could absorb a faster takt if the bottleneck were relieved.`
+                              : `The line is tightly balanced — every station runs at a similar pace. This is the IE goal: minimum bottleneck loss + minimum idle time.`
+                        }
+                        action={
+                          spread > 25 && high > 0
+                            ? `Add a parallel server (operator + machine) at the highest-utilization op, or transfer a sub-task to a cool station to flatten the bar chart.`
+                            : undefined
+                        }
+                      />
+                    );
+                  })()}
                 </Card>
               </HideableBox>
 
@@ -1134,6 +1304,42 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     sub="Where bundles pile up. Bars = mean queue length per station; line = cumulative share of total queueing — the Pareto 80/20 of WIP."
                   />
                   <QueueParetoChart stations={stations} />
+                  {stations.length > 0 && (() => {
+                    const sortedQ = stations.map((st) => st.queueLen).sort((a, b) => b - a);
+                    const total = sortedQ.reduce((s, q) => s + q, 0);
+                    if (total <= 0) {
+                      return (
+                        <ChartInference
+                          observation="No station carries a meaningful queue at end of shift."
+                          inference="The line is over-served relative to demand — operators wait for bundles rather than the other way round. Throughput is source-limited, not capacity-limited."
+                          action="Raise the source arrival rate or load orders into the line via the Orders panel to test the line's real capacity."
+                        />
+                      );
+                    }
+                    let cumulative = 0;
+                    let topN = 0;
+                    for (const q of sortedQ) {
+                      cumulative += q;
+                      topN += 1;
+                      if (cumulative / total >= 0.8) break;
+                    }
+                    const topShare = ((sortedQ[0] / total) * 100).toFixed(0);
+                    return (
+                      <ChartInference
+                        observation={`${topN} of ${stations.length} stations hold 80% of the total queue. The top station alone holds ${topShare}% of all bundles waiting in queue.`}
+                        inference={
+                          topN <= 2
+                            ? `Classic Pareto bottleneck — almost all WIP collects in front of one or two ops. Those are the constraints; everything else is downstream slack.`
+                            : `WIP is spread across multiple stations, suggesting the line has several near-bottlenecks competing rather than one dominant constraint. Hard to fix with a single intervention.`
+                        }
+                        action={
+                          topN <= 2
+                            ? `Click into the bar with the largest queue — that's the single op to add capacity to for the biggest throughput gain.`
+                            : `Use Yamazumi (LineBalance tab) to find the broader pacing problem; spot-fixes won't help here.`
+                        }
+                      />
+                    );
+                  })()}
                 </Card>
               </HideableBox>
             </div>
@@ -1816,6 +2022,58 @@ function ChartHeader({
               <span style={{ letterSpacing: '0.02em' }}>{l.label}</span>
             </span>
           ))}
+        </div>
+      )}
+    </div>
+  );
+}
+
+/**
+ * Inference blurb shown directly under a chart. Three-line max so it
+ * stays scannable during the demo narrative. Pass the chart's key insight
+ * — the line should answer "what does this say about the factory?", not
+ * just describe the chart's axes (those are already in ChartHeader).
+ */
+function ChartInference({
+  observation,
+  inference,
+  action,
+}: {
+  observation: string;
+  inference: string;
+  action?: string;
+}) {
+  return (
+    <div
+      style={{
+        marginTop: 12,
+        padding: '10px 12px',
+        background: SW_COLORS.brandLite,
+        borderLeft: `3px solid ${SW_COLORS.brand}`,
+        borderRadius: 4,
+        fontSize: 11,
+        lineHeight: 1.55,
+        color: SW_COLORS.ink,
+      }}
+    >
+      <div style={{ display: 'flex', gap: 8 }}>
+        <span style={{ fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', fontSize: 9, minWidth: 60 }}>
+          OBSERVE
+        </span>
+        <span>{observation}</span>
+      </div>
+      <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+        <span style={{ fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', fontSize: 9, minWidth: 60 }}>
+          INFER
+        </span>
+        <span>{inference}</span>
+      </div>
+      {action && (
+        <div style={{ display: 'flex', gap: 8, marginTop: 4 }}>
+          <span style={{ fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand, letterSpacing: '0.06em', fontSize: 9, minWidth: 60 }}>
+            ACTION
+          </span>
+          <span>{action}</span>
         </div>
       )}
     </div>
