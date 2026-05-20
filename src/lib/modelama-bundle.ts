@@ -159,12 +159,36 @@ function joinUrl(base: string, rel: string): string {
 }
 
 // ── Layout geometry ───────────────────────────────────────────────────────
+//
+// Each line is a tall vertical strip arranged exactly like the Modelama
+// production-layout sheet: two facing columns of workstations bracket an
+// aisle, with the bundle entering at the BOTTOM (loading / source / feeder),
+// zigzagging upward across the aisle from op 1 → op N, and exiting at the
+// TOP (final inspection / sink).
+//
+//   ┌── y = yTop ────────────────────────────────┐  ← FINAL CHECK row
+//   │           [ SINK ]  (centered in aisle)    │
+//   │  [WS-N  L]                  [WS-N-1 R]     │  ← top ws row
+//   │  [WS-N-2L]                  [WS-N-3 R]     │
+//   │   ...                                      │
+//   │  [WS-04 L]                  [WS-03 R]      │
+//   │  [WS-02 L]                  [WS-01 R]      │  ← bottom ws row (loading side)
+//   │           [ SOURCE ]  (feeder)             │
+//   └── y = yBot ────────────────────────────────┘
+//
+//        xLeft         xRight = xLeft + WS_W + AISLE_W
+//
+// The four bundled styles get four lines placed SIDE BY SIDE along X — a
+// real floor's "parallel lines" topology — instead of stacked vertically.
 
-const STATION_DX = 3;         // Cells between adjacent workstations along X
-const AISLE_WIDTH = 4;        // Cells separating the L/R facing rows
-const STATIONS_PER_ROW = 12;  // Where a long line wraps to a new row strip
-const LINE_GUTTER = 8;        // Vertical gutter between adjacent lines
-const DEPT_PADDING = 3;       // Inset between dept bounds and stations
+const WS_W = 1;          // Sewing-machine footprint width (cells, X axis)
+const WS_H = 2;          // Sewing-machine footprint depth (cells, Y axis)
+const AISLE_W = 3;       // Aisle (gap) between the two facing columns
+const ROW_DY = 2;        // Vertical pitch between successive ws rows
+const SOURCE_PAD = 4;    // Cells between bottom-most ws and the source pad
+const SINK_PAD = 4;      // Cells between the sink pad and the top-most ws
+const LINE_GUTTER_X = 6; // Horizontal gap between adjacent lines
+const DEPT_PADDING = 3;
 const DEPT_ORIGIN_X = 2;
 const DEPT_ORIGIN_Y = 2;
 
@@ -205,46 +229,46 @@ export function buildModelamaTwin(
   const styleSummaries: BuildModelamaTwinResult['styleSummaries'] = [];
   const notes: string[] = [];
 
-  // Single Sewing dept that holds all 4 lines. Width = widest line, height
-  // = sum of line strip heights + gutters. Computed first pass so we can
-  // size the dept before placing stations.
+  // Single Sewing dept that holds all 4 lines, arranged side-by-side along X.
+  // Per line: vertical strip of two facing columns + source/sink end-caps.
   type LineLayout = {
     parsed: ParsedModelamaStyle;
-    width: number;   // cells along X (per row strip)
-    rows: number;    // how many row strips (snake) the line wraps to
-    height: number;  // cells along Y (rows × ROW_DY + aisle)
-    yOffset: number; // top of this line strip inside the dept
+    totalStations: number;   // = sum(serversByOpIdx)
+    rows: number;            // = ceil(totalStations / 2)
+    width: number;           // X extent of this line strip
+    height: number;          // Y extent of this line strip
+    xOffset: number;         // X start of this line within the dept
     operations: Operation[];
     // How many physical workstations per operation. Derived from
-    // OB.plannedWs (rounded up), clamped to ≥1, with helper-only ops
-    // collapsed to 1.
+    // OB.plannedWs (rounded up), clamped to ≥1.
     serversByOpIdx: number[];
   };
   const lineLayouts: LineLayout[] = [];
-  let cursorY = DEPT_PADDING;
+  let cursorX = DEPT_PADDING;
   for (const p of parsed) {
     const ops = p.garment.garment.operations;
     const serversByOpIdx = ops.map((op) => Math.max(1, Math.round(extractPlannedWs(op))));
-    const totalServers = serversByOpIdx.reduce((s, v) => s + v, 0);
-    const rows = Math.max(1, Math.ceil(totalServers / STATIONS_PER_ROW));
-    const width = Math.min(totalServers, STATIONS_PER_ROW) * STATION_DX + DEPT_PADDING * 2;
-    const height = rows * (AISLE_WIDTH + 2) + LINE_GUTTER;
+    const totalStations = serversByOpIdx.reduce((s, v) => s + v, 0);
+    const rows = Math.max(1, Math.ceil(totalStations / 2));
+    const width = 2 * WS_W + AISLE_W;
+    // Source pad + bottom WS row + (rows-1) inter-row gaps + top WS row + sink pad
+    const height = SOURCE_PAD + WS_H + (rows - 1) * ROW_DY + WS_H + SINK_PAD;
     lineLayouts.push({
       parsed: p,
-      width,
+      totalStations,
       rows,
+      width,
       height,
-      yOffset: cursorY,
+      xOffset: cursorX,
       operations: ops,
       serversByOpIdx,
     });
-    cursorY += height;
+    cursorX += width + LINE_GUTTER_X;
   }
-  const deptWidth = Math.max(
-    24,
-    Math.max(...lineLayouts.map((l) => l.width)) + DEPT_PADDING * 2,
-  );
-  const deptHeight = cursorY + DEPT_PADDING;
+  // Strip the trailing gutter past the last line.
+  const deptWidth = cursorX - LINE_GUTTER_X + DEPT_PADDING;
+  const deptHeight =
+    Math.max(...lineLayouts.map((l) => l.height)) + DEPT_PADDING * 2;
 
   const deptId = newDeptId();
   const dept: Department = {
@@ -290,28 +314,30 @@ export function buildModelamaTwin(
     };
     lines.push(line);
 
-    // Place workstations: snake within the line strip, head at top-left,
-    // tail at bottom-right (or wrap if it overflows STATIONS_PER_ROW).
+    // Place workstations: walk OB sequence and assign each physical station
+    // to a (row, side) slot. Two stations per row — odd physical index (op
+    // 1, 3, 5…) on the RIGHT column (loading side), even physical index
+    // (op 2, 4, 6…) on the LEFT, matching the Modelama production-layout
+    // sheet convention. Rows fill from the BOTTOM up; ops at higher
+    // physical indices sit closer to the SINK (top).
+    const xLeft = DEPT_ORIGIN_X + L.xOffset;
+    const xRight = xLeft + WS_W + AISLE_W;
+    const xAisleCenter = xLeft + WS_W + AISLE_W / 2;
+    const yLineTop = DEPT_ORIGIN_Y + DEPT_PADDING;
+    const yLineBottom = yLineTop + L.height;
+    const yBottomWsTop = yLineBottom - SOURCE_PAD - WS_H; // y-coord of bottom-most ws's top edge
+
     const stationsThisLine: Workstation[] = [];
     let physicalIdx = 0;
     for (let opIdx = 0; opIdx < L.operations.length; opIdx++) {
       const op = L.operations[opIdx];
       const serverCount = L.serversByOpIdx[opIdx];
       for (let s = 0; s < serverCount; s++) {
-        const row = Math.floor(physicalIdx / STATIONS_PER_ROW);
-        const colInRow = physicalIdx % STATIONS_PER_ROW;
-        // Snake: even rows L→R, odd rows R→L
-        const col =
-          row % 2 === 0 ? colInRow : STATIONS_PER_ROW - 1 - colInRow;
-        const gx =
-          DEPT_ORIGIN_X +
-          DEPT_PADDING +
-          col * STATION_DX;
-        const gy =
-          DEPT_ORIGIN_Y +
-          L.yOffset +
-          row * (AISLE_WIDTH + 2) +
-          (s % 2 === 0 ? 0 : AISLE_WIDTH);
+        const rowFromBottom = Math.floor(physicalIdx / 2);
+        // physicalIdx 0 → op 1 (RIGHT), 1 → op 2 (LEFT), 2 → op 3 (RIGHT), …
+        const side: 'L' | 'R' = physicalIdx % 2 === 0 ? 'R' : 'L';
+        const gx = side === 'R' ? xRight : xLeft;
+        const gy = yBottomWsTop - rowFromBottom * ROW_DY;
         const catalogId = catalogForMachine(op.machineCode);
         const ws = makeWorkstation({
           deptId,
@@ -375,7 +401,6 @@ export function buildModelamaTwin(
       const head = stationsThisLine[0];
       const tail = stationsThisLine[stationsThisLine.length - 1];
       const lineOps = L.operations;
-      const totalSmv = lineOps.reduce((s, op) => s + op.smv, 0);
       const bottleneckSmv = Math.max(...lineOps.map((op) => op.smv));
       // Feed at the bottleneck rate × bundle-size × headroom. Without
       // headroom the source can't keep the line saturated through
@@ -383,11 +408,18 @@ export function buildModelamaTwin(
       const piecesPerHrCeil = bottleneckSmv > 0 ? 60 / bottleneckSmv : 60;
       const sourceRatePerHr = Math.max(20, Math.round(piecesPerHrCeil * 1.15));
 
+      // Source ("LOADING" / feeder pad) — centered in the aisle at the
+      // bottom of the line strip, just below op 1 (the bottom-right ws).
+      // buf_in is a 2×2 footprint; nudge x left by 1 so the pad straddles
+      // the aisle centre. Y sits just below the bottom-most ws row.
       const wsSource = makeWorkstation({
         deptId,
         catalogId: 'buf_in',
-        position: { x: head.position.x - 3, y: head.position.y },
-        name: `Source · ${L.parsed.style.label}`,
+        position: {
+          x: Math.round(xAisleCenter - 1),
+          y: yLineBottom - SOURCE_PAD + 1,
+        },
+        name: `Loading · ${L.parsed.style.label}`,
       });
       wsSource.lineId = lineId;
       wsSource.block = {
@@ -395,10 +427,16 @@ export function buildModelamaTwin(
         params: { sourceRatePerHr, piecesPerAgent: 1 },
       };
       const operatorCountForPool = stationsThisLine.length;
+      // Operator pool — tucked just above the source pad in the aisle so
+      // it visually attaches to the bottom of the line without overlapping
+      // either column. op_sewer is 1×1.
       const wsPool = makeWorkstation({
         deptId,
         catalogId: 'op_sewer',
-        position: { x: head.position.x, y: head.position.y - 2 },
+        position: {
+          x: Math.round(xAisleCenter),
+          y: yLineBottom - SOURCE_PAD - 1,
+        },
         name: `Operators · ${operatorCountForPool} units`,
       });
       wsPool.lineId = lineId;
@@ -406,18 +444,24 @@ export function buildModelamaTwin(
         kind: 'ResourcePool',
         params: { capacity: operatorCountForPool },
       };
+      // Sink — "FINAL INSPECTION TABLE" — centered in the aisle at the top
+      // of the line strip, just above the top-most ws row.
       const wsSink = makeWorkstation({
         deptId,
         catalogId: 'buf_out',
-        position: { x: tail.position.x + 3, y: tail.position.y },
-        name: `Sink · ${L.parsed.style.label}`,
+        position: {
+          x: Math.round(xAisleCenter - 1),
+          y: yLineTop + SINK_PAD - 2,
+        },
+        name: `Final Inspection · ${L.parsed.style.label}`,
       });
       wsSink.lineId = lineId;
       wsSink.block = { kind: 'Sink' };
       workstations.push(wsSource, wsPool, wsSink);
 
-      // Wire Source → head and tail → Sink. The intra-line connectors
-      // below stay the same (head → … → tail).
+      // Wire Source → head (op 1, bottom-right) and tail (op N, top) → Sink.
+      // The intra-line connectors below stay the same (head → … → tail),
+      // which traces the zigzag bundle path bottom→top across the aisle.
       connectors.push({
         id: newConnectorId(),
         kind: 'flow',
@@ -432,7 +476,6 @@ export function buildModelamaTwin(
         toWsId: wsSink.id,
         flow: { carrier: 'bundle', bundleSize: 20 },
       });
-      void totalSmv;
     }
 
     // Connect head→tail in physical placement order. PBS bundle handoff.
