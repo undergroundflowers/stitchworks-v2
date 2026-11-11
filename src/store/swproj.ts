@@ -37,6 +37,8 @@ import {
   ensureWritable,
   forgetRecentFile,
   fsWindow,
+  handleReadsRefused,
+  rememberHandleReadsRefused,
   useRecentFiles,
   linkActiveFile,
   markSaved,
@@ -390,12 +392,13 @@ export async function saveSwprojToFile(opts: { saveAs?: boolean } = {}): Promise
  * plain Error naming the file when it cannot be read as a project — callers
  * must tell those two apart, or a bad file looks like a cancelled click.
  * Some embedded browsers expose `showOpenFilePicker` and then refuse to show
- * it (NotAllowedError / SecurityError); that falls back to the classic file
- * input every browser has, at the cost of the write-back link.
+ * it, or show it and refuse to read the file it returns (NotAllowedError /
+ * SecurityError). Both fall back to the classic file input every browser
+ * has, at the cost of the write-back link.
  */
 export async function pickSwprojFile(): Promise<{ raw: unknown; handle: FileSystemFileHandle | null }> {
   const open = fsWindow().showOpenFilePicker;
-  if (typeof open !== 'function') {
+  if (typeof open !== 'function' || handleReadsRefused()) {
     return { raw: await pickProjectFile(), handle: null };
   }
   let handle: FileSystemFileHandle;
@@ -408,8 +411,27 @@ export async function pickSwprojFile(): Promise<{ raw: unknown; handle: FileSyst
     }
     throw e;
   }
-  const file = await handle.getFile();
-  return { raw: parseProjectFileText(await file.text(), file.name), handle };
+  let text: string;
+  let fileName: string;
+  try {
+    const file = await handle.getFile();
+    fileName = file.name;
+    text = await file.text();
+  } catch (e) {
+    if (!isWriteRefused(e)) throw e;
+    rememberHandleReadsRefused();
+    // A file input only opens during a click, and the dialog that just closed
+    // has usually outlived this one. When it has, say so: the next click skips
+    // the refused dialog entirely.
+    if (typeof navigator !== 'undefined' && navigator.userActivation?.isActive) {
+      return { raw: await pickProjectFile(), handle: null };
+    }
+    throw new Error(
+      'This browser blocked reading that file directly. Click IMPORT FACTORY again to pick it with the standard file dialog.',
+      { cause: e },
+    );
+  }
+  return { raw: parseProjectFileText(text, fileName), handle };
 }
 
 /**
@@ -448,6 +470,14 @@ export async function openRecentFile(id: string): Promise<ImportFactoryResult> {
       return {
         ok: false,
         reason: `"${entry.fileName}" was moved or deleted — removed it from recent factories.`,
+        legacy: false,
+      };
+    }
+    if (isWriteRefused(e)) {
+      rememberHandleReadsRefused();
+      return {
+        ok: false,
+        reason: `This browser blocked reading "${entry.fileName}" directly. Use IMPORT FACTORY to open it instead.`,
         legacy: false,
       };
     }

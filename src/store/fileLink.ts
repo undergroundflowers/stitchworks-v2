@@ -66,6 +66,30 @@ export function fsWindow(): FsWindow {
 }
 
 /**
+ * Some embedded browsers show the native Open dialog, hand back a handle, and
+ * then refuse to read it. Nothing reveals that before a file is picked, so the
+ * first refusal is remembered here and every later Open goes straight to the
+ * classic file input, which those browsers do allow.
+ */
+const HANDLE_READS_REFUSED_KEY = 'sw.fileHandleReadsRefused';
+
+export function handleReadsRefused(): boolean {
+  try {
+    return localStorage.getItem(HANDLE_READS_REFUSED_KEY) === '1';
+  } catch {
+    return false;
+  }
+}
+
+export function rememberHandleReadsRefused(): void {
+  try {
+    localStorage.setItem(HANDLE_READS_REFUSED_KEY, '1');
+  } catch {
+    // Storage unavailable: the next Open simply finds out again.
+  }
+}
+
+/**
  * Make sure the page may write to `handle`. Chromium forgets the grant when
  * the tab closes, so the first Save after a reload asks again — that prompt
  * must come from a click, which Save always is.
