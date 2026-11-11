@@ -22,7 +22,12 @@ export {
   type SpeedOption,
 } from './SimTransportDock';
 export { LineSimEmpty, type LineSimEmptyProps } from './LineSimEmpty';
-export { QueueDiagram, type QueueDiagramProps } from './QueueDiagram';
+export {
+  LineRemarks,
+  StationRemark,
+  type LineRemarksProps,
+  type StationRemarkProps,
+} from './FindingRemarks';
 export { WipSparkline, type WipSparklineProps } from './WipSparkline';
 export {
   StationTimeseriesChart,

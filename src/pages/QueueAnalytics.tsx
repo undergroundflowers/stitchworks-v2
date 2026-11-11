@@ -31,6 +31,7 @@ import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { meanOf, type QueueDiscipline, type StationView } from '../simulation';
 import { useLineSim } from '../simulation/useLineSim';
 import { useSimSession } from '../simulation/useSimSession';
+import { constraintIndex } from '../domain/queue-advisor';
 import { DRILL_PATHS } from '../lib/routes';
 
 type ViewMode = 'strip' | 'compare';
@@ -49,6 +50,9 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
   const step = useSimSession((s) => s.step);
   const reset = useSimSession((s) => s.reset);
   const subject = lines.length === 1 ? lines[0].name : `${lines.length} sewing lines`;
+  // Same rule as the station table's BOTTLENECK tag and the advisor's remark:
+  // highest measured saturation, not the engine's live deepest queue.
+  const bottleneckIdx = constraintIndex(state.stations);
 
   const [view, setView] = useState<ViewMode>('strip');
   const [metric, setMetric] = useState<StationMetric>('rho');
@@ -189,14 +193,14 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
         <StripView
           stations={state.stations}
           stationHistory={state.stationHistory}
-          bottleneckIdx={state.bottleneckOpIndex}
+          bottleneckIdx={bottleneckIdx}
           onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId, 'timeline'))}
         />
       ) : (
         <CompareView
           stations={state.stations}
           stationHistory={state.stationHistory}
-          bottleneckIdx={state.bottleneckOpIndex}
+          bottleneckIdx={bottleneckIdx}
           metric={metric}
           onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId, 'timeline'))}
         />

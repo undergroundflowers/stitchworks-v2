@@ -1,4 +1,11 @@
-import { useCallback, useEffect, useMemo, useState, type CSSProperties, type ReactNode } from 'react';
+import {
+  useCallback,
+  useEffect,
+  useMemo,
+  useState,
+  type CSSProperties,
+  type ReactNode,
+} from 'react';
 import { SW_COLORS, SW_MOTION, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
 
@@ -34,6 +41,14 @@ import { alpha } from '../design/color-utils';
  * crushing is what loses the information in the first place.
  *
  * Pass `storageKey` and the user's widths survive a reload.
+ *
+ * ## Pinned columns
+ *
+ * Sideways scroll has one cost: whatever sits in the last column is off-screen
+ * exactly when the table is at its densest. A column marked `pin: 'right'`
+ * stays against the right edge while the others scroll beneath it, so the one
+ * thing a row is *for* — a verdict, an action — never needs a scroll to reach.
+ * Its resize handle is on its left edge, the side that still has a neighbour.
  */
 
 export interface DataTableColumn<T> {
@@ -49,6 +64,9 @@ export interface DataTableColumn<T> {
   align?: 'left' | 'right';
   /** Render the cell in tabular mono. Use for anything numeric. */
   numeric?: boolean;
+  /** Hold this column against the right edge while the rest scroll under it.
+   *  Pinned columns render last, whatever their position in `columns`. */
+  pin?: 'right';
   /** Cell content for one row. */
   cell: (row: T, index: number) => ReactNode;
 }
@@ -72,6 +90,12 @@ export interface DataTableProps<T> {
   /** localStorage key for the user's column widths. Omit to keep them
    *  in-memory for the life of the mount. */
   storageKey?: string;
+  /**
+   * The surface the table sits on. Rows are transparent, so a pinned cell has
+   * to paint this itself or the cells scrolling beneath would show through
+   * it. Defaults to `paper` — what a `<Card>` is made of.
+   */
+  ground?: string;
   style?: CSSProperties;
 }
 
@@ -104,6 +128,7 @@ export function DataTable<T>({
   rowStyle,
   empty,
   storageKey,
+  ground,
   style,
 }: DataTableProps<T>) {
   const [widths, setWidths] = useState<Record<string, number>>(() => readStoredWidths(storageKey));
@@ -134,10 +159,36 @@ export function DataTable<T>({
    * horizontal scroll. Nothing is placed into it: grid auto-placement fills
    * the first N tracks and leaves the last one empty.
    */
-  const template = useMemo(
-    () => `${columns.map((c) => `${widthOf(c)}px`).join(' ')} minmax(0, 1fr)`,
-    [columns, widthOf],
+  /**
+   * Pinned columns go AFTER the filler, so they sit at the right edge of a
+   * table that has room to spare as well as one that scrolls. That puts the
+   * filler in the middle of the track list, where auto-placement would drop a
+   * real cell into it — so with pins in play an empty element is rendered to
+   * occupy it (`ordered` carries a `null` at that position).
+   */
+  const flow = useMemo(() => columns.filter((c) => c.pin !== 'right'), [columns]);
+  const pinned = useMemo(() => columns.filter((c) => c.pin === 'right'), [columns]);
+  const ordered = useMemo<(DataTableColumn<T> | null)[]>(
+    () => (pinned.length > 0 ? [...flow, null, ...pinned] : flow),
+    [flow, pinned],
   );
+
+  const template = useMemo(
+    () =>
+      [
+        ...flow.map((c) => `${widthOf(c)}px`),
+        'minmax(0, 1fr)',
+        ...pinned.map((c) => `${widthOf(c)}px`),
+      ].join(' '),
+    [flow, pinned, widthOf],
+  );
+
+  /** Distance from the right edge at which a pinned column sticks: the widths
+   *  of the pinned columns to its right. */
+  const pinOffset = (c: DataTableColumn<T>) =>
+    pinned.slice(pinned.indexOf(c) + 1).reduce((sum, p) => sum + widthOf(p), 0);
+
+  const surface = ground ?? SW_COLORS.paper;
 
   /**
    * Drag a column rule.
@@ -150,9 +201,11 @@ export function DataTable<T>({
   const beginResize = (col: DataTableColumn<T>, startX: number) => {
     const from = widthOf(col);
     const floor = col.minWidth ?? DEFAULT_MIN_W;
+    // A right-pinned column is dragged by its LEFT edge, so pulling left grows it.
+    const dir = col.pin === 'right' ? -1 : 1;
     setDragKey(col.key);
     const move = (ev: MouseEvent) => {
-      const next = Math.max(floor, Math.round(from + (ev.clientX - startX)));
+      const next = Math.max(floor, Math.round(from + dir * (ev.clientX - startX)));
       setWidths((w) => ({ ...w, [col.key]: next }));
     };
     const up = () => {
@@ -198,7 +251,9 @@ export function DataTable<T>({
             borderBottom: `1px solid ${SW_COLORS.line}`,
           }}
         >
-          {columns.map((c, ci) => (
+          {ordered.map((c, ci) => c === null ? (
+            <div key="__filler" aria-hidden />
+          ) : (
             <div
               key={c.key}
               role="columnheader"
@@ -214,10 +269,19 @@ export function DataTable<T>({
                 whiteSpace: 'nowrap',
                 overflow: 'hidden',
                 textOverflow: 'ellipsis',
+                ...(c.pin === 'right'
+                  ? {
+                      position: 'sticky' as const,
+                      right: pinOffset(c),
+                      zIndex: 2,
+                      background: SW_COLORS.paperDeep,
+                      borderLeft: `1px solid ${SW_COLORS.line}`,
+                    }
+                  : null),
               }}
             >
               {c.header}
-              {ci < columns.length - 1 && (
+              {(c.pin === 'right' || ci < ordered.length - 1) && (
                 <div
                   role="separator"
                   aria-orientation="vertical"
@@ -237,7 +301,9 @@ export function DataTable<T>({
                     position: 'absolute',
                     top: 0,
                     bottom: 0,
-                    right: -HANDLE_W / 2,
+                    // A pinned column's border already draws its rule; the
+                    // strip sits inside the cell, which clips anything past it.
+                    ...(c.pin === 'right' ? { left: 0 } : { right: -HANDLE_W / 2 }),
                     width: HANDLE_W,
                     cursor: 'col-resize',
                     // The rule itself is a 1px core inside the grab strip, so
@@ -251,7 +317,12 @@ export function DataTable<T>({
                     style={{
                       width: 1,
                       height: '100%',
-                      background: dragKey === c.key ? SW_COLORS.brand : SW_COLORS.lineSoft,
+                      background:
+                        dragKey === c.key
+                          ? SW_COLORS.brand
+                          : c.pin === 'right'
+                            ? 'transparent'
+                            : SW_COLORS.lineSoft,
                       transition: `background ${SW_MOTION.instant}ms linear`,
                     }}
                   />
@@ -298,7 +369,9 @@ export function DataTable<T>({
                   transition: `background ${SW_MOTION.instant}ms linear`,
                 }}
               >
-                {columns.map((c) => (
+                {ordered.map((c) => c === null ? (
+                  <div key="__filler" aria-hidden />
+                ) : (
                   <div
                     key={c.key}
                     role="cell"
@@ -308,6 +381,26 @@ export function DataTable<T>({
                       padding: '9px 10px',
                       textAlign: c.align === 'right' ? 'right' : 'left',
                       color: SW_COLORS.ink,
+                      // A pinned cell repaints the row's own ground, opaque:
+                      // the same tint or hover the row carries, laid over the
+                      // surface, so it matches its row and hides what scrolls
+                      // beneath it.
+                      ...(c.pin === 'right'
+                        ? {
+                            position: 'sticky' as const,
+                            right: pinOffset(c),
+                            zIndex: 1,
+                            alignSelf: 'stretch',
+                            display: 'flex',
+                            alignItems: 'center',
+                            background: tone
+                              ? `linear-gradient(${alpha(tone, hovered ? 0.16 : 0.1)}, ${alpha(tone, hovered ? 0.16 : 0.1)}), ${surface}`
+                              : hovered
+                                ? SW_COLORS.paperDeep
+                                : surface,
+                            borderLeft: `1px solid ${SW_COLORS.line}`,
+                          }
+                        : null),
                       // Cells clip rather than wrap: a wrapped cell changes the
                       // height of its whole row and breaks the scan down a
                       // column. If a value is cut off, widen the column — that
@@ -318,7 +411,23 @@ export function DataTable<T>({
                       textOverflow: 'ellipsis',
                     }}
                   >
-                    {c.cell(row, ri)}
+                    {c.pin === 'right' ? (
+                      // The pinned cell is a flex box (it stretches to the row
+                      // and centres its content), so the clipping the plain
+                      // cell does for itself moves to this wrapper.
+                      <div
+                        style={{
+                          flex: 1,
+                          minWidth: 0,
+                          overflow: 'hidden',
+                          textOverflow: 'ellipsis',
+                        }}
+                      >
+                        {c.cell(row, ri)}
+                      </div>
+                    ) : (
+                      c.cell(row, ri)
+                    )}
                   </div>
                 ))}
               </div>

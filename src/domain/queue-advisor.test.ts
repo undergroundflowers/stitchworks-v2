@@ -1,5 +1,14 @@
 import { describe, it, expect } from 'vitest';
-import { diagnoseQueues, applyPatch, describePatch, type QueueFinding } from './queue-advisor';
+import {
+  diagnoseQueues,
+  applyPatch,
+  describePatch,
+  constraintIndex,
+  constraintStation,
+  lineFindings,
+  stationFindings,
+  type QueueFinding,
+} from './queue-advisor';
 import { buildStarterLine } from './starter-line';
 import { getBlockKind, getBlockParams } from './pml';
 import type { StationView } from '../simulation/sim-state';
@@ -259,5 +268,86 @@ describe('describePatch', () => {
   it('names the station rather than printing an id', () => {
     expect(describePatch({ kind: 'addServer', wsId: 'w1', from: 1, to: 2 }, stations))
       .toBe('Side seam: 1 → 2 operators');
+  });
+});
+
+describe('findings read by row', () => {
+  // The station table prints a finding on the row it is about, and the
+  // line-wide ones above the table. Every finding has to land in at least one
+  // of the two or it is computed and never shown.
+  const stations = [
+    station({ wsId: 'peak', opName: 'Side seam', utilization: 1.2, isStable: false, LqObserved: 9 }),
+    station({ wsId: 'i1', utilization: 0.1, LqObserved: 0 }),
+    station({ wsId: 'i2', utilization: 0.12, LqObserved: 0 }),
+    station({ wsId: 'ok', utilization: 0.6, LqObserved: 0.2 }),
+  ];
+  const findings = diagnoseQueues({ stations, line: LINE, shiftMin: 480, produced: 400 });
+
+  it('leaves no finding unplaced', () => {
+    const placed = new Set<string>(lineFindings(findings).map((f) => f.id));
+    for (const st of stations) for (const f of stationFindings(findings, st.wsId)) placed.add(f.id);
+    expect([...placed].sort()).toEqual(ids(findings).sort());
+  });
+
+  it('puts the worst finding first on a station with several', () => {
+    const peak = stationFindings(findings, 'peak');
+    expect(peak.length).toBeGreaterThan(1);
+    expect(peak[0].severity).toBe('critical');
+  });
+
+  it('marks each starved station AND keeps the finding line-wide', () => {
+    expect(ids(stationFindings(findings, 'i1'))).toContain('starved-stations');
+    expect(ids(stationFindings(findings, 'i2'))).toContain('starved-stations');
+    expect(ids(lineFindings(findings))).toContain('starved-stations');
+    expect(stationFindings(findings, 'ok')).toEqual([]);
+  });
+
+  it('gives every station finding a remark that does not repeat the station name', () => {
+    for (const st of stations) {
+      for (const f of stationFindings(findings, st.wsId)) {
+        expect(f.remark, f.id).toBeTruthy();
+        expect(f.remark, f.id).not.toContain(st.opName);
+      }
+    }
+  });
+});
+
+describe('the constraint — one definition for the tag and the remark', () => {
+  it('is the station with the highest measured saturation, not the deepest queue', () => {
+    // The engine tags the station holding the most bundles; after a fix that
+    // can be a station still draining a backlog at modest saturation.
+    const stations = [
+      station({ wsId: 'draining', utilization: 0.63, queueLen: 40, LqObserved: 0.4 }),
+      station({ wsId: 'hot', utilization: 0.86, queueLen: 1, LqObserved: 0.3 }),
+      station({ wsId: 'ok', utilization: 0.5 }),
+    ];
+    expect(constraintStation(stations)?.wsId).toBe('hot');
+    expect(constraintIndex(stations)).toBe(1);
+  });
+
+  it('lands on the row the bottleneck remark is written on', () => {
+    const stations = [
+      station({ wsId: 'a', utilization: 0.6 }),
+      station({ wsId: 'hot', utilization: 0.9, LqObserved: 3 }),
+      station({ wsId: 'c', utilization: 0.4 }),
+    ];
+    const f = find(diagnoseQueues({ stations, line: LINE, shiftMin: 480, produced: 500 }), 'bottleneck-');
+    expect(f?.wsId).toBe(constraintStation(stations)?.wsId);
+  });
+
+  it('lands on the unstable station when one cannot keep up', () => {
+    const stations = [
+      station({ wsId: 'a', utilization: 0.7 }),
+      station({ wsId: 'over', utilization: 1.0, isStable: false, LqObserved: 50 }),
+    ];
+    const f = find(diagnoseQueues({ stations, line: LINE, shiftMin: 480, produced: 200 }), 'unstable-');
+    expect(f?.wsId).toBe(constraintStation(stations)?.wsId);
+  });
+
+  it('takes the first station in line order on a tie, and is -1 on an empty line', () => {
+    const stations = [station({ wsId: 'x', utilization: 0.8 }), station({ wsId: 'y', utilization: 0.8 })];
+    expect(constraintStation(stations)?.wsId).toBe('x');
+    expect(constraintIndex([])).toBe(-1);
+    expect(constraintStation([])).toBeNull();
   });
 });

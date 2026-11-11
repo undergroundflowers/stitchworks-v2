@@ -45,6 +45,18 @@ export interface QueueFinding {
   expect?: string;
   /** Station this is about, when it's about one. */
   wsId?: string;
+  /**
+   * Every station this finding marks, when it marks more than `wsId` alone —
+   * the stations sharing a WIP pile, or the ones starved by the constraint.
+   * A finding with `wsIds` but no `wsId` is about the line AND shows on those
+   * stations' rows.
+   */
+  wsIds?: string[];
+  /**
+   * The finding as a remark on its station's own row: verdict, then fix, in a
+   * few words. It never names the station — the row already has.
+   */
+  remark?: string;
   /** Applyable change, when there is one. */
   patch?: FindingPatch;
 }
@@ -84,6 +96,31 @@ function pct(x: number): string {
 }
 
 /**
+ * The line's constraint: the station with the highest measured saturation.
+ * First in line order wins a tie.
+ *
+ * This is the ONE definition of "bottleneck" on the analysis surfaces. The
+ * station table used to take its BOTTLENECK tag from the engine instead — the
+ * station holding the most bundles at this instant — while the remarks below
+ * reasoned from saturation, so one table could tag one row and call a
+ * different one the constraint. The engine's reading is a live picture and
+ * still drives the Sim views; a verdict on a finished run reads the run.
+ */
+export function constraintStation(stations: StationView[]): StationView | null {
+  let best: StationView | null = null;
+  for (const st of stations) {
+    if (!best || st.utilization > best.utilization) best = st;
+  }
+  return best;
+}
+
+/** `constraintStation` as an index into the same array; -1 on an empty line. */
+export function constraintIndex(stations: StationView[]): number {
+  const c = constraintStation(stations);
+  return c ? stations.indexOf(c) : -1;
+}
+
+/**
  * Rank every problem the run exposes.
  *
  * Ordered by severity, then by how much of the line's WIP the station holds —
@@ -96,8 +133,8 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
 
   const byRho = [...stations].sort((a, b) => b.utilization - a.utilization);
   const byLq = [...stations].sort((a, b) => b.LqObserved - a.LqObserved);
-  const bottleneck = byRho[0];
-  const runnerUp = byRho[1];
+  const bottleneck = constraintStation(stations)!; // stations is non-empty here
+  const runnerUp = byRho.find((s) => s.wsId !== bottleneck.wsId);
   const totalLq = stations.reduce((s, st) => s + st.LqObserved, 0);
   const deepestLq = byLq[0]?.LqObserved ?? 0;
 
@@ -132,6 +169,7 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
       action: `Add a second operator at ${st.opName}, or move work off it.`,
       expect: `ρ roughly halves to ${pct(st.utilization / 2)}, and the queue stops growing.`,
       wsId: st.wsId,
+      remark: 'Cannot keep up → add operator',
       patch: { kind: 'addServer', wsId: st.wsId, from: st.serversTotal, to: st.serversTotal + 1 },
     });
   }
@@ -158,6 +196,7 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
         ? `ρ drops to about ${pct(bottleneck.utilization / 2)} and the line's ceiling rises.`
         : 'Levelling the slowest station raises the whole line\'s output ceiling.',
       wsId: bottleneck.wsId,
+      remark: isolated ? 'Constraint → add operator' : 'Constraint → rebalance the line',
       patch: isolated
         ? {
             kind: 'addServer',
@@ -183,7 +222,8 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
       n += 1;
     }
     if (n > 0 && n <= Math.max(1, Math.ceil(stations.length / 3))) {
-      const names = byLq.slice(0, n).map((s) => s.opName).join(', ');
+      const pile = byLq.slice(0, n);
+      const names = pile.map((s) => s.opName).join(', ');
       out.push({
         id: 'wip-concentration',
         severity: 'warn',
@@ -194,6 +234,11 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
           + `floor space, and it is where a quality problem hides longest before anyone sees it.`,
         action: `Attack ${byLq[0].opName} first — it is the deepest queue on the line.`,
         wsId: byLq[0].wsId,
+        wsIds: pile.map((s) => s.wsId),
+        remark:
+          n === 1
+            ? `Holds ${pct(cum / totalLq)} of line WIP → clear it first`
+            : `One of ${n} stations holding ${pct(cum / totalLq)} of line WIP`,
       });
     }
   }
@@ -218,6 +263,8 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
           + `the most expensive kind of idle.`,
         action: 'Rebalance so this idle capacity absorbs work from the constraint.',
         expect: 'Fewer operators for the same output, or the same operators for more output.',
+        wsIds: idle.map((s) => s.wsId),
+        remark: `Starved, waiting on ${bottleneck.opName}`,
         patch: line ? { kind: 'rebalance', lineId: line.id } : undefined,
       });
     }
@@ -236,6 +283,7 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
         + `holding it — that time counts against the line but produces nothing.`,
       action: 'Raise the downstream buffer, or relieve the station that is full.',
       wsId: st.wsId,
+      remark: 'Blocked → raise the downstream buffer',
     });
   }
 
@@ -253,6 +301,7 @@ export function diagnoseQueues(input: QueueAdvisorInput): QueueFinding[] {
         + `somewhere else or wait upstream.`,
       action: `Raise the buffer at ${st.opName}, or reduce what is being fed to it.`,
       wsId: st.wsId,
+      remark: `Turns away ${pct(frac)} → raise its buffer`,
       patch: { kind: 'setBuffer', wsId: st.wsId, n: Math.max(2, st.capacity * 2) },
     });
   }
@@ -386,4 +435,26 @@ function patchWsParams(
         : ws,
     ),
   };
+}
+
+// ============================================================================
+// READING FINDINGS BY ROW
+// ============================================================================
+
+/** Does this finding belong on the given station's row? */
+export function findingMarks(finding: QueueFinding, wsId: string): boolean {
+  return finding.wsId === wsId || (finding.wsIds?.includes(wsId) ?? false);
+}
+
+/**
+ * Findings about the line as a whole — the ones with no single station to
+ * hang them on. Order is `diagnoseQueues`' own: worst first.
+ */
+export function lineFindings(findings: QueueFinding[]): QueueFinding[] {
+  return findings.filter((f) => f.wsId === undefined);
+}
+
+/** Findings for one station's row, worst first. */
+export function stationFindings(findings: QueueFinding[], wsId: string): QueueFinding[] {
+  return findings.filter((f) => findingMarks(f, wsId));
 }
