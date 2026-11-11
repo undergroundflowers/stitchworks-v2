@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { Card, Button, Tag, SectionHeader, ToggleGroup, Stat, EmptyState, useConfirm } from '../components';
+import { Card, Button, SectionHeader, ToggleGroup, Stat, EmptyState, useConfirm } from '../components';
 import { useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { useProject, useGarments, type Scenario, type ScenarioKpis, type EffectiveGarments } from '../store';
@@ -50,10 +50,9 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
   async function handleLoad(s: Scenario) {
     const hasTwin = !!s.config.twin;
     const message = hasTwin
-      ? `Load "${s.name}"? This swaps in the saved factory layout and restores the skill matrix captured at save time.`
-      : `Load "${s.name}"? This replaces the current skill matrix. (This scenario was saved before factory snapshots were supported — the floor layout won't change.)`;
+      ? `Load "${s.name}"? This swaps in the factory layout saved with it.`
+      : `Load "${s.name}"? This scenario was saved before factory snapshots were supported, so the floor layout won't change.`;
     if (!(await confirm({ title: 'Load scenario', message, confirmLabel: 'Load' }))) return;
-    project.loadScenario(s.id);
     // Project scenarios saved after the twin-snapshot upgrade carry their
     // own factory layout. Forge a fresh twin-store scenario from it and
     // activate it so the simulator runs against the saved floor, not the
@@ -141,8 +140,8 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
                   Build the line you want to evaluate, run it on{' '}
                   <strong style={{ color: SW_COLORS.ink }}>Simulation</strong>, then click{' '}
                   <strong style={{ color: SW_COLORS.ink }}>Save scenario</strong> on Reports. The floor
-                  layout, the skill matrix and the KPIs of that run are stored together, so a later
-                  change has something to be compared against.
+                  layout and the KPIs of that run are stored together, so a later change has
+                  something to be compared against.
                 </>
               }
               action={{ label: 'Open Simulation →', onClick: () => navigate('/sim') }}
@@ -157,7 +156,6 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
               const garmentName = garment?.name ?? s.config.garmentTemplateId;
               const isSelected = selectedIds.includes(s.id);
               const isRenaming = renamingId === s.id;
-              const skillEntries = Object.values(s.config.skillMatrix ?? {}).reduce((sum, row) => sum + Object.keys(row).length, 0);
               return (
                 <Card key={s.id} padding={0} style={{ overflow: 'hidden', borderColor: isSelected ? SW_COLORS.brand : undefined }}>
                   <div style={{
@@ -211,20 +209,6 @@ export function ScenariosPanel({ embedded = false }: { embedded?: boolean } = {}
                       <Stat label="OUTPUT"  value={s.kpis.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand}/>
                       <Stat label="THRU/HR" value={Math.round(s.kpis.throughputPerHr).toLocaleString()} unit="pcs" color={SW_COLORS.ok}/>
                       <Stat label="EFF"     value={s.kpis.efficiencyPct.toFixed(1)} unit="%" color={s.kpis.efficiencyPct >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}/>
-                    </div>
-
-                    <div style={{ display: 'flex', flexWrap: 'wrap', gap: 6, marginBottom: 12 }}>
-                      {/* The "Yamazumi override · N" chip that stood here
-                          counted a per-garment manual assignment the app no
-                          longer authors: a line's balance IS its twin now —
-                          its stations, their operations and their channel
-                          counts — and the twin snapshot below already carries
-                          all of it. */}
-                      {skillEntries > 0 ? (
-                        <Tag soft color={SW_COLORS.bobbin}>Skill cells · {skillEntries}</Tag>
-                      ) : (
-                        <Tag soft color={SW_COLORS.muted}>Baseline (no skill overrides)</Tag>
-                      )}
                     </div>
 
                     <div style={{ fontSize: 11, color: SW_COLORS.muted, marginBottom: 12 }}>

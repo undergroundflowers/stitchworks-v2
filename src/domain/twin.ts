@@ -160,10 +160,40 @@ export interface SewingLine {
   /** Target operator headcount across the line. Informational — the engine
    *  reads `workersRequired` per workstation. */
   operatorTarget?: number;
+  /** Operator efficiency the line's stations run at unless a station sets
+   *  its own — percent of standard, so 85 means every SMV takes 1/0.85 as
+   *  long. Missing ⇒ 100. */
+  efficiencyPct?: number;
   /** Line behaviour knobs (bundle size, piece flow, WIP cap). Missing ⇒
    *  engine + UI fall back to `DEFAULT_LINE_POLICY`. */
   policy?: LinePolicy;
   notes?: string;
+}
+
+/** Efficiency the engine will not step outside of, as a multiplier. A
+ *  typed 20 % or 400 % is a slip, not a line that runs five times slower. */
+export const EFFICIENCY_MIN = 0.5;
+export const EFFICIENCY_MAX = 1.5;
+
+/**
+ * The efficiency a station runs at, as a multiplier on standard speed:
+ * effective cycle = SMV / efficiency.
+ *
+ * The station's own figure wins; otherwise its line's; otherwise 1. The two
+ * never multiply — a line figure is the default a station inherits, not a
+ * second factor on top of it. Clamped to the engine's range so every reader
+ * (engine, line balance, Inspector) agrees on the number that will run.
+ */
+export function stationEfficiency(ws: Workstation, line?: SewingLine | null): number {
+  const pct = ws.resources?.efficiencyPct ?? line?.efficiencyPct;
+  if (pct == null || !Number.isFinite(pct) || pct <= 0) return 1;
+  return Math.min(EFFICIENCY_MAX, Math.max(EFFICIENCY_MIN, pct / 100));
+}
+
+/** `stationEfficiency` with the line looked up from the twin. */
+export function stationEfficiencyIn(twin: Twin, ws: Workstation): number {
+  const line = ws.lineId ? twin.lines.find((l) => l.id === ws.lineId) : undefined;
+  return stationEfficiency(ws, line);
 }
 
 // ============================================================================
@@ -190,6 +220,9 @@ export interface OperationAttrs {
 export interface ResourceAttrs {
   /** How many workers this station expects to run. */
   workersRequired: number;
+  /** This station's operator efficiency, percent of standard. Overrides the
+   *  line's `efficiencyPct`; missing ⇒ inherit. See `stationEfficiency`. */
+  efficiencyPct?: number;
   /** Worker archetype id (catalog ref). null = "any operator". */
   workerArchetypeId: string | null;
   /** Per-cycle material consumption, e.g. { fabric_m: 0.4, thread_m: 1.2 }. */

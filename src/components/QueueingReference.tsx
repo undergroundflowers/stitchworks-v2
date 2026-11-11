@@ -12,8 +12,6 @@
  *     field label and the reference that explains it.
  */
 
-import { Card } from './Card';
-import { SectionHeader } from './SectionHeader';
 import { Sym } from './Sym';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { QUANTITY, type QuantityId } from '../simulation/notation';
@@ -29,7 +27,7 @@ interface ModelRow {
   how: string;
 }
 
-/** The eight classes the textbook names, in its own order. */
+/** The nine classes the app solves — the textbook's eight, then M/G/K. */
 const MODELS: ModelRow[] = [
   {
     numeral: 'I',
@@ -87,16 +85,15 @@ const MODELS: ModelRow[] = [
     support: 'exact',
     how: 'Truncated at N, with Lq summed over the waiting states.',
   },
-];
-
-/** Non-textbook classes the app still has to answer for, stated honestly. */
-const EXTENSIONS: ModelRow[] = [
+  // The textbook stops at VIII. M/G/K is listed with the rest because the app
+  // classifies stations into it like any other; the APPROX tag carries the
+  // difference in how it is solved.
   {
-    numeral: '—',
+    numeral: 'IX',
     kendall: 'M/G/K : ∞/FCFS',
     name: 'General service, multiple servers',
     support: 'approx',
-    how: 'The textbook gives no formula. Allen–Cunneen approximation; the simulation is authoritative.',
+    how: 'No closed formula. Allen–Cunneen approximation; the simulation is authoritative.',
   },
 ];
 
@@ -131,11 +128,19 @@ const MEASURE_IDS: QuantityId[] = [
 
 export function QueueingReference() {
   return (
-    <Card>
-      <SectionHeader
-        title="Queueing-theory reference"
-        sub="Kendall–Lee a/b/c:d/e — arrival distribution / service distribution / servers / system capacity / discipline."
-      />
+    <div>
+      <p style={{ ...SW_TYPE.caption, color: SW_COLORS.muted, marginTop: 0, marginBottom: 8 }}>
+        A sewing line is a <strong>tandem</strong> network: the textbook’s own service mechanism
+        allows a unit to pass through a sequence of facilities. Each station is solved on its own
+        using the arrival rate observed at it, which Burke’s theorem justifies exactly for the
+        all-exponential case and approximately otherwise.
+      </p>
+      {/* The title lives in the page's title bar; only the notation key
+          stays here, directly above the table it decodes. */}
+      <div style={{ fontSize: 13, color: SW_COLORS.muted, marginBottom: 16 }}>
+        Kendall–Lee a/b/c:d/e — arrival distribution / service distribution / servers / system
+        capacity / discipline.
+      </div>
 
       <SubTitle>Models</SubTitle>
       <div style={tableWrap}>
@@ -145,26 +150,12 @@ export function QueueingReference() {
         ))}
       </div>
 
-      <SubTitle style={{ marginTop: 16 }}>Beyond the textbook</SubTitle>
-      <div style={tableWrap}>
-        {EXTENSIONS.map((m) => (
-          <ModelRowView key={m.kendall} row={m} alt={false} />
-        ))}
-      </div>
-
       <SubTitle style={{ marginTop: 16 }}>Parameters you author</SubTitle>
       <QuantityTable ids={PARAM_IDS} />
 
       <SubTitle style={{ marginTop: 16 }}>Measures the model reports</SubTitle>
       <QuantityTable ids={MEASURE_IDS} />
-
-      <p style={{ ...SW_TYPE.caption, color: SW_COLORS.muted, marginTop: 14, marginBottom: 0 }}>
-        A sewing line is a <strong>tandem</strong> network: the textbook’s own service mechanism
-        allows a unit to pass through a sequence of facilities. Each station is solved on its own
-        using the arrival rate observed at it, which Burke’s theorem justifies exactly for the
-        all-exponential case and approximately otherwise.
-      </p>
-    </Card>
+    </div>
   );
 }
 

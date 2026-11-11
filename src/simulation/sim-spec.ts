@@ -55,7 +55,6 @@ export interface SimSpec {
    */
   recordFlow: boolean;
   warmupMin: number;
-  opEfficiency?: Record<string, number>;
 }
 
 // ============================================================================
@@ -70,8 +69,6 @@ export interface BuildSimSpecInput {
   durationMin: number;
   seed: number;
   warmupMin: number;
-  /** Per-op efficiency multipliers from the skill matrix. */
-  opEfficiency?: Record<string, number>;
   samplePeriodMin?: number;
 }
 
@@ -114,7 +111,6 @@ export function buildSimSpec(input: BuildSimSpecInput): SimSpec {
     // entity stream there and skip the memory cost on factory-wide runs.
     recordFlow: scope.kind === 'line' || lines.length === 1,
     warmupMin: Math.max(0, Math.min(input.warmupMin, input.durationMin - 1)),
-    opEfficiency: input.opEfficiency,
   };
 }
 
@@ -163,6 +159,7 @@ function wsSignature(
     ws.operation?.garmentId ?? '',
     ws.operation?.bundleSize ?? '',
     ws.resources?.workersRequired ?? '',
+    ws.resources?.efficiencyPct ?? '',
     // Op-level queueing parameters. The engine resolves c, N and the queue
     // discipline off the bound operation when the workstation has no block
     // override, so an Inspector edit to any of them changes engine output and
@@ -191,6 +188,11 @@ function opQueueSignature(
     op.queueCapacity ?? '',
     op.queueDiscipline ?? '',
     JSON.stringify(op.serviceDistribution ?? null),
+    // Rework is resolved through this same catalog, so an edit to it changes
+    // engine output and has to invalidate the cached run.
+    op.reworkRate ?? '',
+    op.reworkRouteToOpId ?? '',
+    op.maxReworkAttempts ?? '',
   ].join(',');
 }
 
@@ -213,7 +215,7 @@ function lineSignature(
     .join(';');
   const meta = twin.lines
     .filter((l) => l.id === line.lineId)
-    .map((l) => `${l.id}:${l.garmentId ?? ''}:${JSON.stringify(l.policy ?? null)}`)
+    .map((l) => `${l.id}:${l.garmentId ?? ''}:${l.efficiencyPct ?? ''}:${JSON.stringify(l.policy ?? null)}`)
     .join(';');
   return [line.lineId, line.garment?.id ?? '', meta, ws, conns, assigns].join('#');
 }
@@ -228,10 +230,6 @@ export function simSpecKey(spec: SimSpec): string {
     spec.samplePeriodMin,
     spec.recordFlow ? 'f1' : 'f0',
     spec.warmupMin,
-    // Sorted so key order can't depend on object-key iteration order.
-    JSON.stringify(
-      Object.entries(spec.opEfficiency ?? {}).sort(([a], [b]) => (a < b ? -1 : 1)),
-    ),
     ...spec.lines.map((line) => lineSignature(line, spec.garmentsById)),
   ].join('~');
   return `${spec.lines.length}-${fnv1a(body)}`;

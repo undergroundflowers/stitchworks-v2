@@ -44,9 +44,6 @@ export interface SimConfig {
    *  this for any station that supplies one. */
   smvVariance: number;
   randomSeed: number;
-  /** Optional per-operation efficiency multiplier (e.g. 0.85 for an
-   *  operator running at 85 % of standard). */
-  opEfficiency?: Record<string, number>;
   /** Per-station service-time distribution. Parallel to `stationServers`. */
   serviceDistributions?: (ServiceDist | undefined)[];
   /** Per-station system capacity (queue + in-service). */

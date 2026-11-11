@@ -29,7 +29,6 @@ import {
   Card,
   LineSimEmpty,
   SectionHeader,
-  QueueingReference,
   StationTimeseriesGrid,
 } from '../components';
 import { BalkRatePanel, ConvergenceChart, LittlesLawCheck } from '../components/charts';
@@ -285,9 +284,6 @@ export function WorkstationDetailPage() {
         </Card>
       )}
 
-      {/* The reference is generated from the same symbol vocabulary the
-          Inspector fields use, so the sheet cannot drift from the labels. */}
-      <QueueingReference />
     </PageShell>
   );
 }

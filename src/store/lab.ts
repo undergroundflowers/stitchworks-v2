@@ -20,6 +20,7 @@ import { indexedDbStorage } from './storage/indexedDbStorage';
 import {
   SEED_SYSTEMS,
   SEED_VERSION,
+  LEGACY_SEED_NAMES,
   blankSystem,
   type LabSystem,
 } from '../domain/lab-systems';
@@ -357,9 +358,15 @@ export const useLab = create<LabState>()(
         const merged: LabState = { ...current, ...stored };
         if ((stored.seedVersion ?? 0) >= SEED_VERSION) return merged;
         const have = new Set(merged.systems.map((sys) => sys.id));
+        // Drop the old Kendall-code prefix from starters the user never renamed.
+        const renamed = merged.systems.map((sys) => {
+          if (LEGACY_SEED_NAMES[sys.id] !== sys.name) return sys;
+          const seed = SEED_SYSTEMS.find((x) => x.id === sys.id);
+          return seed ? { ...sys, name: seed.name } : sys;
+        });
         return {
           ...merged,
-          systems: [...merged.systems, ...SEED_SYSTEMS.filter((sys) => !have.has(sys.id))],
+          systems: [...renamed, ...SEED_SYSTEMS.filter((sys) => !have.has(sys.id))],
           seedVersion: SEED_VERSION,
         };
       },

@@ -13,8 +13,8 @@
  * read as returns rather than as another forward step.
  */
 
-import { type CSSProperties, type ReactNode } from 'react';
-import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../../design/tokens';
+import { useState, type CSSProperties, type ReactNode } from 'react';
+import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../../design/tokens';
 import { alpha } from '../../design/color-utils';
 import { Sym } from '../Sym';
 import type { QueueEdge, QueueNode, SolvedNode } from '../../simulation/network';
@@ -483,7 +483,45 @@ function LegendItem({ swatch, children }: { swatch: ReactNode; children: ReactNo
   );
 }
 
+/**
+ * The schematic's key, folded behind a "Legend" toggle. Closed by default:
+ * the key is for a first read, and after that it is only height pushing the
+ * results further down the page.
+ */
 export function LabSchematicLegend({ style }: { style?: CSSProperties }) {
+  const [open, setOpen] = useState(false);
+  return (
+    <div style={style}>
+      <button
+        type="button"
+        aria-expanded={open}
+        onClick={() => setOpen((o) => !o)}
+        style={{
+          ...SW_TYPE.kicker,
+          display: 'inline-flex',
+          alignItems: 'center',
+          gap: 6,
+          padding: '4px 0',
+          background: 'none',
+          border: 'none',
+          color: SW_COLORS.muted,
+          cursor: 'pointer',
+        }}
+      >
+        <svg
+          width={10} height={10} viewBox="0 0 10 10" aria-hidden
+          style={{ transform: open ? 'rotate(90deg)' : 'none', transition: 'transform 120ms' }}
+        >
+          <path d="M3 1.5 L7 5 L3 8.5" fill="none" stroke="currentColor" strokeWidth={1.5} />
+        </svg>
+        Legend
+      </button>
+      {open && <LegendItems />}
+    </div>
+  );
+}
+
+function LegendItems() {
   return (
     <div
       style={{
@@ -495,7 +533,7 @@ export function LabSchematicLegend({ style }: { style?: CSSProperties }) {
         fontFamily: SW_FONTS.mono,
         fontSize: 10,
         color: SW_COLORS.muted,
-        ...style,
+        marginTop: 6,
       }}
     >
       <LegendItem

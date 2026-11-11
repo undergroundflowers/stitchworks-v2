@@ -18,24 +18,17 @@ import {
 } from '../components/charts';
 import { ScenariosPanel } from './Scenarios';
 import {
-  efficiencyFromSkillMatrix,
-  runReplications,
   buildLinesFromTwin,
   aggregateFactoryKpis,
-  scopedTwinForLine,
   type AggregateKpis,
   type LineBuild,
 } from '../simulation';
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import { useSimScope } from '../store/simScope';
+import { resolveSimScope, useSimScope } from '../store/simScope';
 import { lineSystemBadge } from '../domain/twin';
-
-const SHIFT_MIN = 480;
-/** Base RNG seed for the page-level replications. Replication i uses
- *  `REPORT_BASE_SEED + i`. Kept as a constant so the seed strip in the
- *  page chrome can display the exact range without re-running the engine. */
-const REPORT_BASE_SEED = 42;
+import { useLineSim } from '../simulation/useLineSim';
+import { liveAggregate } from '../simulation/live-aggregate';
 
 /**
  * All-zero aggregate. Structurally required so `kpiSource` has a type, never
@@ -101,7 +94,7 @@ function sumHistories(
  * slider here any more: both existed to configure a *synthetic* line, and the
  * page reported that line's numbers next to the real one's.
  *
- *   Performance   per-line and factory KPIs from `runReplications`
+ *   Performance   per-line and factory KPIs from the live run, so far
  *   Line Balance  one `LineBalancePanel` per in-scope sewing line
  *   Scenarios     saved runs to compare against
  *
@@ -175,87 +168,59 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   }, [reportsTwin, garments.byId, garments.all]);
 
   // ── Real run-driven KPIs from the sim engine ────────────────────────────
-  // Per-op efficiency derived from the project's skill matrix.
-  //
-  // Built over EVERY garment's operations, not just one. The map is keyed by
-  // op id, so building it from a single bulletin silently dropped the skill
-  // ratings of every line running a different garment — on a two-product
-  // factory the second line ran at nominal speed while the header claimed the
-  // matrix was in force.
-  const opEfficiency = useMemo(
-    () => efficiencyFromSkillMatrix(project.skillMatrix, garments.all.flatMap((g) => g.operations)),
-    [project.skillMatrix, garments.all],
-  );
-  const skillEntries = Object.keys(opEfficiency).length;
-  // Default to 5 replications so the stochastic engine's variance is
-  // visible on first render. A single-run report hides the ±std the
-  // demo narrative depends on; 5 is a cheap-enough run count that the
-  // page still paints under a second.
-  const [runs, setRuns] = useState<number>(5);
-  // Bumped by the Re-run button. Part of the replication memo key, which is
-  // the only thing that decides when the engine runs on this page.
-  const [rerunNonce, setRerunNonce] = useState(0);
-
   // ── Per-line replication ─────────────────────────────────────────────────
   // When the active twin has more than one wired sewing line, the
   // single-garment KPIs above can't honestly speak for the factory (Line 1
   // is knit, Line 2 is woven, etc.). Run a separate replication on each
   // wired line's config so the Performance tab can show a per-line table
   // alongside the factory-weighted aggregate.
-  const reportScope = useSimScope((s) => s.scope);
+  const savedReportScope = useSimScope((s) => s.scope);
+  const reportScope = useMemo(
+    () => resolveSimScope(savedReportScope, reportsTwin.lines ?? []),
+    [savedReportScope, reportsTwin.lines],
+  );
   const lineBuildsForReports: LineBuild[] = useMemo(() => {
     if ((reportsTwin.lines ?? []).length === 0) return [];
     return buildLinesFromTwin({
       twin: reportsTwin,
       garmentsById: garments.byId,
       defaultGarmentId,
-      opEfficiency,
       modelTimeUnit: project.time.modelTimeUnit,
     });
-  }, [reportsTwin, garments.byId, defaultGarmentId, opEfficiency, project.time.modelTimeUnit]);
+  }, [reportsTwin, garments.byId, defaultGarmentId, project.time.modelTimeUnit]);
+  // ── The live run ─────────────────────────────────────────────────────────
+  // The same session the Run tab animates and the other Insights tabs read:
+  // one engine, one seed, one clock. Every figure below is "so far" and grows
+  // as the run plays. This page used to run its own batch of full-shift
+  // replications on a fixed seed, so it reported a finished shift — on a
+  // different roll of the dice — while the run on screen was still going.
+  const liveSim = useLineSim();
+  const liveRuns = liveSim.runs;
+  const runDurationMin = liveSim.spec.durationMin;
+  const runSeed = liveSim.spec.seed;
+  /** Sim-minutes the live run has played so far. */
+  const elapsedMin = liveRuns[0]?.state.time ?? 0;
   const perLineAggs = useMemo(() => {
-    return lineBuildsForReports
-      .filter((lb) => lb.ok)
-      // Honour the shared scope so the picker in the header actually narrows
-      // the report, and so this page agrees with the Sim screen and the
-      // queueing tables about what "the line" currently means.
-      .filter((lb) => (reportScope.kind === 'line' ? lb.line.id === reportScope.id : true))
-      .map((lb) => {
-        // Scope the active twin to this line's workstations so PML treats
-        // each sewing line as an independent run — different garments and
-        // bundle sizes don't compose into one homogeneous simulation.
-        const lineTwin = scopedTwinForLine(reportsTwin, lb.line.id);
-        const operatorsForLine = lb.build.config.stationServers.reduce((s, c) => s + c, 0);
-        return {
+    return liveRuns.flatMap((slot) => {
+      const lb = lineBuildsForReports.find((b) => b.ok && b.line.id === slot.lineId);
+      if (!lb) return [];
+      // Operators = sum of parallel servers across stations. Matches the
+      // efficiency denominator so the factory-weighted aggregate stays
+      // internally consistent.
+      const operators = lb.build.config.stationServers.reduce((s, c) => s + c, 0);
+      return [
+        {
           line: lb.line,
           bundleSize: lb.build.config.bundleSize,
-          // Operators = sum of parallel servers across stations. Matches the
-          // efficiency denominator below so the factory-weighted aggregate
-          // stays internally consistent.
-          operators: operatorsForLine,
+          operators,
           // SAM per piece for this line's garment. Drives the SAM-consumed
           // weight in the factory efficiency aggregation.
           totalSmv: lb.build.config.operations.reduce((s, o) => s + o.smv, 0),
-          agg: runReplications({
-            twin: lineTwin,
-            replications: runs,
-            simMinutes: SHIFT_MIN,
-            garment: lb.build.meta.garment,
-            operatorsOverride: operatorsForLine,
-            // Both of these were computed on this page and then dropped on the
-            // floor. Without `opEfficiency` the header advertised "N operations
-            // respect skill matrix" over a run that used nominal SMVs; without
-            // `garmentsById` the engine resolved every station's c, K,
-            // discipline and service distribution against the frozen built-in
-            // catalog, so an edited or imported bulletin was invisible to the
-            // Reports numbers while LiveSim — which does pass it — showed
-            // something else.
-            opEfficiency,
-            garmentsById: garments.byId,
-          }),
-        };
-      });
-  }, [lineBuildsForReports, reportsTwin, runs, reportScope, opEfficiency, garments.byId, rerunNonce]);
+          agg: liveAggregate(slot, { garment: lb.build.meta.garment, operators }),
+        },
+      ];
+    });
+  }, [liveRuns, lineBuildsForReports]);
 
   /**
    * The lines the Line Balance tab draws, honouring the shared scope picker.
@@ -284,8 +249,8 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   // which silently misrepresents lines of different sizes.
   const factoryAgg = useMemo<AggregateKpis | null>(() => {
     if (perLineAggs.length === 0) return null;
-    return aggregateFactoryKpis(perLineAggs, SHIFT_MIN);
-  }, [perLineAggs]);
+    return aggregateFactoryKpis(perLineAggs, elapsedMin);
+  }, [perLineAggs, elapsedMin]);
 
   /**
    * Top KPI tiles, and the numbers a saved scenario captures.
@@ -313,7 +278,6 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const periodMultiplier = period === 'WEEK' ? 6 : period === 'MONTH' ? 26 : 1;
   const periodLabel = period === 'SHIFT' ? 'SHIFT' : period === 'DAY' ? 'DAY' : period === 'WEEK' ? 'WEEK' : 'MONTH';
   const scaledProducedMean = producedPieces * periodMultiplier;
-  const scaledProducedStd = (runs > 1 ? kpiSource.producedPieces.std : 0) * periodMultiplier;
   // True when there is a wired factory to report on at all. Everything on the
   // Performance tab sits behind it; without it the tab shows an empty state.
   const factoryScope = factoryAgg !== null;
@@ -323,41 +287,20 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
     <div style={embedded
       ? { width:'100%', background: SW_COLORS.paperDeep, padding: 24 }
       : { width:'100%', height:'100%', overflow:'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
+      {/* No kicker or title: the Insights tab strip already says REPORTS and
+          the Performance / Line Balance / Scenarios switch below names the
+          view, so the header keeps only the run description and controls. */}
       <SectionHeader
-        kicker="Reports"
-        title={tab === 'balance' ? 'Line balance' : tab === 'scenarios' ? 'Saved scenarios' : 'Production performance'}
         sub={
           tab === 'balance'
-            ? `Read from the twin · ${(reportsTwin.lines ?? []).length} sewing ${(reportsTwin.lines ?? []).length === 1 ? 'line' : 'lines'} · ${skillEntries > 0 ? `${skillEntries} operations carry a skill rating` : 'no skill overrides'}`
-            : `${runs > 1 ? `${runs}-replication mean` : 'Single seed'} · ${SHIFT_MIN}-min shift${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : 'No wired line'} · ${skillEntries > 0 ? `${skillEntries} operations respect skill matrix` : 'baseline (no skill overrides)'} · seed ${REPORT_BASE_SEED}${runs > 1 ? `..${REPORT_BASE_SEED + runs - 1}` : ''}`
+            ? `Read from the twin · ${(reportsTwin.lines ?? []).length} sewing ${(reportsTwin.lines ?? []).length === 1 ? 'line' : 'lines'}`
+            : `Live run · minute ${Math.round(elapsedMin)} of ${runDurationMin}${periodMultiplier > 1 ? ` × ${periodMultiplier} (${periodLabel.toLowerCase()})` : ''} · ${factoryScope ? `Factory of ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}` : 'No wired line'} · seed ${runSeed}`
         }
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
             {/* Bound to the shared scope, so picking a line here also moves the
                 Sim screen and the queueing pages. */}
             <LineScopePicker lines={reportsTwin.lines ?? []} />
-            <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-              <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing:'0.5px' }}>RUNS</span>
-              <ToggleGroup value={String(runs)} onChange={(v) => setRuns(parseInt(v))} options={[
-                { value: '1',  label: '1' },
-                { value: '3',  label: '3' },
-                { value: '5',  label: '5' },
-                { value: '10', label: '10' },
-              ]}/>
-            </div>
-            {/* The per-line replications are keyed on (twin, runs, scope,
-                skill matrix, garments), so re-running is a matter of busting
-                that key rather than calling the engine here. The button used
-                to re-run a synthetic single-garment twin whose result nothing
-                on the page displayed. */}
-            <Button
-              variant="secondary"
-              size="sm"
-              icon="↻"
-              onClick={() => setRerunNonce((n) => n + 1)}
-            >
-              Re-run
-            </Button>
             <Button variant="primary" size="sm" icon="✦"
               onClick={() => {
                 // Append device wall-clock so the user can recognise this
@@ -367,7 +310,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 const scopeLabel = factoryAgg !== null
                   ? `Factory · ${perLineAggs.length} ${perLineAggs.length === 1 ? 'line' : 'lines'} · ${perLineAggs.reduce((sum, l) => sum + l.operators, 0)} ops`
                   : 'No wired line';
-                const defaultName = `${scopeLabel} · ${runs > 1 ? `${runs}× ` : ''}${wallStamp} (device)`;
+                const defaultName = `${scopeLabel} · min ${Math.round(elapsedMin)} · ${wallStamp} (device)`;
                 setSaveName(defaultName);
                 setSaveNotes('');
                 setSaveOpen(true);
@@ -460,11 +403,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 OB DECLARED vs SIM OBSERVED
               </div>
               <div style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted, letterSpacing: '0.06em' }}>
-                {runs} REPLICATION{runs === 1 ? '' : 'S'} · 480 MIN SHIFT
+                LIVE RUN · MINUTE {Math.round(elapsedMin)} OF {runDurationMin}
               </div>
             </div>
             <div style={{ fontSize: 12, color: SW_COLORS.muted, marginBottom: 12, lineHeight: 1.45 }}>
-              Each row compares the operation bulletin's IE-declared output (per the imported sheet's header) against the stochastic sim mean. Green ✓ = within ±15%; amber △ = within ±30%; red ✗ = significantly off. A red row means the operator headcount, machine balance or skill model needs adjustment.
+              Each row compares the operation bulletin's IE-declared output (per the imported sheet's header) against the live run so far, over the same elapsed time. Green ✓ = within ±15%; amber △ = within ±30%; red ✗ = significantly off. A red row means the operator headcount, machine balance or skill model needs adjustment.
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>
@@ -473,8 +416,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     <th style={{ padding: '6px 8px' }}>LINE</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right' }}>OB @100%</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right' }}>OB @PLAN 60%</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>SIM MEAN</th>
-                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>±STD</th>
+                    <th style={{ padding: '6px 8px', textAlign: 'right' }}>SIM SO FAR</th>
                     <th style={{ padding: '6px 8px', textAlign: 'right' }}>SIM / OB@100%</th>
                     <th style={{ padding: '6px 8px', textAlign: 'center' }}>MATCH</th>
                   </tr>
@@ -485,10 +427,11 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                       ? Math.round(60 / Math.max(0.01, Math.max(...r.agg.firstStations.map((s) => s.smv))))
                       : 0;
                     const garment = r.line.garmentId ? garments.byId[r.line.garmentId] : undefined;
-                    const ob100 = (garment?.hourlyTarget100 ?? declaredHourly) * 8;
+                    // Declared output for the time the run has played, so a run at
+                    // minute 100 is not judged against a full shift's target.
+                    const ob100 = (garment?.hourlyTarget100 ?? declaredHourly) * (elapsedMin / 60);
                     const obPlan = Math.round(ob100 * 0.6);
                     const simMean = r.agg.producedPieces.mean;
-                    const simStd = r.agg.producedPieces.std;
                     const ratio = ob100 > 0 ? simMean / ob100 : 0;
                     // Sim usually lands between OB @ Plan and OB @100% because
                     // the engine applies stochastic variance but no operator
@@ -512,7 +455,6 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                         <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono }}>{Math.round(ob100).toLocaleString()}</td>
                         <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>{obPlan.toLocaleString()}</td>
                         <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono, fontWeight: 800, color: SW_COLORS.brand }}>{Math.round(simMean).toLocaleString()}</td>
-                        <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>±{simStd.toFixed(0)}</td>
                         <td style={{ padding: '8px', textAlign: 'right', fontFamily: SW_FONTS.mono }}>{(ratio * 100).toFixed(0)}%</td>
                         <td style={{ padding: '8px', textAlign: 'center', fontWeight: 900, color: verdictColor }}>{verdict}</td>
                       </tr>
@@ -522,7 +464,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               </table>
             </div>
             <div style={{ marginTop: 10, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.5 }}>
-              Read this row: <strong>OB @100%</strong> is the IE's theoretical ceiling (bottleneck SMV × shift); <strong>OB @ Plan 60%</strong> is what the IE actually expects a real operator to deliver. The simulator usually lands between the two because it models stochastic service variance but doesn't yet model operator fatigue or breakdowns.
+              Read this row: <strong>OB @100%</strong> is the IE's theoretical ceiling (bottleneck SMV × elapsed time); <strong>OB @ Plan 60%</strong> is what the IE actually expects a real operator to deliver. The simulator usually lands between the two because it models stochastic service variance but doesn't yet model operator fatigue or breakdowns.
             </div>
           </Card>
         </HideableBox>
@@ -532,18 +474,17 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           <KpiTile
             label={`OUTPUT / ${periodLabel}`}
             mean={scaledProducedMean}
-            std={scaledProducedStd}
+            std={0}
             unit="pcs"
             formatter={(v) => Math.round(v).toLocaleString()}
             color={SW_COLORS.brand}
             info={
               <KpiFormula
-                formula="output = pieces produced in one 480-min shift × period multiplier"
+                formula="output = pieces produced so far × period multiplier"
                 where={[
-                  ['pieces produced', 'finished pieces that exited the last station of the line during the shift'],
+                  ['pieces produced', 'finished pieces that exited the last station of the line so far in the live run'],
                   ['period multiplier', `${periodLabel} → ×${periodMultiplier} (SHIFT ×1 · DAY ×1 · WEEK ×6 · MONTH ×26)`],
                 ]}
-                replication={runs > 1 ? `Mean across ${runs} replications (seeds ${REPORT_BASE_SEED}..${REPORT_BASE_SEED + runs - 1}); ± shows std of that mean.` : undefined}
               />
             }
           />
@@ -552,18 +493,17 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           <KpiTile
             label="THROUGHPUT"
             mean={throughputPerHr}
-            std={runs > 1 ? kpiSource.throughputPerHr.std : 0}
+            std={0}
             unit="pcs/hr"
             formatter={(v) => Math.round(v).toLocaleString()}
             color={SW_COLORS.ok}
             info={
               <KpiFormula
-                formula="throughput = pieces produced ÷ shift hours"
+                formula="throughput = pieces produced ÷ hours elapsed"
                 where={[
-                  ['shift hours', '480 simulated minutes ÷ 60 = 8 h'],
-                  ['pieces produced', 'pieces exiting the line during the shift (post-warm-up)'],
+                  ['hours elapsed', 'simulated minutes so far ÷ 60'],
+                  ['pieces produced', 'pieces exiting the line so far'],
                 ]}
-                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
               />
             }
           />
@@ -572,7 +512,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           <KpiTile
             label="EFFICIENCY"
             mean={efficiency}
-            std={runs > 1 ? kpiSource.efficiencyPct.std : 0}
+            std={0}
             unit="%"
             formatter={(v) => v.toFixed(1)}
             color={efficiency >= 75 ? SW_COLORS.fabric : SW_COLORS.thread}
@@ -581,9 +521,8 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 formula="efficiency = (Σ SAM earned ÷ Σ paid operator-minutes) × 100"
                 where={[
                   ['SAM earned', 'pieces produced × per-operation SAM, summed over operations'],
-                  ['paid operator-minutes', 'operators × shift minutes (480)'],
+                  ['paid operator-minutes', 'operators × minutes elapsed'],
                 ]}
-                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
               />
             }
           />
@@ -592,7 +531,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           <KpiTile
             label="MEAN LEAD"
             mean={meanLeadTime}
-            std={runs > 1 ? kpiSource.meanLeadTime.std : 0}
+            std={0}
             unit="min"
             formatter={(v) => v.toFixed(1)}
             color={SW_COLORS.bobbin}
@@ -604,7 +543,6 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                   ['exit-time', 'sim-clock minute the bundle leaves the last station'],
                 ]}
                 note="Equivalent to Little's Law check: WIP ≈ throughput × lead-time."
-                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
               />
             }
           />
@@ -613,7 +551,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           <KpiTile
             label="WIP"
             mean={wipBundles}
-            std={runs > 1 ? kpiSource.wipBundles.std : 0}
+            std={0}
             unit="bundles"
             formatter={(v) => Math.round(v).toLocaleString()}
             color={SW_COLORS.warn}
@@ -621,10 +559,9 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               <KpiFormula
                 formula="WIP = time-averaged number of bundles on the line"
                 where={[
-                  ['time-averaged', '∫ N(t) dt ÷ shift minutes, with N(t) = bundles released − bundles exited at sim-minute t'],
+                  ['time-averaged', '∫ N(t) dt ÷ minutes elapsed, with N(t) = bundles released − bundles exited at sim-minute t'],
                 ]}
                 note="Counted in bundles, not pieces — multiply by bundle size for piece-WIP."
-                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
               />
             }
           />
@@ -633,7 +570,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
           <KpiTile
             label="UTIL"
             mean={utilization * 100}
-            std={runs > 1 ? kpiSource.utilization.std * 100 : 0}
+            std={0}
             unit="%"
             formatter={(v) => v.toFixed(0)}
             color={SW_COLORS.thread}
@@ -642,10 +579,9 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 formula="util = (Σ busy operator-minutes ÷ Σ paid operator-minutes) × 100"
                 where={[
                   ['busy', 'operator processing a bundle (not idle, not blocked, not starved)'],
-                  ['paid', 'operators × shift minutes (480)'],
+                  ['paid', 'operators × minutes elapsed'],
                 ]}
                 note="Mean across stations — single bottleneck stations may sit near 100% while the line average is lower."
-                replication={runs > 1 ? `Mean across ${runs} replications; ± shows std across runs.` : undefined}
               />
             }
           />
@@ -661,7 +597,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                 <div>
                   <div style={{ ...SW_TYPE.heading }}>PER-LINE OUTPUT OVER TIME</div>
                   <div style={{ fontSize: 12, color: SW_COLORS.muted }}>
-                    Cumulative pieces produced per line, sampled every 5 sim-minutes and averaged across all {runs} replication{runs === 1 ? '' : 's'}.
+                    Cumulative pieces produced per line, sampled every 5 sim-minutes of the live run.
                   </div>
                 </div>
                 <div style={{ display: 'flex', gap: 14, fontSize: 11, fontFamily: SW_FONTS.mono, fontWeight: 700, flexWrap: 'wrap' }}>
@@ -775,7 +711,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     sub={
                       factoryScope
                         ? `Factory cumulative — sum across all ${factoryLineCount} wired ${factoryLineCount === 1 ? 'line' : 'lines'}, sampled every 5 sim-minutes.`
-                        : `Bundles → pieces produced over the 480-min shift. ${runs > 1 ? `Mean of ${runs} replications shown; shaded band = ±1 std.` : 'Single seed.'}`
+                        : 'Bundles → pieces produced so far in the live run.'
                     }
                     legend={[
                       { color: SW_COLORS.brand, label: 'Cumulative produced' },
@@ -794,7 +730,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     const gap = ceiling > 0 ? Math.max(0, 100 - (finalProduced / ceiling) * 100) : 0;
                     return (
                       <ChartInference
-                        observation={`The orange curve reaches ${Math.round(finalProduced).toLocaleString()} pieces by the end of the shift, sitting ${gap.toFixed(0)}% below the dashed theoretical ceiling of ${Math.round(ceiling).toLocaleString()} pieces.`}
+                        observation={`The orange curve reaches ${Math.round(finalProduced).toLocaleString()} pieces so far, sitting ${gap.toFixed(0)}% below the dashed theoretical ceiling of ${Math.round(ceiling).toLocaleString()} pieces.`}
                         inference={
                           gap < 8
                             ? `The line is well-balanced — bundles traverse the floor almost as fast as the bottleneck SMV allows. Warm-up loss accounts for most of the residual gap.`
@@ -834,7 +770,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     const peak = Math.max(...history.map((h) => h.throughputPerHr));
                     return (
                       <ChartInference
-                        observation={`Steady-state throughput averages ${steadyMean.toFixed(0)} pcs/hr in the final quarter of the shift; the run's peak rate was ${peak.toFixed(0)} pcs/hr.`}
+                        observation={`Steady-state throughput averages ${steadyMean.toFixed(0)} pcs/hr in the latest quarter of the run; the run's peak rate was ${peak.toFixed(0)} pcs/hr.`}
                         inference={
                           steadyMean / Math.max(1, targetThroughputPerHr) > 0.92
                             ? `Steady-state is within 8% of the theoretical ceiling — service-time variance (the stochastic part) is the only meaningful loss. Predictable production.`
@@ -870,7 +806,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     const drift = tailMean - startWip;
                     return (
                       <ChartInference
-                        observation={`WIP peaks at ${peak.toFixed(1)} bundles and settles around ${tailMean.toFixed(1)} bundles in the back half of the shift. Net drift from start to steady state: ${(drift >= 0 ? '+' : '') + drift.toFixed(1)} bundles.`}
+                        observation={`WIP peaks at ${peak.toFixed(1)} bundles and settles around ${tailMean.toFixed(1)} bundles in the back half of the run. Net drift from start to steady state: ${(drift >= 0 ? '+' : '') + drift.toFixed(1)} bundles.`}
                         inference={
                           Math.abs(drift) < 2
                             ? `WIP is stable — what enters the line leaves the line. Inventory at every buffer is in equilibrium, so the operator-pool sizing is appropriate for the demand.`
@@ -958,7 +894,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
                     if (total <= 0) {
                       return (
                         <ChartInference
-                          observation="No station carries a meaningful queue at end of shift."
+                          observation="No station carries a meaningful queue right now."
                           inference="The line is over-served relative to demand — operators wait for bundles rather than the other way round. Throughput is source-limited, not capacity-limited."
                           action="Raise the source arrival rate or load orders into the line via the Orders panel to test the line's real capacity."
                         />
@@ -1007,12 +943,13 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         <ScenariosPanel embedded />
       )}
 
-      <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop: 18 }}>
-        <Button variant="secondary" icon="↓">Export PDF</Button>
-        {!embedded && (
+      {/* An "Export PDF" button sat here with no handler — it looked like a
+          feature and did nothing, so it is gone. */}
+      {!embedded && (
+        <div style={{ display:'flex', gap:10, justifyContent:'flex-end', marginTop: 18 }}>
           <Button variant="dark" icon="✓" onClick={() => navigate('/line')}>Back to builder</Button>
-        )}
-      </div>
+        </div>
+      )}
 
       {saveOpen && (
         <SaveScenarioModal
@@ -1379,7 +1316,7 @@ function PerLineKpiTable({
     <Card padding={16} style={{ marginBottom: 20 }}>
       <SectionHeader
         title="PER LINE"
-        sub="Replication-mean KPIs run independently on each wired sewing line. FACTORY row sums extensive KPIs (output, throughput, WIP) and weights intensives (efficiency by operator-minutes, util by operator count, lead time by pieces)."
+        sub="Live-run KPIs so far for each wired sewing line. FACTORY row sums extensive KPIs (output, throughput, WIP) and weights intensives (efficiency by operator-minutes, util by operator count, lead time by pieces)."
         right={
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
             <span style={{ ...SW_TYPE.kicker, letterSpacing: '1px', color: SW_COLORS.muted }}>SORT</span>

@@ -47,7 +47,6 @@ import { SimStationDetail } from '../components/SimStationDetail';
 import {
   buildSimConfigFromTwin,
   buildLinesFromTwin,
-  efficiencyFromSkillMatrix,
   usePmlSim,
   useMultiPmlSim,
   mergePmlSimStates,
@@ -62,14 +61,16 @@ import {
   type BundleFrame,
 } from '../simulation';
 import {
+  ENGINE_TIME_UNIT,
   fmtElapsed,
   fmtCalendar,
   simDayNumber,
   shiftProgressPct,
-  unitToSeconds,
   fmtMinutesAsHHMM,
   parseHHMM,
 } from '../simulation/timeUnit';
+import { lineRateCap } from '../simulation/line-rate-cap';
+import { DEFAULT_SIM_SEED, useSimScope } from '../store/simScope';
 import { useProject, useGarments } from '../store';
 import { isoProj, flatProj, CuboidFaces, SW_PAL, shade, isoFixtureForMachineCode, MACHINE_CATALOG, lookupFixture, stationMark, CAM_IDENTITY, fitBounds, ISO_PROJECTION, FLAT_PROJECTION, FLAT_CELL, type Cam, type CamBounds, type MachineCode, type Projection } from '../domain';
 import { StationGlyph } from '../components/StationGlyph';
@@ -157,6 +158,8 @@ interface SimHudStatProps {
   value: number | string;
   unit: string;
   color: string;
+  /** Hover explanation, for a tile whose number needs one. */
+  title?: string;
 }
 
 export function LiveSimPage() {
@@ -167,7 +170,7 @@ export function LiveSimPage() {
   const activeTwin = useTwin(selectActiveTwin);
   // Both are re-seeded from the built twin / active order as soon as one
   // resolves; these are only the value before that happens.
-  const [garmentId, setGarmentId] = useState<string>(() => garments.all[0]?.id ?? '');
+  const [garmentId] = useState<string>(() => garments.all[0]?.id ?? '');
   const [operators, setOperators] = useState<number>(
     () => activeTwin.lines.find((l) => l.operatorTarget)?.operatorTarget ?? 4,
   );
@@ -244,13 +247,9 @@ export function LiveSimPage() {
       twin: activeTwin,
       garmentsById: garments.byId,
       defaultGarmentId: garmentId,
-      opEfficiency: efficiencyFromSkillMatrix(
-        project.skillMatrix,
-        (garments.byId[garmentId] ?? garments.all[0]).operations,
-      ),
       modelTimeUnit: project.time.modelTimeUnit,
     });
-  }, [activeTwin, linesInTwin.length, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all]);
+  }, [activeTwin, linesInTwin.length, garments.byId, garmentId, project.time.modelTimeUnit]);
 
   // Twin-driven config + meta. Wrapped in a try because the user can land
   // on /sim with an empty twin — we fall back to the reference / garment
@@ -261,27 +260,15 @@ export function LiveSimPage() {
         twin: activeTwin,
         garmentsById: garments.byId,
         defaultGarmentId: garmentId,
-        opEfficiency: efficiencyFromSkillMatrix(
-          project.skillMatrix,
-          (garments.byId[garmentId] ?? garments.all[0]).operations,
-        ),
         modelTimeUnit: project.time.modelTimeUnit,
         lineId: selectedLineId ?? undefined,
       });
     } catch {
       return null;
     }
-  }, [activeTwin, garments.byId, garmentId, project.skillMatrix, project.time.modelTimeUnit, garments.all, selectedLineId]);
+  }, [activeTwin, garments.byId, garmentId, project.time.modelTimeUnit, selectedLineId]);
 
   const garment = twinBuild?.meta.garment ?? (garments.byId[garmentId] ?? garments.all[0]);
-  // Operator count for display. The slider owns it, re-seeded by the effect
-  // below whenever the twin changes.
-  const effectiveOperators = operators;
-
-  const opEfficiency = useMemo(
-    () => efficiencyFromSkillMatrix(project.skillMatrix, garment.operations),
-    [project.skillMatrix, garment],
-  );
 
   // Resolve the sim-source twin. PML drives off a Twin (not a SimConfig),
   // so each source (twin / reference / order / garment) materialises into
@@ -302,11 +289,6 @@ export function LiveSimPage() {
     () => (selectedLineId ? scopedTwinForLine(activeTwin, selectedLineId) : activeTwin),
     [selectedLineId, activeTwin],
   );
-  // Captured for future PML wiring — it does not flow into the engine today
-  // because the twin already encodes it. `opEfficiency` is mirrored back into
-  // the skill matrix store by the operator slider effect above.
-  void opEfficiency;
-
   // Re-seed the operator slider whenever the twin meta says the default has
   // changed (e.g. user edits Builder, returns to /sim). Skip when the user
   // has typed an explicit override (i.e. `operators` already differs from
@@ -320,7 +302,11 @@ export function LiveSimPage() {
     }
   }, [twinBuild]);
 
-  const baseSim = usePmlSim(simSourceTwin, { garment, recordFlow: true });
+  // The shared seed, not a hardcoded one: Insights already runs on it, so
+  // both surfaces replay the same shift, and TIME SETUP can change it.
+  const simSeed = useSimScope((s) => s.seed);
+  const setSimSeed = useSimScope((s) => s.setSeed);
+  const baseSim = usePmlSim(simSourceTwin, { garment, recordFlow: true, seed: simSeed });
 
   // ── Multi-line scope ────────────────────────────────────────────────────
   // When no specific line is selected and the twin has more than one wired
@@ -350,7 +336,7 @@ export function LiveSimPage() {
         : [],
     [inMultiLineScope, wiredLineBuilds, activeTwin],
   );
-  const multiSim = useMultiPmlSim(multiInputs, { recordFlow: true });
+  const multiSim = useMultiPmlSim(multiInputs, { recordFlow: true, seed: simSeed });
   const multiLineIds = useMemo(
     () => wiredLineBuilds.map((lb) => lb.line.id),
     [wiredLineBuilds],
@@ -372,12 +358,42 @@ export function LiveSimPage() {
   // In single-line scope this is just `baseSim` verbatim. In multi-line scope
   // every read transparently sees the merged shape.
   const state: SimState = inMultiLineScope ? mergedMultiState : baseSim.state;
+
+  // MAX RATE — the ceiling THROUGHPUT is measured against. Taken from the
+  // finished run (see `lineRateCap`), so it holds still during playback. With
+  // several lines running, each has its own slowest station and the factory's
+  // ceiling is their sum.
+  const rateCap = useMemo(() => {
+    const results = inMultiLineScope ? multiSim.results : [baseSim.result];
+    const stationOf = (wsId: string) => state.stations.find((st) => st.wsId === wsId);
+    const caps = results.flatMap((r) => {
+      const cap = r ? lineRateCap(r.blocks.values(), (id) => stationOf(id)?.serversTotal ?? 1) : null;
+      return cap ? [cap] : [];
+    });
+    if (caps.length === 0) return null;
+    const pcsPerHour = Math.round(caps.reduce((sum, c) => sum + c.pcsPerHour, 0));
+    if (caps.length > 1) {
+      return {
+        pcsPerHour,
+        title: `Each line's slowest station sets that line's ceiling. Added up across ${caps.length} lines, that is about ${pcsPerHour.toLocaleString()} pieces an hour — the most THROUGHPUT can reach.`,
+      };
+    }
+    const name = stationOf(caps[0].wsId)?.opName ?? 'one station';
+    const secPerPiece = 3600 / caps[0].pcsPerHour;
+    const pace = secPerPiece >= 10 ? secPerPiece.toFixed(0) : secPerPiece.toFixed(1);
+    return {
+      pcsPerHour,
+      title: `The slowest station on the line is ${name}. Working without a pause it passes about one piece every ${pace} s, which caps the line at about ${pcsPerHour.toLocaleString()} pieces an hour — the most THROUGHPUT can reach. Measured from this run.`,
+    };
+    // `state.stations` changes identity every frame; the station list itself
+    // only changes with the results, which are already dependencies.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [inMultiLineScope, multiSim.results, baseSim.result]);
   const playing = inMultiLineScope ? multiSim.playing : baseSim.playing;
   const speed = inMultiLineScope ? multiSim.speed : baseSim.speed;
   const setPlaying = inMultiLineScope ? multiSim.setPlaying : baseSim.setPlaying;
   const setSpeed = inMultiLineScope ? multiSim.setSpeed : baseSim.setSpeed;
   const reset = inMultiLineScope ? multiSim.reset : baseSim.reset;
-  const step = inMultiLineScope ? multiSim.step : baseSim.step;
 
   // ── Real bundle playback (Phase 3) ────────────────────────────────────────
   // Index the recorded entity-flow stream so the views can place each bundle
@@ -479,7 +495,11 @@ export function LiveSimPage() {
   // `setInterval` that re-rendered this whole page once a second to show the
   // user something their menu bar already shows. Both the readout and its
   // timer are gone.
-  const unit = project.time.modelTimeUnit;
+  //
+  // The unit is the engine's own (minutes), not `project.time.modelTimeUnit`.
+  // That setting never reached the engine, so reading the clock through it
+  // only mislabelled the run: with it on 'second' a whole shift read "8 min".
+  const unit = ENGINE_TIME_UNIT;
   const dayN = simDayNumber(state.time, unit, project.time.shiftDurationMin);
   const shiftPct = shiftProgressPct(state.time, unit, project.time.shiftDurationMin);
   const elapsedStr = fmtElapsed(state.time, unit);
@@ -554,7 +574,7 @@ export function LiveSimPage() {
             color: alpha(SW_COLORS.ink, 0.55),
           }}
         >
-          What one tick of the clock is worth, and where the run starts on the calendar.
+          How long a shift is, where the run starts on the calendar, and which random draw it uses.
         </div>
       </div>
 
@@ -566,39 +586,6 @@ export function LiveSimPage() {
           alignItems: 'start',
         }}
       >
-        {/* Model time unit — dark inline toggle (ToggleGroup is light-only).
-            Full width: four segments need the room, and it is the field the
-            other three are measured in. */}
-        <div style={{ gridColumn: '1 / -1' }}>
-          <span style={setupLabel}>MODEL TIME UNIT</span>
-          <div style={{ display: 'flex', gap: 4 }}>
-            {(['second', 'minute', 'hour', 'day'] as const).map((u) => {
-              const active = project.time.modelTimeUnit === u;
-              return (
-                <button
-                  key={u}
-                  onClick={() => project.setTime('modelTimeUnit', u)}
-                  style={{
-                    flex: 1,
-                    padding: '7px 4px',
-                    textTransform: 'capitalize',
-                    background: active ? SW_COLORS.brand : alpha(SW_COLORS.ink, 0.06),
-                    color: active ? SW_COLORS.void : alpha(SW_COLORS.ink, 0.7),
-                    border: 'none',
-                    borderRadius: SW_RADIUS.sm,
-                    fontFamily: SW_FONTS.mono,
-                    fontSize: 11,
-                    fontWeight: 700,
-                    cursor: 'pointer',
-                  }}
-                >
-                  {u}
-                </button>
-              );
-            })}
-          </div>
-        </div>
-
         {/* Shift duration (minutes). */}
         <div>
           <span style={setupLabel}>SHIFT DURATION</span>
@@ -657,6 +644,57 @@ export function LiveSimPage() {
             }}
             style={setupInput}
           />
+        </div>
+
+        {/* Random seed. Same seed ⇒ same run, so a comparison between two
+            layouts is fair; a new seed is a different roll of the same dice,
+            which is how you tell a real effect from luck. */}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <span style={setupLabel}>RANDOM SEED</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <NumberInput
+              aria-label="Random seed"
+              min={0}
+              max={999999}
+              step={1}
+              value={simSeed}
+              onChange={(v) => {
+                if (v !== undefined) setSimSeed(v);
+              }}
+              style={{ ...setupInput, width: 90 }}
+            />
+            <button
+              type="button"
+              onClick={() => setSimSeed(1 + Math.floor(Math.random() * 9999))}
+              title="Pick a random seed and rerun the shift"
+              style={{ ...setupInput, width: 'auto', cursor: 'pointer', fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, letterSpacing: '0.08em' }}
+            >
+              NEW SEED
+            </button>
+            {simSeed !== DEFAULT_SIM_SEED && (
+              <button
+                type="button"
+                onClick={() => setSimSeed(DEFAULT_SIM_SEED)}
+                title={`Back to the default seed, ${DEFAULT_SIM_SEED}`}
+                style={{
+                  background: 'none',
+                  border: 'none',
+                  padding: 0,
+                  cursor: 'pointer',
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 10,
+                  color: alpha(SW_COLORS.ink, 0.55),
+                  textDecoration: 'underline',
+                }}
+              >
+                reset to {DEFAULT_SIM_SEED}
+              </button>
+            )}
+          </div>
+          <div style={{ marginTop: 6, fontFamily: SW_FONTS.body, fontSize: 11, lineHeight: 1.45, color: alpha(SW_COLORS.ink, 0.55) }}>
+            Same seed, same run. A new seed reruns the shift with different random
+            service times and arrivals. Insights uses this seed too.
+          </div>
         </div>
       </div>
     </>
@@ -792,9 +830,12 @@ export function LiveSimPage() {
             scope.kind === 'line'
               ? linesInTwin.find((l) => l.id === scope.id)
               : null;
-          const label = scopedLine
-            ? `Edit ${scopedLine.name} in Builder`
-            : 'Open Builder draft';
+          // Fixed label, not `Edit <line name> in Builder` — the line name is
+          // already printed in the scope picker two controls to the left, and
+          // interpolating it made the button as wide as the name it repeated.
+          // Which line it opens stays in the tooltip. Same label at every
+          // scope — the tooltip says whether it seeds from a line or the sim.
+          const label = 'Edit in Builder';
           return (
             <button
               type="button"
@@ -1000,112 +1041,20 @@ export function LiveSimPage() {
                     Source block (single source of truth); SYSTEM only names
                     the layout topology. Placed BELOW the KPI grid so the
                     headline numbers come first; context is reference info. */}
-                <div
-                  style={{
-                    display: 'flex',
-                    flexDirection: 'column',
-                    gap: 6,
-                    padding: '8px 12px',
-                    background: 'rgba(255,255,255,0.03)',
-                    border: '1px solid rgba(255,255,255,0.082)',
-                    borderRadius: SW_RADIUS.sm,
-                    fontFamily: SW_FONTS.body,
-                    fontSize: 11,
-                    order: 2,
-                  }}
-                >
-                  {/* GARMENT — full-width row, label on top so the select can
-                      take the full panel width without colliding with the label. */}
-                  <div style={{ display: 'flex', flexDirection: 'column', gap: 4 }}>
-                    <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
-                      GARMENT
-                    </span>
-                    {(() => {
-                      // When the active twin pins a dominant garment (workstations carry
-                      // a garmentId), `buildSimConfigFromTwin` runs against that garment
-                      // regardless of the dropdown — so showing the project's default
-                      // garment label here is a lie. Surface the twin's actual garment
-                      // and lock the control so the user can't pick something that
-                      // would be silently ignored.
-                      const twinGarment = twinBuild?.meta.garment ?? null;
-                      const twinPins =
-                        !!twinGarment && !!twinBuild?.meta.garmentPinned;
-                      const displayedValue = twinPins ? twinGarment.id : garmentId;
-                      const visibleHasTwinGarment =
-                        twinPins && garments.all.some((g) => g.id === twinGarment.id);
-                      const twinExtraOption =
-                        twinPins && !visibleHasTwinGarment
-                          ? [{
-                              value: twinGarment.id,
-                              label: twinGarment.name,
-                              tag: 'TWIN',
-                              disabled: true,
-                            }]
-                          : [];
-                      const options = [
-                        ...twinExtraOption,
-                        ...garments.all.map((g) => ({
-                          value: g.id,
-                          label: g.name.replace(/\s*\(.*\)/, ''),
-                          tag: twinPins && g.id === twinGarment.id ? 'TWIN' : undefined,
-                          disabled: twinPins,
-                        })),
-                      ];
-                      const title = twinPins
-                        ? `Garment is pinned by the workstations in Factory Builder (${twinGarment.name}). Change the workstation operation in Builder to switch garments.`
-                        : undefined;
-                      return (
-                        <HudSelect
-                          value={displayedValue}
-                          minWidth={180}
-                          mono
-                          disabled={twinPins}
-                          title={title}
-                          options={options}
-                          onChange={(id) => {
-                            if (id === '__ref__') return;
-                            setGarmentId(id);
-                          }}
-                        />
-                      );
-                    })()}
-                  </div>
-
-                  {/* Read-only OPERATORS / BUNDLE / SYSTEM rows. Sim observes
-                      the twin — authoring lives in Factory Builder. */}
-                  <div
-                    title="Operator count — edit in Factory Builder"
-                    style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10, marginTop: 2 }}
-                  >
-                    <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
-                      OPERATORS
-                    </span>
-                    <span style={{ color: '#fff', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 12 }}>
-                      {effectiveOperators}
-                    </span>
-                  </div>
-
-                  {twinBuild && (
-                    <div
-                      title="Bundle size — edit in Factory Builder (Source block)"
-                      style={{ display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 10 }}
-                    >
-                      <span style={{ color: '#ffffff80', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 9, letterSpacing: '0.1em' }}>
-                        BUNDLE
-                      </span>
-                      <span style={{ color: '#fff', fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 12 }}>
-                        {twinBuild.meta.seedBundleSize}
-                      </span>
-                    </div>
-                  )}
-
-                </div>
-
                 <div style={{ display: 'grid', gridTemplateColumns: 'repeat(2, auto)', gap: 12, order: 1 }}>
                   <SimHudStat label="OUTPUT" value={state.producedPieces.toLocaleString()} unit="pcs" color={SW_COLORS.brand} />
                   <SimHudStat label="THROUGHPUT" value={Math.round(throughputPerHr).toLocaleString()} unit="pcs/hr" color={SW_COLORS.ok} />
                   <SimHudStat label="WIP" value={state.totalArrivals - state.produced} unit="bundles" color={SW_COLORS.thread} />
                   <SimHudStat label="UTIL" value={efficiencyPct} unit="%" color={SW_COLORS.fabric} />
+                  {rateCap && (
+                    <SimHudStat
+                      label="MAX RATE"
+                      value={rateCap.pcsPerHour.toLocaleString()}
+                      unit="pcs/hr"
+                      color={SW_COLORS.ink}
+                      title={rateCap.title}
+                    />
+                  )}
                 </div>
 
                 {/* Per-line breakdown — only meaningful in dept/factory scope
@@ -1156,62 +1105,25 @@ export function LiveSimPage() {
             the thing they move, and the canvas keeps the ~90px the docked
             bar used to take off the bottom of every view. */}
         {(() => {
-          // Speed and execution mode were two controls on one axis: picking a
-          // tier while Virtual was on changed a number the pacer then ignored.
-          // They are one selector now — a numeric tier means real-time pacing,
-          // VIRT means "run as fast as compute allows".
-          const virtual = project.time.executionMode === 'virtual';
-          const speedValue = virtual ? 'virtual' : String(speed);
-          // Line pace — the bottleneck station's cycle time, which is the
-          // interval the floor actually delivers a piece at. Not demand takt:
-          // this comes from the run, not from an order.
-          const bn =
-            state.stations[state.bottleneckOpIndex] ??
-            state.stations.reduce<(typeof state.stations)[number] | undefined>(
-              (slowest, st) =>
-                !slowest || st.smv / Math.max(1, st.serversTotal) > slowest.smv / Math.max(1, slowest.serversTotal)
-                  ? st
-                  : slowest,
-              undefined,
-            );
-          const paceMin = bn && bn.serversTotal > 0 ? bn.smv / bn.serversTotal : null;
-          // Reported as pieces per hour rather than minutes per piece. Same
-          // fact, but "0.417 min/pc" has to be inverted in the reader's head
-          // before it means anything, and a floor is planned in pieces.
-          const pcsPerHour = paceMin != null && paceMin > 0 ? Math.round(60 / paceMin) : null;
           return (
             <SimTransportDock
               playing={playing}
               onToggle={() => setPlaying(!playing)}
-              onReset={reset}
-              onStep={() => step(3600 / unitToSeconds(unit))}
-              stepLabel="1h"
-              speed={speedValue}
+              // Restart = rewind to the start of the shift and play. The run
+              // is computed once and replayed, so this is a redo of the same
+              // shift, not a new random draw (that would take a different seed).
+              onRestart={() => {
+                reset();
+                setPlaying(true);
+              }}
+              speed={String(speed)}
               speedOptions={[
                 { value: '1', label: '1×', title: `Real-time · 1 model-${unit} per real-sec` },
                 { value: '10', label: '10×', title: `10 model-${unit} per real-sec` },
                 { value: '60', label: '60×', title: '1 model-hour per real-sec' },
                 { value: '480', label: '480×', title: 'Full 8-hr shift in 1 real-sec' },
-                { value: 'virtual', label: 'VIRT', title: 'Virtual — engine runs as fast as compute allows, no real-time pacing' },
               ]}
-              onSpeed={(v) => {
-                if (v === 'virtual') {
-                  project.setTime('executionMode', 'virtual');
-                  return;
-                }
-                if (virtual) project.setTime('executionMode', 'realtime');
-                setSpeed(Number(v));
-              }}
-              accent={
-                pcsPerHour != null
-                  ? {
-                      label: 'RATE',
-                      value: String(pcsPerHour),
-                      unit: 'pcs/hr',
-                      title: `The slowest step on the line is ${bn?.opName}, which passes a piece every ${Math.round(paceMin! * 60)} s. That caps the whole line at about ${pcsPerHour} pieces an hour.`,
-                    }
-                  : null
-              }
+              onSpeed={(v) => setSpeed(Number(v))}
               progressPct={shiftPct}
               clock={{
                 elapsed: elapsedStr,
@@ -1342,9 +1254,10 @@ function PerLineCell({
   );
 }
 
-function SimHudStat({ label, value, unit, color }: SimHudStatProps) {
+function SimHudStat({ label, value, unit, color, title }: SimHudStatProps) {
   return (
     <div
+      title={title}
       style={{
         background: '#ffffff08',
         border: '1px solid #ffffff15',
@@ -1381,14 +1294,9 @@ interface SimLegendEntry {
 
 function SimLegend({ view }: { view: SimView }) {
   const entries = legendEntriesForView(view);
-  const viewLabel =
-    view === 'iso' ? 'ISO 3D'
-      : view === 'top' ? 'TOP 2D'
-        : view === 'heat' ? 'HEAT'
-          : 'LOGIC';
 
   return (
-    <CanvasLegend label={viewLabel} width={268}>
+    <CanvasLegend width={268}>
       {entries.map((e, i) => (
         <LegendRow key={i} glyph={e.glyph} label={e.label} hint={e.hint} />
       ))}
@@ -1441,7 +1349,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <CardGlyph color={SW_COLORS.brand} />,
           label: 'Machine footprint',
-          hint: 'The cells the machine occupies — the same box, at the same coordinates, as on the Build floor.',
+          hint: 'The cells the machine occupies, same as on the Build floor.',
         },
         {
           glyph: <UtilBarGlyph />,
@@ -1461,7 +1369,7 @@ function legendEntriesForView(view: SimView): SimLegendEntry[] {
         {
           glyph: <CardGlyph color={SW_COLORS.muted} />,
           label: 'Service block',
-          hint: 'Dimmed footprint = a workstation that carries no sewing operation — racks, tables, buffers.',
+          hint: 'Dimmed = no sewing operation (racks, tables, buffers).',
         },
         {
           glyph: <BottleneckGlyph />,
@@ -3480,24 +3388,30 @@ function SimLogicView({ stations, bottleneckOpIndex, simTime }: SimViewProps) {
 }
 
 // ============================================================================
-// SEWING LINES SCOPE — line pills in the top bar
+// SEWING LINES SCOPE — line dropdown in the top bar
 // ============================================================================
 
 /**
- * The engine's scope picker: an "ALL LINES" pill plus one pill per sewing
- * line in the active twin. Selecting a pill writes `?scope=<...>` to the URL;
- * LiveSim re-reads that on the next render to rebuild the engine scope.
+ * The engine's scope picker: a dropdown whose rows are "ALL LINES" plus one
+ * per sewing line in the active twin. Selecting a row writes `?scope=<...>` to
+ * the URL; LiveSim re-reads that on the next render to rebuild the engine
+ * scope.
  *
  * This was a full-width strip of three-line cards sitting between the header
  * and the canvas — 78px of chrome to hold a radio group. Every card repeated
  * production system, garment, workstation count and a seed rate that nobody
  * reads while a run is playing; the one thing you look at is which line is
- * lit. So the pills came up into the header beside TIME SETUP (the other
- * control that says what the run IS), and the numbers moved into the
- * tooltips, where they are one hover away instead of one row down.
+ * lit. So it came up into the header beside TIME SETUP (the other control
+ * that says what the run IS), and the numbers moved into the tooltips, where
+ * they are one hover away instead of one row down.
  *
- * The rail scrolls horizontally rather than wrapping: the header must stay
- * one line tall no matter how many lines the twin has.
+ * The in-header form was then a horizontally scrolling rail of pills, which
+ * only reads as one line tall while the twin has two or three lines: past
+ * that the rail hides its own options behind a scroll nobody sees, and the
+ * current scope can itself be scrolled out of view. A dropdown is a fixed
+ * 260px no matter how many lines exist, and always prints the selected one.
+ * The trigger keeps the selected line's accent as its border and wash, so the
+ * header still says at a glance which line is lit.
  */
 function SewingLinesScope({
   lineBuilds,
@@ -3514,55 +3428,93 @@ function SewingLinesScope({
   const selectedLineId = scope.kind === 'line' ? scope.id : null;
   // Departments are no longer a user-facing concept: a sewing floor has LINES,
   // and every twin now carries exactly one auto-managed "Sewing Floor" that the
-  // Builder creates and grows on its own. The scope rail is therefore
-  // ALL LINES + one pill per line, with no department tier in between.
+  // Builder creates and grows on its own. The scope picker is therefore
+  // ALL LINES + one row per line, with no department tier in between.
   //
   // `Department` stays in the schema and `deptId` stays on every entity, so
   // saved .swproj files and IndexedDB twins keep loading untouched — this is a
   // UI removal, not a migration.
 
-  /** Shared pill shell. `accent` lights the border + wash when selected. */
-  const pill = (active: boolean, accent: string): CSSProperties => ({
-    display: 'inline-flex',
-    alignItems: 'center',
-    gap: 6,
-    flex: 'none',
-    height: 28,
-    padding: '0 10px',
-    borderRadius: 999,
-    border: `1px solid ${active ? accent : '#ffffff20'}`,
-    background: active ? `${accent}26` : 'transparent',
-    color: '#fff',
-    cursor: 'pointer',
-    whiteSpace: 'nowrap',
+  /** Seed rate in pieces/hr, read off the line's actual Source block — which
+   *  is what the engine runs on.
+   *
+   *  This used to be `SimConfig.arrivalRatePerHour x bundleSize`, and SimConfig
+   *  is documentation-only now: nothing feeds it to the engine (see
+   *  simulation/index.ts). On the starter line that reported 94 pcs/hr while
+   *  the Source was emitting 73, so the headline number on the sim screen
+   *  described a model that wasn't running. */
+  const seedFor = (lineId: string): number => {
+    const src = activeTwin.workstations.find(
+      (w) => w.lineId === lineId && getBlockKind(w) === 'Source',
+    );
+    if (!src) return 0;
+    const p = getBlockParams(src);
+    return Math.round(p.sourceRatePerHr * Math.max(1, p.piecesPerAgent));
+  };
+
+  const dot = (color: string) => (
+    <span
+      aria-hidden
+      style={{ width: 6, height: 6, flex: 'none', borderRadius: '50%', background: color }}
+    />
+  );
+
+  const factoryTitle = `Simulate every wired sewing line in the twin \u2014 ${activeTwin.workstations.length} workstations, one engine per line, transport bar drives them together`;
+
+  // One descriptor per scope, built once so the option rows and the trigger
+  // tooltip read from the same place.
+  const entries = lineBuilds.map(({ line, build, ok, reason }) => {
+    const memberCount = activeTwin.workstations.filter((w) => w.lineId === line.id).length;
+    const ops = build.config.operations.length;
+    const accent = DEPT_LINE_COLORS[line.color] ?? SW_COLORS.brand;
+    return {
+      line,
+      ok,
+      accent,
+      memberCount,
+      // Everything the old card printed on its three lines, one hover away.
+      // Nothing was dropped — it just stopped costing a row.
+      title: ok
+        ? [
+            line.name,
+            ...(line.garmentId ? [line.garmentId] : []),
+            `${ops} operations on ${memberCount} workstation${memberCount === 1 ? '' : 's'}`,
+            `seed ${(ops === 0 ? 0 : seedFor(line.id)).toLocaleString()} pcs/hr`,
+          ].join('\n')
+        : `${line.name} \u2014 not runnable yet: ${reason ?? 'no simulatable workstation'}.\nDrop machines + assign opIds to wire this line.`,
+    };
   });
 
-  const nameStyle: CSSProperties = {
-    fontFamily: SW_FONTS.display,
-    fontSize: 10,
-    fontWeight: 900,
-    letterSpacing: '0.1em',
-  };
-  const metaStyle: CSSProperties = {
-    fontFamily: SW_FONTS.mono,
-    fontSize: 10,
-    color: '#ffffff99',
-  };
+  type ScopeValue = 'factory' | `line:${string}`;
+  const value: ScopeValue = selectedLineId ? `line:${selectedLineId}` : 'factory';
+  const current = entries.find((e) => e.line.id === selectedLineId);
+  const accent = current?.accent ?? SW_COLORS.brand;
+
+  const options = [
+    {
+      value: 'factory' as ScopeValue,
+      label: 'ALL LINES',
+      leading: dot(SW_COLORS.brand),
+      meta: `${activeTwin.workstations.length} ws`,
+    },
+    ...entries.map((e) => ({
+      value: `line:${e.line.id}` as ScopeValue,
+      label: e.line.name,
+      leading: dot(e.accent),
+      meta: e.ok ? `${e.memberCount} ws` : 'EMPTY',
+    })),
+  ];
 
   return (
     <div
-      role="radiogroup"
-      aria-label="Simulation scope"
       style={{
         display: 'flex',
         alignItems: 'center',
         gap: 8,
-        // Claims the space the old spacer held, and shrinks before any of the
-        // fixed controls do — the rail scrolls, the buttons never squash.
+        // Claims the space the old rail held, and shrinks before any of the
+        // fixed controls do — the picker narrows, the buttons never squash.
         flex: '1 1 0',
         minWidth: 0,
-        overflowX: 'auto',
-        paddingBottom: 2,
       }}
     >
       <span
@@ -3578,80 +3530,23 @@ function SewingLinesScope({
         LINES
       </span>
 
-      <button
-        type="button"
-        role="radio"
-        aria-checked={factoryActive}
-        onClick={() => onPickScope({ kind: 'factory' })}
-        title={`Simulate every wired sewing line in the twin — ${activeTwin.workstations.length} workstations, one engine per line, transport bar drives them together`}
-        style={pill(factoryActive, SW_COLORS.brand)}
-      >
-        <span style={nameStyle}>ALL LINES</span>
-        <span style={metaStyle}>{activeTwin.workstations.length} ws</span>
-      </button>
-
-      {lineBuilds.map(({ line, build, ok, reason }) => {
-        const active = selectedLineId === line.id;
-        const memberCount = activeTwin.workstations.filter((w) => w.lineId === line.id).length;
-        const ops = build.config.operations.length;
-        // Seed rate in pieces/hr, read off the line's actual Source block —
-        // which is what the engine runs on.
-        //
-        // This used to be `SimConfig.arrivalRatePerHour × bundleSize`, and
-        // SimConfig is documentation-only now: nothing feeds it to the engine
-        // (see simulation/index.ts). On the starter line that reported 94
-        // pcs/hr while the Source was emitting 73, so the headline number on
-        // the sim screen described a model that wasn't running.
-        const seedPiecesPerHr = (() => {
-          if (!ok || ops === 0) return 0;
-          const src = activeTwin.workstations.find(
-            (w) => w.lineId === line.id && getBlockKind(w) === 'Source',
-          );
-          if (!src) return 0;
-          const p = getBlockParams(src);
-          return Math.round(p.sourceRatePerHr * Math.max(1, p.piecesPerAgent));
-        })();
-        const accent = DEPT_LINE_COLORS[line.color] ?? SW_COLORS.brand;
-        return (
-          <button
-            key={line.id}
-            type="button"
-            role="radio"
-            aria-checked={active}
-            onClick={() => onPickScope({ kind: 'line', id: line.id })}
-            // Everything the old card printed on its three lines, one hover
-            // away. Nothing was dropped — it just stopped costing a row.
-            title={
-              ok
-                ? [
-                    line.name,
-                    ...(line.garmentId ? [line.garmentId] : []),
-                    `${ops} operations on ${memberCount} workstation${memberCount === 1 ? '' : 's'}`,
-                    `seed ${seedPiecesPerHr.toLocaleString()} pcs/hr`,
-                  ].join('\n')
-                : `${line.name} — not runnable yet: ${reason ?? 'no simulatable workstation'}.\nDrop machines + assign opIds to wire this line.`
-            }
-            style={{ ...pill(active, accent), opacity: ok ? 1 : 0.6 }}
-          >
-            <span
-              aria-hidden
-              style={{
-                width: 6,
-                height: 6,
-                flex: 'none',
-                borderRadius: '50%',
-                background: accent,
-              }}
-            />
-            <span style={nameStyle}>{line.name}</span>
-            {ok ? (
-              <span style={metaStyle}>{memberCount} ws</span>
-            ) : (
-              <span style={{ ...metaStyle, color: SW_COLORS.warn, fontWeight: 800 }}>EMPTY</span>
-            )}
-          </button>
-        );
-      })}
+      <HudSelect<ScopeValue>
+        value={value}
+        options={options}
+        size="sm"
+        width={260}
+        title={factoryActive ? factoryTitle : current?.title}
+        onChange={(v) =>
+          onPickScope(v === 'factory' ? { kind: 'factory' } : { kind: 'line', id: v.slice(5) })
+        }
+        // `border` shorthand, not `borderColor`: HudSelect's trigger sets the
+        // shorthand itself, and mixing the two makes React warn about
+        // conflicting style properties on rerender.
+        triggerStyle={{
+          border: `1px solid ${factoryActive ? '#ffffff20' : accent}`,
+          background: factoryActive ? 'transparent' : alpha(accent, 0.15),
+        }}
+      />
     </div>
   );
 }

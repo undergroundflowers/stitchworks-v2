@@ -20,10 +20,29 @@
  */
 
 import { z } from 'zod';
-import { useProject, PROJECT_SCHEMA_VERSION, type ProjectState } from './project';
+import {
+  useProject,
+  pickProjectFile,
+  parseProjectFileText,
+  PROJECT_SCHEMA_VERSION,
+  type ProjectState,
+} from './project';
 import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
 import { useFactoryLibrary, uniquifyFactoryName } from './factoryLibrary';
 import { normalizeTwin, validateTwin, type Twin, type Scenario } from '../domain/twin';
+import {
+  SWPROJ_PICKER_TYPES,
+  canWriteFiles,
+  ensureReadable,
+  ensureWritable,
+  forgetRecentFile,
+  fsWindow,
+  useRecentFiles,
+  linkActiveFile,
+  markSaved,
+  useFileLink,
+  withoutDirtyTracking,
+} from './fileLink';
 
 export const SWPROJ_FORMAT = 'stitchworks-project';
 export const SWPROJ_FORMAT_VERSION = 1;
@@ -165,16 +184,25 @@ export function parseSwproj(raw: unknown): ParsedSwproj {
   throw new Error('Unrecognised .swproj file — no `format` field and not a legacy project file.');
 }
 
-/** Trigger a download of the current project + twin as a versioned `.swproj`. */
-export function downloadSwproj(): void {
+/** The active factory as `.swproj` JSON text. */
+function currentSwprojJson(): string {
   const project = useProject.getState().exportProject();
   const twin = useTwin.getState().exportTwin();
-  const envelope = buildSwproj(project, twin, new Date().toISOString());
-  const json = JSON.stringify(envelope, null, 2);
+  return JSON.stringify(buildSwproj(project, twin, new Date().toISOString()), null, 2);
+}
+
+function suggestedFileName(): string {
+  const name = useProject.getState().meta?.name || 'stitchworks';
+  return `${name.replace(/[^a-z0-9-_ ()]/gi, '-').trim() || 'stitchworks'}.swproj`;
+}
+
+/** Trigger a download of the current project + twin as a versioned `.swproj`. */
+export function downloadSwproj(): void {
+  const json = currentSwprojJson();
   const blob = new Blob([json], { type: 'application/json' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
-  const filename = `${(project.meta?.name || 'stitchworks').replace(/[^a-z0-9-_]/gi, '-')}.swproj`;
+  const filename = suggestedFileName();
   a.href = url;
   a.download = filename;
   document.body.appendChild(a);
@@ -267,4 +295,162 @@ export function archiveAndImportSwproj(raw: unknown): ImportFactoryResult {
   useProject.getState().rename(name);
   useTwin.getState().renameActive(name);
   return { ok: true, name, archivedAs: archived.name, legacy: parsed.legacy };
+}
+
+// ---------------------------------------------------------------------------
+// Save to / open from a file on disk
+// ---------------------------------------------------------------------------
+
+export type SaveToFileResult =
+  /** Written to the linked file. */
+  | { kind: 'saved'; fileName: string }
+  /** The browser cannot write files (Safari, Firefox), or offered the Save
+   *  dialog and then refused the write; a copy was downloaded instead. */
+  | { kind: 'downloaded'; fileName: string }
+  /** The user closed the Save dialog or refused permission. Nothing changed. */
+  | { kind: 'cancelled' }
+  | { kind: 'error'; message: string };
+
+function isAbort(e: unknown): boolean {
+  return e instanceof DOMException && e.name === 'AbortError';
+}
+
+/**
+ * The platform itself turned the write down. Embedded browsers and locked-down
+ * profiles expose `showSaveFilePicker`, hand back a handle, and then throw
+ * NotAllowedError from `createWritable` — so feature-detecting the picker is
+ * not enough to know a save will land. This is not the user saying no (that
+ * path returns false from `ensureWritable`), so the right answer is the same
+ * one a browser without the API gets: a downloaded copy, not a dead end.
+ */
+function isWriteRefused(e: unknown): boolean {
+  return e instanceof DOMException && (e.name === 'NotAllowedError' || e.name === 'SecurityError');
+}
+
+function downloadInstead(): SaveToFileResult {
+  downloadSwproj();
+  return { kind: 'downloaded', fileName: suggestedFileName() };
+}
+
+async function writeTo(handle: FileSystemFileHandle, json: string): Promise<void> {
+  const writable = await handle.createWritable();
+  await writable.write(json);
+  await writable.close();
+}
+
+/**
+ * Save the active factory to its `.swproj` file on disk.
+ *
+ * The first save (or any save with `saveAs`) opens the native Save dialog and
+ * links the factory to the chosen file; after that, Save writes straight back
+ * to it. If the linked file has been moved or deleted, the dialog opens again
+ * rather than failing. Must be called from a click or key press — the browser
+ * only shows dialogs and permission prompts in response to one.
+ */
+export async function saveSwprojToFile(opts: { saveAs?: boolean } = {}): Promise<SaveToFileResult> {
+  if (!canWriteFiles()) return downloadInstead();
+  const json = currentSwprojJson();
+  const linked = opts.saveAs ? null : useFileLink.getState().handle;
+
+  if (linked) {
+    try {
+      if (!(await ensureWritable(linked))) return { kind: 'cancelled' };
+      await writeTo(linked, json);
+      markSaved();
+      return { kind: 'saved', fileName: linked.name };
+    } catch (e) {
+      if (isAbort(e)) return { kind: 'cancelled' };
+      if (isWriteRefused(e)) return downloadInstead();
+      // NotFoundError / NotReadableError: the file was moved, renamed or
+      // deleted outside the app. Fall through and ask where to save instead.
+      if (!(e instanceof DOMException) || (e.name !== 'NotFoundError' && e.name !== 'NotReadableError')) {
+        return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+      }
+    }
+  }
+
+  try {
+    const picker = fsWindow().showSaveFilePicker!;
+    const handle = await picker({ suggestedName: suggestedFileName(), types: SWPROJ_PICKER_TYPES });
+    await writeTo(handle, json);
+    linkActiveFile(handle);
+    return { kind: 'saved', fileName: handle.name };
+  } catch (e) {
+    if (isAbort(e)) return { kind: 'cancelled' };
+    if (isWriteRefused(e)) return downloadInstead();
+    return { kind: 'error', message: e instanceof Error ? e.message : String(e) };
+  }
+}
+
+/**
+ * Pick a `.swproj` from disk and return its parsed JSON plus, where the
+ * browser supports it, a handle so Save can write back to the same file.
+ *
+ * Rejects with an AbortError when the user closes the dialog, and with a
+ * plain Error naming the file when it cannot be read as a project — callers
+ * must tell those two apart, or a bad file looks like a cancelled click.
+ * Some embedded browsers expose `showOpenFilePicker` and then refuse to show
+ * it (NotAllowedError / SecurityError); that falls back to the classic file
+ * input every browser has, at the cost of the write-back link.
+ */
+export async function pickSwprojFile(): Promise<{ raw: unknown; handle: FileSystemFileHandle | null }> {
+  const open = fsWindow().showOpenFilePicker;
+  if (typeof open !== 'function') {
+    return { raw: await pickProjectFile(), handle: null };
+  }
+  let handle: FileSystemFileHandle;
+  try {
+    [handle] = await open({ types: SWPROJ_PICKER_TYPES, multiple: false });
+  } catch (e) {
+    if (isAbort(e)) throw e;
+    if (isWriteRefused(e) || e instanceof TypeError) {
+      return { raw: await pickProjectFile(), handle: null };
+    }
+    throw e;
+  }
+  const file = await handle.getFile();
+  return { raw: parseProjectFileText(await file.text(), file.name), handle };
+}
+
+/**
+ * Open a `.swproj` as the active factory (see `archiveAndImportSwproj`) and,
+ * when a handle is given, link it so Save writes back to that file.
+ */
+export function openSwprojAsFactory(
+  raw: unknown,
+  handle: FileSystemFileHandle | null,
+): ImportFactoryResult {
+  const result = withoutDirtyTracking(() => archiveAndImportSwproj(raw));
+  if (result.ok && handle) linkActiveFile(handle);
+  return result;
+}
+
+/**
+ * Reopen a factory from the RECENT FACTORIES list — read straight from its
+ * file on disk, so it reflects the file as it is now. A file that has been
+ * moved or deleted since is dropped from the list rather than left as a
+ * dead row. Must be called from a click: after a reload the browser asks
+ * for read permission again.
+ */
+export async function openRecentFile(id: string): Promise<ImportFactoryResult> {
+  const entry = useRecentFiles.getState().files.find((f) => f.id === id);
+  if (!entry) return { ok: false, reason: 'That file is no longer in the recent list.', legacy: false };
+  try {
+    if (!(await ensureReadable(entry.handle))) {
+      return { ok: false, reason: `Permission to read "${entry.fileName}" was not granted.`, legacy: false };
+    }
+    const file = await entry.handle.getFile();
+    const raw = parseProjectFileText(await file.text(), file.name);
+    return openSwprojAsFactory(raw, entry.handle);
+  } catch (e) {
+    if (e instanceof DOMException && (e.name === 'NotFoundError' || e.name === 'NotReadableError')) {
+      forgetRecentFile(id);
+      return {
+        ok: false,
+        reason: `"${entry.fileName}" was moved or deleted — removed it from recent factories.`,
+        legacy: false,
+      };
+    }
+    return { ok: false, reason: e instanceof Error ? e.message : String(e), legacy: false };
+  }
 }

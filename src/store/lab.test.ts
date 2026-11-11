@@ -5,7 +5,7 @@
 import { describe, expect, it, beforeEach } from 'vitest';
 import { useLab, type LabState } from './lab';
 import { solveNetwork } from '../simulation/network';
-import { SEED_SYSTEMS, SEED_VERSION, isSeedSystem } from '../domain/lab-systems';
+import { LEGACY_SEED_NAMES, SEED_SYSTEMS, SEED_VERSION, isSeedSystem } from '../domain/lab-systems';
 
 function freshSystem(): string {
   const id = useLab.getState().createSystem('test');
@@ -187,6 +187,23 @@ describe('seed reconciliation on hydration', () => {
     const out = merge({ systems: SEED_SYSTEMS, seedVersion: 0 });
     const ids = out.systems.map((s) => s.id);
     expect(new Set(ids).size).toBe(ids.length);
+  });
+
+  it('drops the old Kendall-code prefix from starters the user never renamed', () => {
+    const old = SEED_SYSTEMS.map((s) =>
+      LEGACY_SEED_NAMES[s.id] ? { ...s, name: LEGACY_SEED_NAMES[s.id] } : s,
+    );
+    const out = merge({ systems: old, seedVersion: 1 });
+    expect(out.systems.find((s) => s.id === 'seed-mm1-booth')?.name).toBe('Telephone booth');
+    expect(out.systems.find((s) => s.id === 'seed-md1-press')?.name).toBe(
+      'A machine with no variation',
+    );
+  });
+
+  it('leaves a renamed starter with the user’s name', () => {
+    const mine = { ...SEED_SYSTEMS[0], name: 'Booth outside the canteen' };
+    const out = merge({ systems: [mine], seedVersion: 1 });
+    expect(out.systems.find((s) => s.id === mine.id)?.name).toBe('Booth outside the canteen');
   });
 
   it('keeps the user’s own systems untouched', () => {

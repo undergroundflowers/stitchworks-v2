@@ -18,6 +18,7 @@ import { BuilderPage } from './pages/Builder';
 import { WorkstationDetailPage } from './pages/WorkstationDetail';
 import { InsightsPage } from './pages/Insights';
 import { QueueLabPage } from './pages/QueueLab';
+import { HelpPage } from './pages/Help';
 
 /**
  * App shell: sidebar + route outlet. On launch the app opens straight to the
@@ -129,6 +130,7 @@ export default function App() {
           <Route path="/sim" element={<LiveSimPage />} />
           <Route path="/insights" element={<InsightsPage />} />
           <Route path="/lab" element={<QueueLabPage />} />
+          <Route path="/help" element={<HelpPage />} />
           <Route path="/settings" element={<SettingsPage />} />
 
           {/* One station's queueing detail, drilled into from INSIGHTS. */}

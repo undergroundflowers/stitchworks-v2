@@ -18,7 +18,7 @@
 
 import type { GarmentTemplate, Operation } from '../domain';
 import type { Twin, Workstation, SewingLine } from '../domain/twin';
-import { wsBaseFootprint } from '../domain/twin';
+import { wsBaseFootprint, stationEfficiencyIn } from '../domain/twin';
 import type { SimConfig } from './sim-state';
 import type { ServiceDist, QueueDiscipline } from './index';
 import type { ModelTimeUnit } from './timeUnit';
@@ -131,8 +131,6 @@ export interface BuildFromTwinOptions {
   garmentsById: Record<string, GarmentTemplate>;
   /** Fallback garment when a workstation didn't pin one. */
   defaultGarmentId: string;
-  /** Per-op efficiency map from `efficiencyFromSkillMatrix`. */
-  opEfficiency?: Record<string, number>;
   modelTimeUnit?: ModelTimeUnit;
   smvVariance?: number;
   randomSeed?: number;
@@ -355,8 +353,15 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
   }
 
   // ── Step 6: arrival rate from bottleneck cycle, honouring efficiency ──
-  const eff = (id: string) => opts.opEfficiency?.[id] ?? 1;
-  const effSmv = (id: string, smv: number) => (eff(id) > 0 ? smv / eff(id) : smv);
+  // Each op's stations run at their own efficiency (station figure, else
+  // line, else standard). The op's effective SMV uses their mean, so a
+  // two-station op with one slow operator paces between the two.
+  const effForOp = (opId: string): number => {
+    const wsList = byOpId.get(opId) ?? [];
+    if (wsList.length === 0) return 1;
+    return wsList.reduce((s, ws) => s + stationEfficiencyIn(twin, ws), 0) / wsList.length;
+  };
+  const effSmv = (id: string, smv: number) => smv / effForOp(id);
   const bottleneckCycle = Math.max(
     ...operations.map((op, i) => effSmv(op.id, op.smv) / stationServers[i]),
   );
@@ -376,7 +381,6 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
     arrivalRatePerHour,
     smvVariance: opts.smvVariance ?? 0.15,
     randomSeed: opts.randomSeed ?? 42,
-    opEfficiency: opts.opEfficiency,
     serviceDistributions,
     stationCapacities,
     queueDisciplines,

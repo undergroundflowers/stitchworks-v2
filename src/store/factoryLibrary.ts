@@ -25,6 +25,12 @@ import { useTwin, TWIN_STORE_SCHEMA_VERSION } from './twin';
 import { normalizeTwin } from '../domain/twin';
 import type { Twin, Scenario as TwinScenario } from '../domain/twin';
 import { indexedDbStorage } from './storage/indexedDbStorage';
+import {
+  dropParkedLink,
+  parkActiveLink,
+  restoreParkedLink,
+  withoutDirtyTracking,
+} from './fileLink';
 
 export const LIBRARY_SCHEMA_VERSION = 1 as const;
 
@@ -232,6 +238,8 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
         set((s) => ({
           savedFactories: enforceCap([entry, ...s.savedFactories], FACTORY_LIBRARY_MAX),
         }));
+        // The factory's linked .swproj file (if any) goes into the library with it.
+        parkActiveLink(entry.id);
         return entry;
       },
 
@@ -240,16 +248,21 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
         const target = get().savedFactories.find((f) => f.id === id);
         if (!target) return false;
         if (archiveFirst) get().archiveCurrent();
-        applyProject(target.project);
-        applyTwin(target.twin);
+        withoutDirtyTracking(() => {
+          applyProject(target.project);
+          applyTwin(target.twin);
+        });
+        restoreParkedLink(id);
         // The just-loaded factory is now live; drop the slot to avoid
         // a duplicate (active + archived copy with the same content).
         set((s) => ({ savedFactories: s.savedFactories.filter((f) => f.id !== id) }));
         return true;
       },
 
-      deleteFactory: (id) =>
-        set((s) => ({ savedFactories: s.savedFactories.filter((f) => f.id !== id) })),
+      deleteFactory: (id) => {
+        dropParkedLink(id);
+        set((s) => ({ savedFactories: s.savedFactories.filter((f) => f.id !== id) }));
+      },
 
       renameFactory: (id, name) => {
         // Dedupe against the active project and other saved entries. The
@@ -365,8 +378,10 @@ export const useFactoryLibrary = create<FactoryLibraryState>()(
 export function archiveAndStartFresh(newName: string): void {
   const lib = useFactoryLibrary.getState();
   lib.archiveCurrent();
-  useProject.getState().resetProject();
-  useTwin.getState().resetTwin();
+  withoutDirtyTracking(() => {
+    useProject.getState().resetProject();
+    useTwin.getState().resetTwin();
+  });
   const trimmed = newName.trim();
   if (trimmed) {
     // Dedupe against saved entries (the just-archived snapshot counts)

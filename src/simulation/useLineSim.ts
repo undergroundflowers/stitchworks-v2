@@ -23,16 +23,14 @@
 
 import { useEffect, useMemo } from 'react';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import { useProject } from '../store/project';
 import { useGarments } from '../store/garments';
-import { useSimScope, type SimScope } from '../store/simScope';
+import { resolveSimScope, useSimScope, type SimScope } from '../store/simScope';
 import type { SewingLine, Twin } from '../domain/twin';
 import { getBlockKind } from '../domain/pml';
 import { buildSimSpec, simSpecKey, type SimSpec } from './sim-spec';
 import { useSimSession, type SimRunSlot } from './useSimSession';
 import { emptyPmlSimState } from './pml-to-sim-state';
 import { mergePmlSimStates } from './useMultiPmlSim';
-import { efficiencyFromSkillMatrix } from './model';
 import type { SimState } from './sim-state';
 
 /**
@@ -67,7 +65,15 @@ export interface UseLineSimResult {
 
 export function useLineSim(): UseLineSimResult {
   const twin = useTwin(selectActiveTwin);
-  const scope = useSimScope((s) => s.scope);
+  const savedScope = useSimScope((s) => s.scope);
+  const setScope = useSimScope((s) => s.setScope);
+  // A saved line that isn't in this factory means the whole factory (see
+  // resolveSimScope) — and the saved scope is corrected so the line picker
+  // and every other surface agree.
+  const scope = useMemo(() => resolveSimScope(savedScope, twin.lines ?? []), [savedScope, twin.lines]);
+  useEffect(() => {
+    if (scope !== savedScope) setScope(scope);
+  }, [scope, savedScope, setScope]);
   const durationMin = useSimScope((s) => s.durationMin);
   const seed = useSimScope((s) => s.seed);
   const warmupMin = useSimScope((s) => s.warmupMin);
@@ -75,16 +81,6 @@ export function useLineSim(): UseLineSimResult {
   // Every line carries its own `garmentId`, which `buildSimSpec` prefers.
   // This is only the floor under a line that somehow has none.
   const fallbackGarmentId = garments.all[0]?.id ?? '';
-  const skillMatrix = useProject((s) => s.skillMatrix);
-
-  // Skill-matrix efficiencies are engine input, so they belong in the spec —
-  // and therefore in the key, so editing the matrix re-runs the sim.
-  const opEfficiency = useMemo(() => {
-    const garment = garments.byId[fallbackGarmentId] ?? garments.all[0];
-    if (!garment) return undefined;
-    const eff = efficiencyFromSkillMatrix(skillMatrix, garment.operations);
-    return Object.keys(eff).length > 0 ? eff : undefined;
-  }, [skillMatrix, garments, fallbackGarmentId]);
 
   const spec = useMemo(
     () =>
@@ -96,9 +92,8 @@ export function useLineSim(): UseLineSimResult {
         durationMin,
         seed,
         warmupMin,
-        opEfficiency,
       }),
-    [twin, scope, garments.byId, fallbackGarmentId, durationMin, seed, warmupMin, opEfficiency],
+    [twin, scope, garments.byId, fallbackGarmentId, durationMin, seed, warmupMin],
   );
 
   const key = useMemo(() => (spec.lines.length > 0 ? simSpecKey(spec) : ''), [spec]);

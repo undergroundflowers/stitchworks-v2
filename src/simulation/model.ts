@@ -19,12 +19,6 @@ export interface BuildModelOptions {
   smvVariance?: number;
   randomSeed?: number;
   /**
-   * Per-operation efficiency multiplier. Pass a value derived from the
-   * project's skill matrix so the sim respects each operator's actual
-   * proficiency on the operations they're running.
-   */
-  opEfficiency?: Record<string, number>;
-  /**
    * Engine time unit — what one tick of `state.time` represents. Defaults
    * to 'minute' (matches the SMV unit in the apparel domain). Pass the
    * project's `time.modelTimeUnit` to keep UI labels honest.
@@ -66,12 +60,7 @@ export function buildSimConfig(opts: BuildModelOptions): SimConfig {
   // reality if the user asked for a too-small crew.
   void totalSmv;
 
-  // Bottleneck cycle time accounts for per-op efficiency from the skill matrix.
-  const eff = (opId: string) => opts.opEfficiency?.[opId] ?? 1;
-  const effectiveSmv = (opId: string, base: number) => (eff(opId) > 0 ? base / eff(opId) : base);
-  const bottleneckCycle = Math.max(
-    ...ops.map((op, i) => effectiveSmv(op.id, op.smv) / stationServers[i]),
-  );
+  const bottleneckCycle = Math.max(...ops.map((op, i) => op.smv / stationServers[i]));
   const piecesPerHour = bottleneckCycle > 0 ? 60 / bottleneckCycle : 0;
   const bundleSize = opts.bundleSize ?? garment.defaultBundleSize;
   const bundlesPerHour = piecesPerHour / Math.max(1, bundleSize);
@@ -98,34 +87,9 @@ export function buildSimConfig(opts: BuildModelOptions): SimConfig {
     arrivalRatePerHour,
     smvVariance: opts.smvVariance ?? 0.15,
     randomSeed: opts.randomSeed ?? 42,
-    opEfficiency: opts.opEfficiency,
     serviceDistributions,
     stationCapacities,
     queueDisciplines,
     modelTimeUnit: opts.modelTimeUnit ?? 'minute',
   };
-}
-
-/**
- * Build the per-operation efficiency map from a project's skill matrix.
- * For each operation, takes the mean skill efficiency across all operators
- * whose matrix entry for that op is > 0. Operations no operator can perform
- * stay at 1.0 (defer to the engine's default rather than block the line).
- */
-export function efficiencyFromSkillMatrix(
-  matrix: Record<string, Record<string, number>>,
-  ops: GarmentTemplate['operations'],
-): Record<string, number> {
-  const out: Record<string, number> = {};
-  for (const op of ops) {
-    const samples: number[] = [];
-    for (const operatorId of Object.keys(matrix)) {
-      const eff = matrix[operatorId]?.[op.id];
-      if (eff && eff > 0) samples.push(eff);
-    }
-    if (samples.length > 0) {
-      out[op.id] = samples.reduce((s, v) => s + v, 0) / samples.length;
-    }
-  }
-  return out;
 }

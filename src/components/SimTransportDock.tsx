@@ -63,15 +63,11 @@ export interface SpeedOption {
 export interface SimTransportDockProps {
   playing: boolean;
   onToggle: () => void;
-  onReset: () => void;
-  /** Jump the clock forward. Label rides on the button (e.g. '+1h'). */
-  onStep: () => void;
-  stepLabel: string;
+  /** Restart the run: back to the start of the shift, playing. */
+  onRestart: () => void;
   speed: string;
   speedOptions: SpeedOption[];
   onSpeed: (value: string) => void;
-  /** Accent readout at the tail of the capsule — the line's output rate. */
-  accent?: { label: string; value: string; unit?: string; title?: string } | null;
   /** 0–100. Drives the hairline meter under the clock. */
   progressPct: number;
   /** Where the run has got to, in plain words. */
@@ -200,7 +196,7 @@ function SetupPopover({ children }: { children: ReactNode }) {
     <div style={{ position: 'relative', flex: 'none', display: 'flex' }}>
       <RoundButton
         onClick={() => setOpen((o) => !o)}
-        title="Time setup — what one tick of the clock means, and where the run starts on the calendar"
+        title="Time setup — shift length, start date and random seed"
         size={SW_CONTROL.icon + 6}
         active={open}
         expanded={open}
@@ -239,13 +235,10 @@ function SetupPopover({ children }: { children: ReactNode }) {
 export function SimTransportDock({
   playing,
   onToggle,
-  onReset,
-  onStep,
-  stepLabel,
+  onRestart,
   speed,
   speedOptions,
   onSpeed,
-  accent,
   progressPct,
   clock,
   setup,
@@ -305,8 +298,8 @@ export function SimTransportDock({
         }}
       >
         <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-          <RoundButton onClick={onReset} title="Rewind to the start of the shift" size={SW_CONTROL.icon + 6}>
-            <Icon name="rewind" size={13} weight={1.6} />
+          <RoundButton onClick={onRestart} title="Restart the run from the start of the shift" size={SW_CONTROL.icon + 6}>
+            <Icon name="reset" size={13} weight={1.6} />
           </RoundButton>
           <RoundButton
             onClick={onToggle}
@@ -315,9 +308,6 @@ export function SimTransportDock({
             tone="brand"
           >
             <Icon name={playing ? 'pause' : 'play'} size={19} weight={2} />
-          </RoundButton>
-          <RoundButton onClick={onStep} title={`Jump the clock forward ${stepLabel}`} size={SW_CONTROL.icon + 6}>
-            {`+${stepLabel}`}
           </RoundButton>
         </div>
 
@@ -429,32 +419,6 @@ export function SimTransportDock({
             {`Day ${clock.day} · ${clock.date}`}
           </span>
         </div>
-
-        {accent && (
-          <span
-            title={accent.title}
-            style={{
-              ...SW_TYPE.micro,
-              textTransform: 'none',
-              flex: 'none',
-              display: 'inline-flex',
-              alignItems: 'baseline',
-              gap: 5,
-              height: SW_CONTROL.height,
-              padding: '0 10px',
-              borderRadius: SW_RADIUS.sm,
-              background: SW_COLORS.brandLite,
-              border: `1px solid ${SW_COLORS.brandEdge}`,
-              color: SW_COLORS.brandText,
-              lineHeight: `${SW_CONTROL.height}px`,
-            }}
-          >
-            {accent.label} {accent.value}
-            {accent.unit && (
-              <span style={{ fontSize: 9, opacity: 0.75 }}>{accent.unit}</span>
-            )}
-          </span>
-        )}
 
         {/* End shift closes the run out, so it belongs with the controls that
             move it rather than floating alongside them. Last in the capsule,

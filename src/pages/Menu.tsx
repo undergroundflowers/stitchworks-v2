@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useEffect, useMemo, useState } from 'react';
 import { useNavigate } from 'react-router-dom';
 import { Card, Button, Chevron, Tag, Logo, Icon, useConfirm } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
@@ -6,17 +6,28 @@ import { useTwin, selectActiveTwin } from '../store/twin';
 import {
   useProject,
   useFactoryLibrary,
+  useFileLink,
+  useRecentFiles,
   archiveAndStartFresh,
-  archiveAndImportSwproj,
+  openSwprojAsFactory,
+  openRecentFile,
+  forgetRecentFile,
+  resolveRecentOverlap,
   isFactoryNameTaken,
-  pickProjectFile,
-  FACTORY_LIBRARY_MAX,
+  pickSwprojFile,
+  type SavedFactory,
+  type RecentFile,
 } from '../store';
 import { getFlag, setFlag } from '../lib/safeStorage';
 
+/** One row of RECENT FACTORIES after merging the two places a factory lives. */
+type RecentRow =
+  | { kind: 'slot'; at: string; slot: SavedFactory }
+  | { kind: 'file'; at: string; file: RecentFile };
+
 /**
  * Splash / main menu — entry point of the app. A single column: brand mark,
- * hero copy, the "new factory" CTA, and the FACTORY LIBRARY list.
+ * hero copy, the "new factory" CTA, and the RECENT FACTORIES list.
  *
  * Ported from SWMainMenu in STITCHWORKS.html (lines 1032–1199). Two panels
  * that once shared this screen are gone: the mock isometric "live factory"
@@ -35,17 +46,40 @@ export function MenuPage() {
   const loadFactory = useFactoryLibrary((s) => s.loadFactory);
   const deleteFactory = useFactoryLibrary((s) => s.deleteFactory);
   const togglePin = useFactoryLibrary((s) => s.togglePin);
-  // Pinned factories float to the top of the flat list (favorites stay closest
-  // to hand). The underlying store array keeps its recency order — eviction
-  // depends on it — so we sort a copy here for display only. Array.sort is
-  // stable, so same-pinned entries keep their newest-first order.
-  const sortedSaved = useMemo(
-    () => [...savedFactories].sort((a, b) => Number(!!b.pinned) - Number(!!a.pinned)),
-    [savedFactories],
-  );
+  const activeHandle = useFileLink((s) => s.handle);
+  const activeFileName = useFileLink((s) => s.fileName);
+  const recentFiles = useRecentFiles((s) => s.files);
 
-  // Factory Library is a collapsible disclosure — its header toggles the card
-  // grid open/closed. Defaults open (so the active factory is visible on first
+  // A factory you have opened lives in one of two places: a factory you
+  // switched away from is kept as a browser copy (the library), and a
+  // `.swproj` you opened or saved is remembered as a recent file. The list
+  // merges both by when you last had them open. A recent file that is the
+  // open factory's file, or a library factory's file, already has a row —
+  // that overlap is resolved asynchronously (comparing file handles), and
+  // file rows wait for it so they never flash in and then vanish.
+  const [overlap, setOverlap] = useState<{ hiddenIds: Set<string>; slotFileNames: Record<string, string> } | null>(null);
+  useEffect(() => {
+    let cancelled = false;
+    void resolveRecentOverlap(savedFactories.map((f) => f.id), activeHandle, recentFiles)
+      .then((r) => { if (!cancelled) setOverlap(r); });
+    return () => { cancelled = true; };
+  }, [savedFactories, activeHandle, recentFiles]);
+
+  // Pinned factories float to the top (favorites stay closest to hand); the
+  // rest follow most-recently-open first.
+  const recentRows = useMemo<RecentRow[]>(() => {
+    const rows: RecentRow[] = savedFactories.map((slot) => ({ kind: 'slot', at: slot.savedAt, slot }));
+    if (overlap) {
+      for (const file of recentFiles) {
+        if (!overlap.hiddenIds.has(file.id)) rows.push({ kind: 'file', at: file.openedAt, file });
+      }
+    }
+    const pinned = (r: RecentRow) => (r.kind === 'slot' && r.slot.pinned ? 1 : 0);
+    return rows.sort((a, b) => pinned(b) - pinned(a) || b.at.localeCompare(a.at));
+  }, [savedFactories, recentFiles, overlap]);
+
+  // Recent factories is a collapsible disclosure — its header toggles the
+  // list open/closed. Defaults open (so the active factory is visible on first
   // load); the choice is remembered across sessions ('0' = collapsed).
   const [libraryOpen, setLibraryOpen] = useState<boolean>(() => getFlag('sw_lib_open') !== '0');
   const toggleLibrary = () => {
@@ -60,10 +94,6 @@ export function MenuPage() {
   // does fire), so we drive the flow through an in-app modal.
   const [newFactoryOpen, setNewFactoryOpen] = useState(false);
   const [newFactoryName, setNewFactoryName] = useState('New Factory');
-
-  // The cap counts SAVED factories only — the active factory lives in the
-  // project/twin stores, not the library, so it isn't a slot.
-  const savedCount = savedFactories.length;
 
   const openNewFactoryDialog = () => {
     // Pick a starting name that doesn't already collide.
@@ -83,15 +113,21 @@ export function MenuPage() {
   const handleImportFactory = async () => {
     setImportMsg(null);
     let raw: unknown;
+    let handle: FileSystemFileHandle | null;
     try {
-      raw = await pickProjectFile();
-    } catch {
-      // Cancelled picker / unreadable file. Nothing was touched, so say
-      // nothing — the user is still looking at the menu they started on.
+      ({ raw, handle } = await pickSwprojFile());
+    } catch (e) {
+      // Closing the dialog is not an error — the user is still looking at the
+      // menu they started on. Anything else (an empty or non-JSON file, a
+      // picker the platform refused) has to be said, or the click looks dead.
+      if (e instanceof DOMException && e.name === 'AbortError') return;
+      setImportMsg({ kind: 'err', text: e instanceof Error ? e.message : String(e) });
       return;
     }
     try {
-      const result = archiveAndImportSwproj(raw);
+      // With a handle, the factory stays linked to this file: Save in the
+      // Builder writes back to it.
+      const result = openSwprojAsFactory(raw, handle);
       if (!result.ok) {
         setImportMsg({ kind: 'err', text: result.reason ?? 'Import failed.' });
         return;
@@ -100,7 +136,7 @@ export function MenuPage() {
         kind: 'ok',
         text: result.legacy
           ? `Imported "${result.name}" — legacy file, no factory layout inside it.`
-          : `Imported "${result.name}". "${result.archivedAs}" moved to the library.`,
+          : `Imported "${result.name}". "${result.archivedAs}" is in your recent factories.`,
       });
       navigate('/line');
     } catch (e) {
@@ -119,19 +155,27 @@ export function MenuPage() {
   const handleLoadSaved = (id: string) => {
     if (loadFactory(id)) navigate('/line');
   };
+  const handleOpenRecentFile = async (id: string) => {
+    setImportMsg(null);
+    const result = await openRecentFile(id);
+    if (result.ok) navigate('/line');
+    else setImportMsg({ kind: 'err', text: result.reason ?? 'Could not open that file.' });
+  };
   const handleOpenScenariosForActive = () => {
     navigate('/scenarios');
   };
   const handleOpenScenariosForSaved = (id: string) => {
     if (loadFactory(id)) navigate('/scenarios');
   };
-  const handleDeleteSaved = async (id: string, label: string) => {
-    // Slot deletion is destructive and the user has nowhere else to undo
-    // from, so confirm first via the styled dialog.
+  const handleDeleteSaved = async (id: string, label: string, fileName?: string) => {
+    // A library factory's browser copy may be the only copy, and there is
+    // nowhere to undo from, so confirm first via the styled dialog.
     const ok = await confirm({
-      title: 'Delete saved factory',
-      message: `Delete saved factory "${label}"? This cannot be undone.`,
-      confirmLabel: 'Delete',
+      title: 'Remove factory',
+      message: fileName
+        ? `Remove "${label}" from recent factories? Its browser copy is deleted; the file ${fileName} on disk is kept.`
+        : `Remove "${label}" from recent factories? It was never saved to a file, so this deletes it and cannot be undone.`,
+      confirmLabel: 'Remove',
       variant: 'danger',
     });
     if (ok) deleteFactory(id);
@@ -223,23 +267,21 @@ export function MenuPage() {
               {importMsg.text}
             </div>
           )}
-          <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.45 }}>
-            Import reads a <code>.swproj</code> file — the whole factory, its
-            scenarios and its settings. Export one from the SETTINGS page.
-          </div>
         </div>
 
       </div>
 
-      {/* FACTORY LIBRARY — the one place you open things from. Reads like a
-          file app's Open / Recents panel: the active factory first, then your
-          saved factories (pinned float to the top, the rest newest-first). */}
+      {/* RECENT FACTORIES — the one place you open things from. Reads like a
+          file app's Recents panel: the factory open now first, then every
+          factory you have had open (pinned float to the top, the rest most
+          recent first). Where each one is stored is a detail of the row, not
+          of the list. */}
       <div style={{ minWidth: 0 }}>
         <button
           type="button"
           onClick={toggleLibrary}
           aria-expanded={libraryOpen}
-          aria-controls="factory-library-list"
+          aria-controls="recent-factories-list"
           style={{
             display: 'flex', alignItems: 'center', justifyContent: 'space-between',
             width: '100%', marginBottom: 8, gap: 12, flexWrap: 'wrap',
@@ -248,45 +290,60 @@ export function MenuPage() {
           }}
         >
           <span style={{ ...SW_TYPE.kicker, color: SW_COLORS.muted }}>
-            FACTORY LIBRARY · {savedCount} / {FACTORY_LIBRARY_MAX} SAVED
+            RECENT FACTORIES
           </span>
-          <span style={{ display: 'inline-flex', alignItems: 'center', gap: 6, ...SW_TYPE.kicker, fontWeight: 600, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>
-            STORED ON THIS DEVICE
-            <Chevron open={libraryOpen} />
-          </span>
+          <Chevron open={libraryOpen} />
         </button>
         {libraryOpen && (
-        <div id="factory-library-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
-          {/* ACTIVE — your current factory */}
+        <div id="recent-factories-list" style={{ display: 'flex', flexDirection: 'column', gap: 6 }}>
+          {/* OPEN — the factory you have open right now */}
           <LibraryCard
             icon="◆"
             title={factoryName || 'Untitled Factory'}
-            caption={`${activeStationCount} STATIONS`}
-            tag="ACTIVE"
+            caption={[`${activeStationCount} STATIONS`, activeFileName].filter(Boolean).join(' · ')}
+            tag="OPEN"
             tagColor={SW_COLORS.ok}
             scenarioCount={activeScenarioCount}
             onClick={() => navigate('/line')}
             onOpenScenarios={handleOpenScenariosForActive}
           />
 
-          {/* RECENTS + PINNED — your saved factories. Pinned float to the
-              top (sortedSaved); the rest follow newest-first. */}
-          {sortedSaved.map((slot) => (
-            <LibraryCard
-              key={slot.id}
-              icon="▤"
-              title={slot.name}
-              caption={`${slot.stationCount} STATIONS · ${fmtSavedAt(slot.savedAt)}`}
-              tag={slot.pinned ? 'PINNED' : 'SAVED'}
-              tagColor={slot.pinned ? SW_COLORS.thread : SW_COLORS.muted}
-              pinned={slot.pinned}
-              scenarioCount={slot.project.scenarios?.length ?? 0}
-              onClick={() => handleLoadSaved(slot.id)}
-              onOpenScenarios={() => handleOpenScenariosForSaved(slot.id)}
-              onTogglePin={() => togglePin(slot.id)}
-              onDelete={() => handleDeleteSaved(slot.id, slot.name)}
-            />
-          ))}
+          {recentRows.map((row) => {
+            if (row.kind === 'slot') {
+              const { slot } = row;
+              const fileName = overlap?.slotFileNames[slot.id];
+              return (
+                <LibraryCard
+                  key={slot.id}
+                  icon="▤"
+                  title={slot.name}
+                  caption={[`${slot.stationCount} STATIONS`, fmtLastOpen(slot.savedAt), fileName].filter(Boolean).join(' · ')}
+                  tag={slot.pinned ? 'PINNED' : undefined}
+                  tagColor={SW_COLORS.thread}
+                  pinned={slot.pinned}
+                  scenarioCount={slot.project.scenarios?.length ?? 0}
+                  onClick={() => handleLoadSaved(slot.id)}
+                  onOpenScenarios={() => handleOpenScenariosForSaved(slot.id)}
+                  onTogglePin={() => togglePin(slot.id)}
+                  onDelete={() => handleDeleteSaved(slot.id, slot.name, fileName)}
+                  deleteLabel={`Remove ${slot.name} from recent factories`}
+                />
+              );
+            }
+            const { file } = row;
+            return (
+              <LibraryCard
+                key={file.id}
+                icon="▤"
+                title={file.factoryName}
+                caption={`${file.stationCount} STATIONS · ${fmtLastOpen(file.openedAt)} · ${file.fileName}`}
+                tagColor={SW_COLORS.muted}
+                onClick={() => { void handleOpenRecentFile(file.id); }}
+                onDelete={() => forgetRecentFile(file.id)}
+                deleteLabel={`Remove ${file.fileName} from recent factories (the file is kept)`}
+              />
+            );
+          })}
         </div>
         )}
       </div>
@@ -319,12 +376,16 @@ export function MenuPage() {
 }
 
 /**
- * One row in the FACTORY LIBRARY list:
+ * One row in the RECENT FACTORIES list:
  *
- *   • ACTIVE — the factory you currently have open. Clicking opens the Builder;
- *     it carries a scenarios sub-button but no delete/pin controls.
- *   • SAVED  — a factory in the library. Clicking loads it; it gets a delete ×,
- *     a pin toggle, and the same scenarios sub-button.
+ *   • OPEN    — the factory you currently have open. Clicking opens the Builder;
+ *     it carries a scenarios sub-button but no remove/pin controls.
+ *   • library — a factory you switched away from, kept as a browser copy.
+ *     Clicking loads it; it gets a remove ×, a pin toggle, and the scenarios
+ *     sub-button.
+ *   • file    — a `.swproj` you opened or saved that has no browser copy.
+ *     Clicking reopens it from disk; × only drops it from the list. No
+ *     scenarios button: the count is inside a file we haven't read yet.
  *
  * Rows, not tiles. A library is a list you scan down — wrapping cards made
  * every factory look like a separate destination and put the name, the station
@@ -338,7 +399,8 @@ interface LibraryCardProps {
   icon: string;
   title: string;
   caption: string;
-  tag: string;
+  /** Status tag (OPEN / PINNED). Omitted rows keep the column empty so names line up. */
+  tag?: string;
   tagColor: string;
   /** Scenarios sub-button count. */
   scenarioCount?: number;
@@ -346,7 +408,10 @@ interface LibraryCardProps {
   pinned?: boolean;
   onClick: () => void;
   onDelete?: () => void;
-  onOpenScenarios: () => void;
+  /** Accessible name for the × button. */
+  deleteLabel?: string;
+  /** Scenarios sub-button handler; omitted rows show no scenarios button. */
+  onOpenScenarios?: () => void;
   /** Pin/unpin toggle (saved factories only). */
   onTogglePin?: () => void;
 }
@@ -361,6 +426,7 @@ function LibraryCard({
   pinned,
   onClick,
   onDelete,
+  deleteLabel,
   onOpenScenarios,
   onTogglePin,
 }: LibraryCardProps) {
@@ -382,7 +448,7 @@ function LibraryCard({
       <span aria-hidden="true" style={{ fontSize: 15, lineHeight: 1, color: SW_COLORS.muted, flexShrink: 0 }}>{icon}</span>
 
       <span style={{ flexShrink: 0, width: 62 }}>
-        <Tag soft color={tagColor}>{tag}</Tag>
+        {tag && <Tag soft color={tagColor}>{tag}</Tag>}
       </span>
 
       <div style={{ flex: 1, minWidth: 0, display: 'flex', flexDirection: 'column', gap: 2 }}>
@@ -394,7 +460,7 @@ function LibraryCard({
         </div>
       </div>
 
-      <button
+      {onOpenScenarios && <button
         type="button"
         onClick={(e) => { e.stopPropagation(); onOpenScenarios(); }}
         title={count > 0 ? `Open ${count} saved scenario${count === 1 ? '' : 's'}` : 'Create a new scenario for this factory'}
@@ -415,7 +481,7 @@ function LibraryCard({
       >
         <span>✦ {count > 0 ? `${count} SCENARIO${count === 1 ? '' : 'S'}` : 'NEW SCENARIO'}</span>
         <span>→</span>
-      </button>
+      </button>}
 
       <div style={{ display: 'flex', alignItems: 'center', gap: 2, flexShrink: 0, width: 42, justifyContent: 'flex-end' }}>
           {onTogglePin && (
@@ -443,7 +509,8 @@ function LibraryCard({
           {onDelete ? (
             <button
               type="button"
-              aria-label={`Delete saved factory ${title}`}
+              aria-label={deleteLabel ?? `Remove ${title}`}
+              title={deleteLabel ?? `Remove ${title}`}
               onClick={(e) => { e.stopPropagation(); onDelete(); }}
               style={{
                 background: 'transparent',
@@ -465,19 +532,20 @@ function LibraryCard({
   );
 }
 
-function fmtSavedAt(iso: string): string {
+/** "LAST OPEN 14:05" today, "LAST OPEN 11/09" before that. */
+function fmtLastOpen(iso: string): string {
   const d = new Date(iso);
-  if (Number.isNaN(d.getTime())) return 'SAVED';
+  if (Number.isNaN(d.getTime())) return '';
   const today = new Date();
   const sameDay = d.toDateString() === today.toDateString();
   if (sameDay) {
     const hh = String(d.getHours()).padStart(2, '0');
     const mm = String(d.getMinutes()).padStart(2, '0');
-    return `SAVED ${hh}:${mm}`;
+    return `LAST OPEN ${hh}:${mm}`;
   }
   const mo = String(d.getMonth() + 1).padStart(2, '0');
   const dy = String(d.getDate()).padStart(2, '0');
-  return `SAVED ${mo}/${dy}`;
+  return `LAST OPEN ${mo}/${dy}`;
 }
 
 interface NewFactoryModalProps {
@@ -584,7 +652,7 @@ function NewFactoryModal({
 
           {archiving && (
             <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted, lineHeight: 1.4 }}>
-              Your current factory <b style={{ color: SW_COLORS.ink }}>{archiving}</b> will be saved to the slots panel before the new one starts.
+              Your current factory <b style={{ color: SW_COLORS.ink }}>{archiving}</b> stays in your recent factories — open it again from there.
             </div>
           )}
         </div>

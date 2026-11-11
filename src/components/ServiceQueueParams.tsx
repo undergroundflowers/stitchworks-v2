@@ -116,7 +116,6 @@ export function ServiceQueueParams({ ws }: { ws: Workstation }) {
           belongs here; λ does not — arrivals depend on what upstream feeds
           this station, which is a property of the run, not of the operation. */}
       <div>
-        <div style={chipLabel}>Kendall–Lee classification</div>
         <div style={chipValue}>{notation.label}</div>
         <div style={{ fontSize: 12, color: SW_COLORS.muted, marginTop: 4 }}>
           {plainEnglish(servers, capacity, discipline)}
@@ -247,16 +246,6 @@ function plainEnglish(servers: number, capacity: number, discipline: QueueDiscip
         : 'priority order';
   return `Bundles arrive · ${ops} · ${disc} · ${buffer}.`;
 }
-
-const chipLabel: CSSProperties = {
-  fontFamily: SW_FONTS.mono,
-  fontSize: 10,
-  color: SW_COLORS.muted,
-  letterSpacing: '0.6px',
-  textTransform: 'uppercase',
-  fontWeight: 700,
-  marginBottom: 4,
-};
 
 const chipValue: CSSProperties = {
   fontFamily: SW_FONTS.display,

@@ -363,7 +363,7 @@ function Bar({
   const barColor = overTakt || isBottleneck ? SW_COLORS.alarm : fill;
 
   const why: string[] = [`SMV ${st.nominalMin.toFixed(3)} min`];
-  if (st.skillEff !== 1) why.push(`skill ×${st.skillEff.toFixed(2)}`);
+  if (st.efficiency !== 1) why.push(`efficiency ×${st.efficiency.toFixed(2)}`);
   if (st.shareFrac < 1) why.push(`operator ${Math.round(st.shareFrac * 100)} % of shift`);
   if (st.servers > 1) why.push(`÷ ${st.servers} channels`);
 

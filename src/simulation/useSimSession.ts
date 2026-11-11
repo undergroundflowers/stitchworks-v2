@@ -152,7 +152,6 @@ function runSlot(line: SimSpecLine, spec: SimSpec): SimRunSlot {
         seed: spec.seed,
         samplePeriodMin: spec.samplePeriodMin,
         recordFlow: spec.recordFlow,
-        opEfficiency: spec.opEfficiency,
       });
     } catch (err) {
       // The engine throws on a genuinely broken graph (no Source, no Sink).

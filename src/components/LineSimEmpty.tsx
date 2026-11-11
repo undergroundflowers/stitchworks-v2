@@ -10,6 +10,8 @@
 
 import { useNavigate } from 'react-router-dom';
 import { EmptyState } from './EmptyState';
+import { LineScopePicker } from './LineScopePicker';
+import { useTwin, selectActiveTwin } from '../store/twin';
 import type { LineSimEmptyReason } from '../simulation/useLineSim';
 
 export interface LineSimEmptyProps {
@@ -26,6 +28,7 @@ export function LineSimEmpty({
   what = 'Queueing analysis',
 }: LineSimEmptyProps) {
   const navigate = useNavigate();
+  const lines = useTwin((s) => selectActiveTwin(s).lines) ?? [];
   const toBuilder = { label: 'Open Factory Builder', onClick: () => navigate('/line') };
 
   if (reason === 'stations-not-in-a-line') {
@@ -49,8 +52,15 @@ export function LineSimEmpty({
         icon="⊘"
         title="Nothing in the current scope"
         body={
-          'The line this page is scoped to has no stations on it. Pick a different line above, '
-          + 'or add stations to this one in the Builder.'
+          <>
+            The line this page is scoped to has no stations on it. Pick a different line
+            below, or add stations to this one in the Builder.
+            {/* The picker lives in each page's toolbar, which an empty page
+                doesn't draw, so without this copy the user had no way out. */}
+            <div style={{ display: 'flex', justifyContent: 'center', marginTop: 12 }}>
+              <LineScopePicker lines={lines} />
+            </div>
+          </>
         }
         action={toBuilder}
       />

@@ -132,6 +132,8 @@ describe('simSpecKey — reacts to every engine-visible parameter', () => {
     ['bundle size', (t) => { firstService(t).operation.bundleSize = 7; }],
     ['line membership', (t) => { firstService(t).lineId = 'some-other-line'; }],
     ['workers required', (t) => { firstService(t).resources.workersRequired = 4; }],
+    ['station efficiency', (t) => { firstService(t).resources.efficiencyPct = 80; }],
+    ['line efficiency', (t) => { t.lines[0].efficiencyPct = 80; }],
     ['a removed workstation', (t) => { t.workstations.splice(1, 1); }],
     ['a removed connector', (t) => { t.connectors.splice(1, 1); }],
     ['a rewired connector', (t) => { t.connectors[1].toWsId = t.workstations[0].id; }],
@@ -171,13 +173,24 @@ describe('simSpecKey — reacts to run parameters', () => {
   it('reacts to flow recording', () => {
     expect(simSpecKey({ ...spec, recordFlow: !spec.recordFlow })).not.toBe(base);
   });
-  it('reacts to op efficiency', () => {
-    expect(simSpecKey({ ...spec, opEfficiency: { 'ts-01': 0.8 } })).not.toBe(base);
+  it('reacts to a station efficiency', () => {
+    const line = spec.lines[0];
+    const ws = line.twin.workstations[0];
+    const twin = {
+      ...line.twin,
+      workstations: line.twin.workstations.map((w) =>
+        w.id === ws.id ? { ...w, resources: { ...w.resources, efficiencyPct: 80 } } : w,
+      ),
+    };
+    expect(simSpecKey({ ...spec, lines: [{ ...line, twin }] })).not.toBe(base);
   });
-  it('ignores op-efficiency key ORDER', () => {
-    const a = simSpecKey({ ...spec, opEfficiency: { 'ts-01': 0.8, 'ts-02': 0.9 } });
-    const b = simSpecKey({ ...spec, opEfficiency: { 'ts-02': 0.9, 'ts-01': 0.8 } });
-    expect(a).toBe(b);
+  it('reacts to a line efficiency', () => {
+    const line = spec.lines[0];
+    const twin = {
+      ...line.twin,
+      lines: line.twin.lines.map((l) => (l.id === line.lineId ? { ...l, efficiencyPct: 80 } : l)),
+    };
+    expect(simSpecKey({ ...spec, lines: [{ ...line, twin }] })).not.toBe(base);
   });
 });
 

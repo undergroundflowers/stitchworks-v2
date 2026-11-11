@@ -3,7 +3,8 @@ import { SW_COLORS, SW_TYPE } from '../design/tokens';
 
 interface SectionHeaderProps {
   kicker?: string;
-  title: string;
+  /** Optional: a page whose own tabs already name it can show just the sub line. */
+  title?: string;
   sub?: string;
   right?: ReactNode;
 }
@@ -23,16 +24,18 @@ export function SectionHeader({ kicker, title, sub, right }: SectionHeaderProps)
             {kicker}
           </div>
         )}
-        <div
-          style={{
-            ...SW_TYPE.title,
-            color: SW_COLORS.ink,
-          }}
-        >
-          {title}
-        </div>
+        {title && (
+          <div
+            style={{
+              ...SW_TYPE.title,
+              color: SW_COLORS.ink,
+            }}
+          >
+            {title}
+          </div>
+        )}
         {sub && (
-          <div style={{ fontSize: 13, color: SW_COLORS.muted, marginTop: 4 }}>{sub}</div>
+          <div style={{ fontSize: 13, color: SW_COLORS.muted, marginTop: title ? 4 : 0 }}>{sub}</div>
         )}
       </div>
       {right}

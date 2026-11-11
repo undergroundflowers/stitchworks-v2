@@ -25,11 +25,9 @@ import {
   type IconName,
   EmptyState,
   HudSelect,
-  QueueingReference,
   SectionHeader,
   Stat,
   Sym,
-  Tag,
   ToggleGroup,
   DistPicker,
   ViewTitle,
@@ -54,8 +52,8 @@ import { LabSweep } from '../components/lab/LabSweep';
 import { SW_COLORS, SW_CONTROL, SW_FONTS, SW_RADIUS, SW_SHADOWS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
 import { QUANTITY, glossOf, type QuantityId } from '../simulation/notation';
-import { solveNetwork, type NetworkSolution, type QueueNode } from '../simulation/network';
-import { meanOf, type QueueDiscipline } from '../simulation';
+import { solveNetwork, type NetworkSolution, type QueueEdge, type QueueNode } from '../simulation/network';
+import { classify, meanOf, type QueueDiscipline } from '../simulation';
 import { workingFor, trafficEquationFor, type Working } from '../domain/lab-working';
 import { useLab } from '../store/lab';
 import { isSeedSystem } from '../domain/lab-systems';
@@ -289,21 +287,14 @@ function SystemsRail({ onCollapse }: { onCollapse: () => void }) {
               }}
             >
               <span style={{ fontSize: 12, fontWeight: 700 }}>{s.name}</span>
-              {s.blurb && (
-                <span style={{ fontSize: 10.5, color: SW_COLORS.muted, lineHeight: 1.4 }}>
-                  {s.blurb.length > 96 ? `${s.blurb.slice(0, 95)}…` : s.blurb}
+              {kendallLines(s.nodes).map((line) => (
+                <span
+                  key={line}
+                  style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}
+                >
+                  {line}
                 </span>
-              )}
-              <span style={{ display: 'flex', gap: 5, marginTop: 2, flexWrap: 'wrap' }}>
-                <Tag soft color={SW_COLORS.muted}>
-                  {s.nodes.length === 1 ? '1 stage' : `${s.nodes.length} stages`}
-                </Tag>
-                {s.source && (
-                  <Tag soft color={SW_COLORS.fabric}>
-                    {s.source}
-                  </Tag>
-                )}
-              </span>
+              ))}
             </button>
           );
         })}
@@ -311,6 +302,21 @@ function SystemsRail({ onCollapse }: { onCollapse: () => void }) {
 
     </aside>
   );
+}
+
+/**
+ * The Kendall–Lee classification of each distinct stage in a system, one line
+ * per classification. A single queue gives one line; a network gives one line
+ * per distinct stage type, followed by how many stages share it
+ * ("M/M/1 : ∞/FCFS × 4").
+ */
+function kendallLines(nodes: QueueNode[]): string[] {
+  const counts = new Map<string, number>();
+  for (const n of nodes) {
+    const { label } = classify(n.serviceDist, n.servers, n.capacity, n.discipline);
+    counts.set(label, (counts.get(label) ?? 0) + 1);
+  }
+  return [...counts].map(([label, count]) => (count > 1 ? `${label} × ${count}` : label));
 }
 
 /**
@@ -432,10 +438,6 @@ function Bench({
 
       {/* Schematic */}
       <Card>
-        <SectionHeader
-          title="The system"
-          sub="Click a stage to inspect it. Add stages from the panel on the right."
-        />
         {solution && (
           <>
             <LabSchematic
@@ -542,8 +544,6 @@ function Bench({
           </div>
         </Card>
       )}
-
-      <QueueingReference />
     </div>
   );
 }
@@ -963,7 +963,7 @@ function ParametersRail({
   solution,
   onCollapse,
 }: {
-  system: { id: string; nodes: QueueNode[] } | null;
+  system: { id: string; nodes: QueueNode[]; edges: QueueEdge[] } | null;
   node: QueueNode | null;
   solution: NetworkSolution | null;
   onCollapse: () => void;
@@ -1091,7 +1091,12 @@ function ParametersRail({
             + Branch into two routes
           </Button>
           {system.nodes.length > 1 && (
-            <ReworkControl systemId={system.id} node={node} nodes={system.nodes} />
+            <ReworkControl
+              systemId={system.id}
+              node={node}
+              nodes={system.nodes}
+              edges={system.edges}
+            />
           )}
           {system.nodes.length > 1 && (
             <Button size="sm" variant="ghost" full onClick={() => lab.removeNode(system.id, node.id)}>
@@ -1109,12 +1114,19 @@ function ReworkControl({
   systemId,
   node,
   nodes,
+  edges,
 }: {
   systemId: string;
   node: QueueNode;
   nodes: QueueNode[];
+  edges: QueueEdge[];
 }) {
   const lab = useLab();
+  // A rework loop is an arc from this stage to one placed before it.
+  const here = nodes.findIndex((n) => n.id === node.id);
+  const loops = edges.filter(
+    (e) => e.from === node.id && nodes.findIndex((n) => n.id === e.to) < here,
+  );
   const targets = nodes.filter((n) => n.id !== node.id);
   const [target, setTarget] = useState(targets[0]?.id ?? '');
   const [share, setShare] = useState(15);
@@ -1160,6 +1172,31 @@ function ReworkControl({
       >
         Add rework loop
       </Button>
+      {loops.map((e) => (
+        <div
+          key={e.id}
+          style={{
+            display: 'flex',
+            alignItems: 'center',
+            justifyContent: 'space-between',
+            gap: 8,
+            fontSize: 12,
+            color: SW_COLORS.ink,
+          }}
+        >
+          <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+            ↩ {nodes.find((n) => n.id === e.to)?.name} · {Math.round(e.probability * 100)}%
+          </span>
+          <Button
+            size="sm"
+            variant="ghost"
+            title="Remove rework loop"
+            onClick={() => lab.disconnect(systemId, e.id)}
+          >
+            Remove
+          </Button>
+        </div>
+      ))}
     </div>
   );
 }

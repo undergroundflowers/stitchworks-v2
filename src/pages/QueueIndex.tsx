@@ -359,27 +359,6 @@ function StationTable({
         </>
       ),
     },
-    {
-      key: 'action',
-      header: '',
-      width: 104,
-      minWidth: 80,
-      // Left-aligned: the table's slack parks in the filler track past this
-      // column, so a right-aligned button would float away from the data it
-      // belongs to.
-      cell: (s) => (
-        <button
-          type="button"
-          onClick={(e) => {
-            e.stopPropagation();
-            onPick(s.wsId);
-          }}
-          style={analyzeBtn()}
-        >
-          Analyze →
-        </button>
-      ),
-    },
   ];
 
   return (
@@ -459,10 +438,4 @@ const navBtn = (): React.CSSProperties => ({
   cursor: 'pointer',
   fontFamily: SW_FONTS.body,
   color: SW_COLORS.ink,
-});
-
-const analyzeBtn = (): React.CSSProperties => ({
-  ...navBtn(),
-  padding: '5px 10px',
-  fontSize: 11,
 });

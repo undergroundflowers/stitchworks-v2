@@ -206,7 +206,7 @@ export const PML_BLOCK_LIBRARY: Record<PmlBlockKind, PmlBlockSpec> = {
   Service: {
     kind: 'Service',
     label: 'Service',
-    blurb: 'Seize → Delay → Release. The bread-and-butter sewing/iron op.',
+    blurb: 'Seize → Delay → Release.',
     glyph: '⚙',
     Icon: PML_ICONS.Service,
     category: 'service',
@@ -903,8 +903,7 @@ const FIELD_SOURCE_PRIORITY: ParamFieldSpec = {
   unit: '',
   step: 1,
   hint:
-    'Which work jumps the queue. 1 goes first. Only does anything where two '
-    + 'sources feed one station set to Priority.',
+    '1 goes first. Only matters where two sources feed a Priority station.',
   resolveDefault: (r) => r.sourcePriority,
 };
 
@@ -941,8 +940,7 @@ const FIELD_QUEUE_CAPACITY: ParamFieldSpec = {
   unit: ' max at station',
   step: 1,
   hint:
-    'How many bundles fit at the station — the cart or rack size. 0 = no limit. '
-    + 'When it is full, new work is turned away.',
+    'Bundles that fit at the station. 0 = no limit. When full, new work is turned away.',
   resolveDefault: (r) => r.queueCapacity,
 };
 

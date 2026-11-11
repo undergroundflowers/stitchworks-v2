@@ -19,7 +19,6 @@ const TICK_MS = 200;
 export function SimSessionDriver(): null {
   const playing = useSimSession((s) => s.playing);
   const maxFrame = useSimSession(selectMaxFrame);
-  const mode = useProject((s) => s.time.executionMode);
   const realTimeScale = useProject((s) => s.time.realTimeScale);
   const speed = useSimSession((s) => s.speed);
 
@@ -32,17 +31,7 @@ export function SimSessionDriver(): null {
     if (!playing || maxFrame === 0) return;
     const { setFrame, setPlaying } = useSimSession.getState();
 
-    if (mode === 'virtual') {
-      // Virtual time: the run is already recorded, so there is nothing to
-      // "compute faster" — settle on the last frame and stop.
-      const id = requestAnimationFrame(() => {
-        setFrame(maxFrame);
-        setPlaying(false);
-      });
-      return () => cancelAnimationFrame(id);
-    }
-
-    // Real time: advance `effectiveScale × dt` sim-minutes per real second.
+    // Advance `effectiveScale × dt` sim-minutes per real second.
     // With realTimeScale = 1 and speed = 1 that is exactly one sim-minute per
     // wall-second, since samples are taken at 1-minute cadence.
     //
@@ -64,7 +53,7 @@ export function SimSessionDriver(): null {
       if (next >= maxFrame) setPlaying(false);
     }, TICK_MS);
     return () => window.clearInterval(id);
-  }, [playing, maxFrame, mode, realTimeScale, speed]);
+  }, [playing, maxFrame, realTimeScale, speed]);
 
   return null;
 }

@@ -28,7 +28,11 @@
 
 import * as XLSX from 'xlsx';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import type { EntityColorKey } from '../domain/twin';
+import type { EntityColorKey, Workstation } from '../domain/twin';
+import { getBlockKind, getBlockParams, pmlFixtureId } from '../domain/pml';
+import { BOTTLENECK_TARGET_RHO } from '../domain/reference-twin';
+import { defaultDist } from '../simulation/distributions';
+import type { ObBinding } from './bind-ob-to-layout';
 
 export interface ImportedStation {
   /** "Code No." from the sheet — Modelama's station-position number. */
@@ -90,6 +94,11 @@ const FIXTURE_PATTERNS: { pattern: RegExp; catalogId: string; label: string }[] 
   { pattern: /\b(coverstitch|cover\s*stitch|flat\s*lock|flatlock|\bfl\b)/i, catalogId: 'a_flatlock', label: 'flatlock' },
   { pattern: /\b(feed\s*of\s*arm|foa|\bfb\b)/i, catalogId: 'a_foa', label: 'feed-of-arm' },
   { pattern: /\bkansai|\bks\b/i, catalogId: 'a_kansai', label: 'kansai' },
+  // Edge cutter — a single-needle lockstitch with a trimming knife. Written
+  // "E/C" on some sheets and "SNEC" on others; both are the same machine, so
+  // both land on the single-needle fixture. Has to sit ahead of the cutting
+  // patterns, or "edge cutter" reads as a cutting-room knife.
+  { pattern: /\be\s*\/\s*c\b|\bedge[\s-]*cut/i, catalogId: 'a_snls', label: 'edge cutter (single needle)' },
   // Cutting / spreading
   { pattern: /\bcad\b/i, catalogId: 'a_cnc_cutter', label: 'CAD cutter' },
   { pattern: /\b(cutter|cut\b|straight\s*knife|band\s*knife)/i, catalogId: 'a_knife_straight', label: 'cutter' },
@@ -440,18 +449,42 @@ export function placeLayoutStations(parsed: ImportedFloor): LayoutPlacement {
 
 // ── Commit ───────────────────────────────────────────────────────────────
 /**
- * Materialise a parsed layout into the active Twin. Creates a new
- * Department to host the line (positioned to the right of all existing
- * departments so multiple imports don't stack), the SewingLine itself,
- * one Workstation per station, and a flow connector between every
- * adjacent pair on the line (head → tail).
+ * Materialise a parsed layout into the active Twin as a line that can be
+ * RUN, not just looked at.
+ *
+ * A layout sheet only lists the operator positions. Committing just those
+ * left a line the simulator could do nothing with: no Source to feed it, no
+ * Sink to count what it made, and every station on the catalogue's generic
+ * cycle because nothing tied a station to a bulletin time. It ran a full
+ * shift and reported zero pieces. So this writes the whole graph, the same
+ * one `buildGarmentTwin` emits for a line built from a bulletin:
+ *
+ *   Source → station → station → … → Sink, plus the line's operator pool.
+ *
+ * Every layout position becomes a one-operator Service. That matters for
+ * helper tables and check points, whose catalogue defaults (Delay,
+ * SelectOutput) would otherwise let work through with no capacity limit or
+ * route failures down a branch the import never wires.
+ *
+ * With a `binding` (see `bind-ob-to-layout`), each matched station also gets
+ * its bulletin time baked in. Stations the bulletin does not cover stay on the
+ * floor where the sheet drew them but are left OUT of the flow: there is no
+ * time for them, and inventing one would move the bottleneck. Without a
+ * binding every station stays in the flow at its catalogue cycle — runnable,
+ * but generic until operations are assigned.
  *
  * Returns a summary so the caller can surface counts in a toast.
  */
 export interface CommittedFloor {
   lineId: string;
+  /** Stations read off the sheet (excludes the Source, Sink and pool). */
   workstationCount: number;
   connectorCount: number;
+  /** Stations wired into the flow. Equals `workstationCount` unless a
+   *  bulletin was bound and some stations had no operation in it. */
+  inFlowCount: number;
+  /** Feed given to the line's Source, pieces per hour. */
+  sourceRatePerHr: number;
 }
 
 type TwinStore = ReturnType<typeof useTwin.getState>;
@@ -460,12 +493,22 @@ export function commitFloorImport(
   store: TwinStore,
   _parsed: ImportedFloor,
   placement: LayoutPlacement,
-  options?: { color?: EntityColorKey },
+  options?: { color?: EntityColorKey; binding?: ObBinding },
 ): CommittedFloor {
   const color: EntityColorKey = options?.color ?? 'blue';
+  // A binding that matched nothing carries no information; importing with it
+  // would leave every station out of the flow. Fall back to layout-only.
+  const binding = options?.binding && options.binding.matched > 0 ? options.binding : undefined;
+  if (binding && binding.opIdByStation.length !== placement.stations.length) {
+    throw new Error('The operation binding does not line up with this layout\'s stations.');
+  }
+  const opById = new Map((binding?.garment.operations ?? []).map((o) => [o.id, o]));
+  const boundOp = (i: number) => (binding ? opById.get(binding.opIdByStation[i] ?? '') : undefined);
+  const inFlow = (i: number) => !binding || boundOp(i) != null;
+  const inFlowCount = placement.stations.filter((_, i) => inFlow(i)).length;
 
-  // Find an empty patch of the grid for the new department — sit it to
-  // the right of everything that already exists, with a 4-cell gutter.
+  // Find an empty patch of the grid for the new line — sit it to the right of
+  // everything that already exists, with a 4-cell gutter.
   const active = selectActiveTwin(store);
   if (!active) throw new Error('No active twin to import into.');
   // Park the import clear of whatever is already on the floor. With zones
@@ -483,37 +526,141 @@ export function commitFloorImport(
   const lineId = store.addLine({
     name: placement.lineName,
     color,
-    operatorTarget: placement.stations.length,
+    operatorTarget: inFlowCount,
+    garmentId: binding?.garment.id,
   });
+
+  // Inset by 1 cell so the imported block sits clear of whatever it was parked
+  // beside, then one more stride so the Source has a column of its own at the
+  // head of the line.
+  const stationX0 = originX + 1 + STATION_STRIDE;
+  const stationY0 = originY + 1;
+
+  // The actions on `store` are stable, but its state is the snapshot taken
+  // when the caller read it — re-read to see what the adds just wrote.
+  const current = (id: string): Workstation => {
+    const ws = selectActiveTwin(useTwin.getState()).workstations.find((w) => w.id === id);
+    if (!ws) throw new Error(`Imported workstation ${id} went missing.`);
+    return ws;
+  };
 
   // Drop each workstation, remembering the new id so we can wire flow
   // connectors between them afterwards.
   const wsIds: string[] = [];
-  for (const s of placement.stations) {
+  placement.stations.forEach((s, i) => {
     const id = store.addWorkstation({
       lineId,
       catalogId: s.catalogId,
-      // Inset by 1 cell so the imported block sits clear of whatever it was
-      // parked beside.
-      position: { x: originX + 1 + s.x, y: originY + 1 + s.y },
+      position: { x: stationX0 + s.x, y: stationY0 + s.y },
       name: s.name,
     });
-    // Assign to the line.
-    store.updateWorkstation(id, { lineId });
+    const ws = current(id);
+    const op = boundOp(i);
+    const patch: Partial<Omit<Workstation, 'id'>> = { lineId };
+    if (op) {
+      // Bake the bulletin time into the block, exactly as `buildGarmentTwin`
+      // does, so the run and the analytical model read the same cycle and the
+      // same service distribution.
+      patch.block = {
+        ...(ws.block ?? {}),
+        kind: 'Service',
+        params: {
+          ...(ws.block?.params ?? {}),
+          cycleS: op.smv * 60,
+          servers: 1,
+          queueCapacity: op.queueCapacity ?? 0,
+          cycleDist: op.serviceDistribution ?? defaultDist(op.smv),
+        },
+      };
+      patch.operation = { ...ws.operation, opId: op.id, garmentId: binding!.garment.id };
+      patch.props = { ...ws.props, cycle_s: op.smv * 60, servers: 1 };
+      patch.kpiTargets = { ...ws.kpiTargets, capacityPerHr: Math.round(60 / op.smv) };
+    } else {
+      if (getBlockKind(ws) !== 'Service') patch.block = { ...(ws.block ?? {}), kind: 'Service' };
+      if (binding) {
+        patch.operation = {
+          ...ws.operation,
+          freeText: 'No bulletin operation matched this station — left out of the flow',
+        };
+      }
+    }
+    store.updateWorkstation(id, patch);
     wsIds.push(id);
-  }
+  });
 
-  // Flow connectors head → tail (sequentially along the line). Use a
-  // bundle carrier since these layouts come from PBS lines.
+  const flowIds = wsIds.filter((_, i) => inFlow(i));
+
+  // Feed the line at a rate its slowest station can hold. Bound stations have
+  // their cycle baked above; unbound ones resolve to the catalogue default.
+  const slowestMin = flowIds.reduce((m, id) => Math.max(m, getBlockParams(current(id)).cycleS / 60), 0);
+  const sourceRatePerHr = slowestMin > 0
+    ? Math.max(1, Math.round((60 / slowestMin) * BOTTLENECK_TARGET_RHO))
+    : 60;
+
+  const sourceId = store.addWorkstation({
+    lineId,
+    catalogId: 'buf_in',
+    position: { x: originX + 1, y: stationY0 + AISLE_WIDTH / 2 },
+    name: 'Source — cut work in',
+  });
+  store.updateWorkstation(sourceId, {
+    lineId,
+    block: {
+      kind: 'Source',
+      params: {
+        sourceRatePerHr,
+        piecesPerAgent: 1,
+        // Poisson arrivals, as on a bulletin-built line: a fixed lattice
+        // under-reports queueing against the models the app compares to.
+        arrivalDist: { kind: 'exp', mean: 60 / sourceRatePerHr },
+      },
+    },
+    operation: {
+      ...current(sourceId).operation,
+      freeText: `${sourceRatePerHr} pcs/hr · ${Math.round(BOTTLENECK_TARGET_RHO * 100)}% of bottleneck capacity`,
+    },
+  });
+
+  const sinkId = store.addWorkstation({
+    lineId,
+    catalogId: 'buf_out',
+    position: { x: stationX0 + placement.widthCells, y: stationY0 + AISLE_WIDTH / 2 },
+    name: 'Sink — finished pcs',
+  });
+  store.updateWorkstation(sinkId, { lineId, block: { kind: 'Sink' } });
+
+  // One operator per station in the flow. Tagged with the same line as the
+  // Services it serves — the engine keys pools by line, so a pool on another
+  // line would impose no constraint at all.
+  const poolId = store.addWorkstation({
+    lineId,
+    catalogId: pmlFixtureId('ResourcePool'),
+    position: { x: originX + 1, y: stationY0 + placement.depthCells + 2 },
+    name: `Operators · ${inFlowCount} units`,
+  });
+  store.updateWorkstation(poolId, {
+    lineId,
+    block: { kind: 'ResourcePool', params: { capacity: inFlowCount } },
+  });
+
+  // Flow connectors Source → head … tail → Sink, skipping stations that are
+  // out of the flow so the chain never breaks around them.
   let connectorCount = 0;
-  for (let i = 0; i < wsIds.length - 1; i++) {
+  const chain = flowIds.length > 0 ? [sourceId, ...flowIds, sinkId] : [];
+  for (let i = 0; i < chain.length - 1; i++) {
     const cid = store.addConnector({
       kind: 'flow',
-      fromWsId: wsIds[i],
-      toWsId: wsIds[i + 1],
+      fromWsId: chain[i],
+      toWsId: chain[i + 1],
     });
     if (cid) connectorCount++;
   }
 
-  return { lineId, workstationCount: wsIds.length, connectorCount };
+  return {
+    lineId,
+    workstationCount: wsIds.length,
+    connectorCount,
+    inFlowCount: flowIds.length,
+    sourceRatePerHr,
+  };
 }

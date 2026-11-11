@@ -93,6 +93,16 @@ describe('buildLineBalance · staffing and sharing', () => {
     };
   }
 
+  /** Set one station's own efficiency, the way the Inspector field does. */
+  function withEfficiency(wsId: string, pct: number): Twin {
+    return {
+      ...base,
+      workstations: base.workstations.map((w) =>
+        w.id === wsId ? { ...w, resources: { ...w.resources, efficiencyPct: pct } } : w,
+      ),
+    };
+  }
+
   it('doubles a station cycle when its operator is only there half the shift', () => {
     const target = buildLineBalance({ twin: base, lineId, garmentsById: garments })
       .stations[0];
@@ -105,29 +115,38 @@ describe('buildLineBalance · staffing and sharing', () => {
     expect(shared.cycleMin).toBeCloseTo(target.cycleMin * 2, 10);
   });
 
-  it('speeds a station up in proportion to its skill multiplier', () => {
+  it('speeds a station up in proportion to its efficiency', () => {
     const plain = buildLineBalance({ twin: base, lineId, garmentsById: garments });
-    const opId = plain.stations[0].opId;
+    const wsId = plain.stations[0].wsId;
     const fast = buildLineBalance({
-      twin: base,
+      twin: withEfficiency(wsId, 125),
       lineId,
       garmentsById: garments,
-      opEfficiency: { [opId]: 1.25 },
     }).stations[0];
-    expect(fast.skillEff).toBe(1.25);
+    expect(fast.efficiency).toBe(1.25);
     expect(fast.cycleMin).toBeCloseTo(plain.stations[0].cycleMin / 1.25, 10);
   });
 
-  it('clamps a runaway skill entry to the engine range', () => {
+  it('falls back to the line efficiency when the station sets none', () => {
     const plain = buildLineBalance({ twin: base, lineId, garmentsById: garments });
-    const opId = plain.stations[0].opId;
+    const twin: Twin = {
+      ...base,
+      lines: base.lines.map((l) => (l.id === lineId ? { ...l, efficiencyPct: 80 } : l)),
+    };
+    const slow = buildLineBalance({ twin, lineId, garmentsById: garments }).stations[0];
+    expect(slow.efficiency).toBe(0.8);
+    expect(slow.cycleMin).toBeCloseTo(plain.stations[0].cycleMin / 0.8, 10);
+  });
+
+  it('clamps a runaway efficiency to the engine range', () => {
+    const plain = buildLineBalance({ twin: base, lineId, garmentsById: garments });
+    const wsId = plain.stations[0].wsId;
     const wild = buildLineBalance({
-      twin: base,
+      twin: withEfficiency(wsId, 900),
       lineId,
       garmentsById: garments,
-      opEfficiency: { [opId]: 9 },
     }).stations[0];
-    expect(wild.skillEff).toBe(1.5);
+    expect(wild.efficiency).toBe(1.5);
   });
 });
 
@@ -306,6 +325,35 @@ describe('agreement with the engine', () => {
     expect(after.capacityPerHr).toBeLessThan(before.capacityPerHr);
 
     // ...and so does a run of the same twin.
+    const runBefore = runPmlSim({ twin: base, durationMin: 480, seed: 7, garmentsById: garments });
+    const runAfter = runPmlSim({ twin, durationMin: 480, seed: 7, garmentsById: garments });
+    expect(runAfter.totalProduced).toBeLessThan(runBefore.totalProduced);
+  });
+
+  it('slows the chart and the run together when the pacer runs below standard', () => {
+    const before = buildLineBalance({ twin: base, lineId, garmentsById: garments });
+    const pacer = before.bottleneck!;
+    const twin: Twin = {
+      ...base,
+      workstations: base.workstations.map((w) =>
+        w.id === pacer.wsId ? { ...w, resources: { ...w.resources, efficiencyPct: 60 } } : w,
+      ),
+    };
+    const after = buildLineBalance({ twin, lineId, garmentsById: garments });
+
+    expect(after.bottleneck!.efficiency).toBe(0.6);
+    expect(after.bottleneckMin).toBeCloseTo(before.bottleneckMin / 0.6, 10);
+
+    const runBefore = runPmlSim({ twin: base, durationMin: 480, seed: 7, garmentsById: garments });
+    const runAfter = runPmlSim({ twin, durationMin: 480, seed: 7, garmentsById: garments });
+    expect(runAfter.totalProduced).toBeLessThan(runBefore.totalProduced);
+  });
+
+  it('runs every station at the line efficiency when none sets its own', () => {
+    const twin: Twin = {
+      ...base,
+      lines: base.lines.map((l) => (l.id === lineId ? { ...l, efficiencyPct: 60 } : l)),
+    };
     const runBefore = runPmlSim({ twin: base, durationMin: 480, seed: 7, garmentsById: garments });
     const runAfter = runPmlSim({ twin, durationMin: 480, seed: 7, garmentsById: garments });
     expect(runAfter.totalProduced).toBeLessThan(runBefore.totalProduced);

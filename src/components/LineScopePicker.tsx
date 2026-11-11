@@ -8,7 +8,7 @@
 
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import { useSimScope } from '../store/simScope';
+import { resolveSimScope, useSimScope } from '../store/simScope';
 import type { SewingLine } from '../domain/twin';
 
 export interface LineScopePickerProps {
@@ -18,7 +18,7 @@ export interface LineScopePickerProps {
 }
 
 export function LineScopePicker({ lines }: LineScopePickerProps) {
-  const scope = useSimScope((s) => s.scope);
+  const scope = resolveSimScope(useSimScope((s) => s.scope), lines);
   const setScope = useSimScope((s) => s.setScope);
 
   if (lines.length === 0) return null;

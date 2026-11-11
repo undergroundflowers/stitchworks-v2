@@ -75,3 +75,17 @@ export const useSimScope = create<SimScopeState>()(
 export function scopeToKey(scope: SimScope): string {
   return scope.kind === 'factory' ? 'factory' : `${scope.kind}:${scope.id}`;
 }
+
+/**
+ * The scope as it applies to the factory that is open now.
+ *
+ * The scope is saved once for the whole app, not per factory, so it can name a
+ * line that no longer exists: one picked in a different factory, a scenario
+ * that was switched away from, or a line that was deleted. Read as-is, that
+ * scope matches nothing and every analysis page shows an empty state with no
+ * way out. A line that isn't among `lines` therefore means the whole factory.
+ */
+export function resolveSimScope(scope: SimScope, lines: readonly { id: string }[]): SimScope {
+  if (scope.kind === 'line' && !lines.some((l) => l.id === scope.id)) return { kind: 'factory' };
+  return scope;
+}

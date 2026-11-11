@@ -72,7 +72,7 @@ const BOOTH: LabSystem = (() => {
   const node = n('booth', 'Telephone booth', 15, { externalArrivalPerHr: 7.5 });
   return {
     id: 'seed-mm1-booth',
-    name: 'M/M/1 · telephone booth',
+    name: 'Telephone booth',
     blurb:
       'One server, unbounded queue. Arrivals every 8 min on average, calls last 4 min. '
       + 'The textbook’s worked Model I — ρ = 0.5, Lq = 0.5, W = 0.133 hr.',
@@ -91,7 +91,7 @@ const BANK: LabSystem = (() => {
   });
   return {
     id: 'seed-mmk-bank',
-    name: 'M/M/3 · bank counter',
+    name: 'Bank counter',
     blurb:
       'Three tellers sharing one queue. The textbook’s Model VII — P₀ = 0.145, '
       + 'Lq = 0.532, L = 2.334. Drop c to 1 and watch it collapse.',
@@ -109,7 +109,7 @@ const CAPPED: LabSystem = (() => {
   });
   return {
     id: 'seed-mm1n-capped',
-    name: 'M/M/1/5 · a queue that turns work away',
+    name: 'A queue that turns work away',
     blurb:
       'Offered more than it can serve (ρ = 1.2) but the buffer holds only five, so it '
       + 'stays stable by losing work. Watch λ_eff fall below λ and P_N rise.',
@@ -126,7 +126,7 @@ const DETERMINISTIC: LabSystem = (() => {
   };
   return {
     id: 'seed-md1-press',
-    name: 'M/D/1 · a machine with no variation',
+    name: 'A machine with no variation',
     blurb:
       'A press takes exactly 6 min every time. Same ρ as the M/M/1 at the same load, '
       + 'but exactly half the queue — variability, not utilisation, is what builds Lq.',
@@ -200,7 +200,22 @@ const BRANCH: LabSystem = (() => {
  * receive a starter system added later. Bumping this makes the store top up
  * the collection exactly once, while still respecting a seed the user deleted.
  */
-export const SEED_VERSION = 1;
+export const SEED_VERSION = 2;
+
+/**
+ * Names the starters shipped with before SEED_VERSION 2, keyed by seed id.
+ *
+ * They used to lead with a short Kendall code ("M/M/1 · telephone booth"). The
+ * Systems rail now prints the full classification under every name, so the
+ * prefix only repeated it. A stored copy still carrying exactly one of these
+ * names is renamed on load; any other name is the user's and is left alone.
+ */
+export const LEGACY_SEED_NAMES: Record<string, string> = {
+  'seed-mm1-booth': 'M/M/1 · telephone booth',
+  'seed-mmk-bank': 'M/M/3 · bank counter',
+  'seed-mm1n-capped': 'M/M/1/5 · a queue that turns work away',
+  'seed-md1-press': 'M/D/1 · a machine with no variation',
+};
 
 /** The systems the Lab opens with, in the order they are listed. */
 export const SEED_SYSTEMS: LabSystem[] = [

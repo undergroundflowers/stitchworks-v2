@@ -105,9 +105,6 @@ export interface RunReplicationsOpts {
   /** Demand target (pieces/hour). When set, demandTaktGap is computed as
    *  actualPph − demandPph per replication. When omitted, gap defaults to 0. */
   demandPerHr?: number;
-  /** Per-op skill-efficiency multipliers (from `efficiencyFromSkillMatrix`).
-   *  Passed through to the engine — drives per-station cycle scaling. */
-  opEfficiency?: Record<string, number>;
   /**
    * Effective garment catalog — built-ins with the project's edits applied.
    *
@@ -143,7 +140,6 @@ export function runReplications(opts: RunReplicationsOpts): AggregateKpis {
       durationMin: simMinutes,
       seed: seed + i,
       samplePeriodMin: 5,
-      opEfficiency: opts.opEfficiency,
       garmentsById: opts.garmentsById,
     });
     const lastSample = result.samples[result.samples.length - 1];

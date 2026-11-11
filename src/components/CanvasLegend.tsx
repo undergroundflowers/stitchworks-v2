@@ -18,12 +18,9 @@ import { StageOverlay } from './StageOverlay';
  * `LegendRow`s, so the shell owns the list shape too and not just the box.
  */
 export function CanvasLegend({
-  label,
   width,
   children,
 }: {
-  /** Which view this key describes — shown after "LEGEND ·". */
-  label: string;
   /** Expanded width. Omit to size to content. */
   width?: number;
   children: ReactNode;
@@ -71,7 +68,8 @@ export function CanvasLegend({
         }}
       >
         <span style={{ color: SW_COLORS.brand }}>▣</span>
-        <span>LEGEND · {label}</span>
+        {/* Just "LEGEND" — the view switcher already says which view is on. */}
+        <span>LEGEND</span>
         <span style={{ flex: 1, minWidth: 12 }} />
         <Chevron open={open} />
       </button>

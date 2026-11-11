@@ -37,6 +37,16 @@ import { defaultDist, distFromOpNotes } from '../simulation/distributions';
 // ============================================================================
 
 /**
+ * How hard a freshly built line is fed, as a fraction of what its slowest
+ * station can take. 85 % is busy enough that queues are visible and the
+ * bottleneck is obvious, stable enough that every observable converges to a
+ * finite steady state. Shared by every builder that seeds a Source so a line
+ * built from a bulletin and a line imported from a layout start out loaded the
+ * same way.
+ */
+export const BOTTLENECK_TARGET_RHO = 0.85;
+
+/**
  * Map a paper's machine code (DNL, SNL, 5OL, 4OL, FB, MNL, …) onto the
  * iso fixture catalog id Stitchworks understands. Unknown codes fall back
  * to the single-needle lock so the line still runs — the user can pick a
@@ -105,10 +115,7 @@ export function buildGarmentTwin(
   // to compare against. Feeding a line more than it can take isn't a
   // "loaded" line, it's an unstable one.
   //
-  // Target ~85 % bottleneck utilisation: busy enough that queues are visible
-  // and the bottleneck is obvious, stable enough that every observable
-  // converges to a finite steady state.
-  const BOTTLENECK_TARGET_RHO = 0.85;
+  // Target ~85 % bottleneck utilisation — see BOTTLENECK_TARGET_RHO.
   const slowestSmv = ops.reduce((m, o) => Math.max(m, o.smv / Math.max(1, o.servers ?? 1)), 0);
   const bottleneckCapPerHr = slowestSmv > 0 ? 60 / slowestSmv : 60;
   const sourceRatePerHr = Math.max(1, Math.round(bottleneckCapPerHr * BOTTLENECK_TARGET_RHO));

@@ -1,15 +1,10 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import { Card, Button, Stat, Tag, SectionHeader, Progress, ToggleGroup, HudSelect, EmptyState, NewGarmentTemplateDialog, NumberInput, useConfirm } from '../components';
+import { Card, Button, Stat, Tag, HudSelect, EmptyState, NewGarmentTemplateDialog, NumberInput, useConfirm, Icon, ViewTitle } from '../components';
 import { useRef, useState, useMemo } from 'react';
 import { useNavigate, useSearchParams } from 'react-router-dom';
 import {
-  ALL_WORKER_ARCHETYPES,
-  WORKER_ARCHETYPES,
-  type WorkerArchetype,
-  type WorkerRole,
   ALL_MACHINES,
-  type MachineSpec,
   type MachineCode,
   type Operation,
   type OperationCategory,
@@ -17,13 +12,8 @@ import {
   type GarmentTemplate,
   GARMENT_TEMPLATES,
 } from '../domain';
-import type {
-  Assignment,
-  Operator as TwinOperator,
-  SewingLine,
-} from '../domain/twin';
 import { useProject, useGarments, type EffectiveGarments } from '../store';
-import { useTwin, selectActiveTwin } from '../store/twin';
+import { useTwin } from '../store/twin';
 import { parseGarmentXlsx, type ImportedGarment } from '../lib/import-garment-xlsx';
 import {
   parseFloorXlsx,
@@ -32,297 +22,71 @@ import {
   type ImportedFloor,
   type LayoutPlacement,
 } from '../lib/import-floor-xlsx';
+import { bindObToLayout, pickObForLayout, type ObBinding } from '../lib/bind-ob-to-layout';
 
 /**
- * Resources page — operators, machines and roster.
+ * Resources page — the garment operation bulletins.
  *
- * Operators and machines are now derived from the apparel domain layer
- * (WORKER_ARCHETYPES + MACHINE_CATALOG) instead of hardcoded mock arrays.
- * Names and instance counts are seeded deterministically so the table is
- * stable across renders. Roster remains demo data for now; it becomes live
- * once the project file format and roster scheduler land.
+ * This used to carry three more tabs: an Operators roster, a Machines
+ * inventory and a Skill matrix. The roster was invented — thirty first
+ * names cycled to a headcount typed elsewhere, with an efficiency and a
+ * "SAM" made up from the row number — and the machine counts were a
+ * constant that never looked at the floor. Nothing the simulation reads
+ * came from either. The skill matrix did reach the engine, but only after
+ * being averaged into one number per operation, which is a per-station
+ * efficiency wearing a 131-row costume. That number now lives on the
+ * station (and its line) in the Builder Inspector, next to the workers it
+ * describes.
+ *
+ * What is left is the one input the model genuinely needs from here: each
+ * garment's operations, their SMVs and the machine each one runs on.
  */
 export function ResourcesPage() {
-  // ?tab=operations&garment=<id> lets other surfaces deep-link straight to the
-  // operations editor for a specific garment, and `&new=1` opens the
-  // new-garment dialog on arrival — the Builder links in with both, because
-  // "edit this garment's bulletin" and "add a garment" are asked from there
-  // and this page is the only place either can be done.
+  // ?garment=<id> lets other surfaces deep-link straight to the operations
+  // editor for a specific garment, and `&new=1` opens the new-garment dialog
+  // on arrival — the Builder links in with both, because "edit this
+  // garment's bulletin" and "add a garment" are asked from there and this
+  // page is the only place either can be done. (`?tab=operations` from older
+  // links is accepted and ignored: there is only one tab now.)
   const [searchParams] = useSearchParams();
   const navigate = useNavigate();
-  const initialTab = (searchParams.get('tab') as
-    | 'operators' | 'machines' | 'skills' | 'operations'
-    | null) ?? 'operators';
   const initialGarment = searchParams.get('garment') ?? undefined;
   const openNewGarment = searchParams.get('new') === '1';
-  const [tab, setTab] = useState<'operators' | 'machines' | 'skills' | 'operations'>(initialTab);
-  const project = useProject();
   const garments = useGarments();
-  const skillMatrix = project.skillMatrix;
-  const setSkill = project.setSkill;
-  const resetSkillMatrix = project.resetSkillMatrix;
-  const [skillsGarment, setSkillsGarment] = useState<string>(garments.all[0]?.id ?? '');
-
-  // Target headcount = total operators configured across every factory line.
-  // Without this, the page showed a hardcoded 33 even when the factory had
-  // 131 operators across 8 lines — the pill, the WORKFORCE card and the
-  // ROLE COVERAGE breakdown all printed numbers that didn't match anywhere
-  // else in the app.
-  const factoryHeadcount = useMemo(
-    () => project.factory.lines.reduce((s, l) => s + (l.operators || 0), 0),
-    [project.factory.lines],
-  );
-  // Operators come from the active Twin when it carries any (post step-3
-  // seed flow), otherwise we fall back to the synthesised demo roster so
-  // the table is never empty on v8 saves or canonical-only projects.
-  const activeTwin = useTwin(selectActiveTwin);
-  const operators = useMemo(() => {
-    const twinOps = activeTwin?.operators ?? [];
-    if (twinOps.length > 0) {
-      const workstationsById = new Map(
-        (activeTwin?.workstations ?? []).map((w) => [w.id, { id: w.id, name: w.name }]),
-      );
-      return operatorsFromTwin(
-        twinOps,
-        activeTwin?.assignments ?? [],
-        activeTwin?.lines ?? [],
-        workstationsById,
-      );
-    }
-    return buildOperators(factoryHeadcount);
-  }, [activeTwin, factoryHeadcount]);
-  const machineTypes = useMemo(() => buildMachineTypes(), []);
-  const machineCount = useMemo(
-    () => machineTypes.reduce((s, t) => s + t.count, 0),
-    [machineTypes],
-  );
-
-  const avgEff = Math.round(operators.reduce((s, o) => s + o.eff, 0) / operators.length);
-
-  // Avatar tint keyed to the operator's position in the flat roster so the
-  // colour stays put whether the table renders grouped or flat.
-  const avatarTintById = useMemo(
-    () => new Map(operators.map((o, i) => [o.id, i % 5])),
-    [operators],
-  );
-  // Group the roster by sewing line. When the roster has fewer than two
-  // distinct lines (e.g. the seeded demo crew carries no line names) the
-  // table renders flat, exactly as before.
-  const operatorRows = useMemo(() => {
-    const buckets = new Map<string, typeof operators>();
-    for (const o of operators) {
-      const key = o.lineName ?? '— Unassigned';
-      if (!buckets.has(key)) buckets.set(key, []);
-      buckets.get(key)!.push(o);
-    }
-    if (buckets.size < 2) return operators.map((op) => ({ kind: 'op' as const, op }));
-    const names = [...buckets.keys()].sort((a, b) => {
-      if (a === '— Unassigned') return 1;
-      if (b === '— Unassigned') return -1;
-      return a.localeCompare(b, undefined, { numeric: true });
-    });
-    return names.flatMap((name) => {
-      const ops = buckets.get(name)!;
-      const groupEff = Math.round(ops.reduce((s, o) => s + o.eff, 0) / ops.length);
-      return [
-        { kind: 'section' as const, name, count: ops.length, groupEff },
-        ...ops.map((op) => ({ kind: 'op' as const, op })),
-      ];
-    });
-  }, [operators]);
 
   return (
     <div style={{ width:'100%', height:'100%', display:'flex', flexDirection:'column', background: SW_COLORS.paperDeep }}>
-      <div style={{ padding:'18px 24px', background: SW_COLORS.paper, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-        <SectionHeader kicker="Resources" title="People & machines"
-          sub="Manage your factory's workforce and equipment. Operators and machines are seeded from the apparel domain catalog."
-          right={
-            /* Back to the floor this library feeds. It replaces an "+ Add new"
-               primary that had no handler at all — the loudest control on the
-               page did nothing, while the real add buttons live inside each
-               tab, where what is being added is unambiguous. */
-            <Button variant="secondary" size="sm" onClick={() => navigate('/line')}>
-              ← Back to Builder
-            </Button>
-          }/>
-        <div style={{ marginTop: 8 }}>
-          <ToggleGroup value={tab} onChange={setTab} options={[
-            { value:'operators',  label:`👥 Operators · ${operators.length}` },
-            { value:'machines',   label:`⚙ Machines · ${machineCount}` },
-            { value:'operations', label:`🪡 Operations · ${garments.all.length} garments` },
-            { value:'skills',     label:`🎯 Skill matrix` },
-          ]}/>
-        </div>
+      {/* Title bar — the same back button + view title the Factory Builder
+          uses, so moving between the two reads as one app. */}
+      <div style={{ display:'flex', alignItems:'center', gap: 12, padding:'10px 16px', background: SW_COLORS.paper, borderBottom: `1px solid ${SW_COLORS.line}` }}>
+        <button
+          onClick={() => navigate('/line')}
+          title="Back to Builder"
+          aria-label="Back to Builder"
+          style={{
+            width: 30,
+            height: 30,
+            padding: 0,
+            display: 'inline-flex',
+            alignItems: 'center',
+            justifyContent: 'center',
+            background: SW_COLORS.paper,
+            border: `1px solid ${SW_COLORS.line}`,
+            borderRadius: 6,
+            color: SW_COLORS.muted,
+            cursor: 'pointer',
+          }}
+        >
+          <Icon name="back" />
+        </button>
+        <ViewTitle title="Resources" />
+        <span style={{ ...SW_TYPE.caption, color: SW_COLORS.muted }}>
+          🪡 Operations · {garments.all.length} {garments.all.length === 1 ? 'garment' : 'garments'}
+        </span>
       </div>
 
       <div style={{ flex:1, overflow:'auto', padding:'24px' }}>
-        {tab==='operators' && (
-          <div style={{ display:'grid', gridTemplateColumns:'1fr 280px', gap: 18 }}>
-            <Card padding={0}>
-              <table style={{ width:'100%', borderCollapse:'collapse', fontFamily: SW_FONTS.body }}>
-                <thead>
-                  <tr style={{ background: SW_COLORS.paperDeep, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                    {['ID','Name','Role','Line','Eff %','Assignment'].map(h => (
-                      <th key={h} style={{ padding:'10px 12px', textAlign:'left', fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, letterSpacing:'1px' }}>{h}</th>
-                    ))}
-                  </tr>
-                </thead>
-                <tbody>
-                  {operatorRows.map((row) => {
-                    if (row.kind === 'section') {
-                      return (
-                        <tr key={`section:${row.name}`} style={{ background: SW_COLORS.paperDeep, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                          <td colSpan={6} style={{ padding:'7px 12px', fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, letterSpacing:'1px', textTransform:'uppercase' }}>
-                            {row.name} · {row.count} OPR · AVG EFF {row.groupEff}%
-                          </td>
-                        </tr>
-                      );
-                    }
-                    const o = row.op;
-                    return (
-                    <tr key={o.id} style={{ borderBottom: `1px solid ${SW_COLORS.line}`, fontSize:12 }}>
-                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontWeight:700, color: SW_COLORS.muted }}>{o.id}</td>
-                      <td style={{ padding:'10px 12px' }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:8 }}>
-                          <div style={{ width:24, height:24, borderRadius:'50%', background: [SW_COLORS.brandLite,'#D6F0E4','#E4DEFF','#FFEAD6','#D6E8FF'][avatarTintById.get(o.id) ?? 0], display:'flex', alignItems:'center', justifyContent:'center', fontSize:10, fontWeight:800, color: SW_COLORS.ink }}>{o.name[0]}</div>
-                          <span style={{ fontWeight:700 }}>{o.name}</span>
-                        </div>
-                      </td>
-                      <td style={{ padding:'10px 12px' }}>
-                        <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
-                          <span style={{ width:18, height:18, borderRadius:4, background: o.archetype.color, color:'#fff', display:'inline-flex', alignItems:'center', justifyContent:'center', fontSize:11 }}>{o.archetype.icon}</span>
-                          {o.archetype.label}
-                        </span>
-                      </td>
-                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontSize:11, color: SW_COLORS.muted }}>
-                        {o.lineName ?? '—'}
-                      </td>
-                      <td style={{ padding:'10px 12px' }}>
-                        <div style={{ display:'flex', alignItems:'center', gap:6 }}>
-                          <span style={{ fontFamily: SW_FONTS.mono, fontWeight:700, width:30, color: o.eff>=80?SW_COLORS.ok:o.eff>=65?SW_COLORS.thread:SW_COLORS.alarm }}>{o.eff}%</span>
-                          <div style={{ flex:1, maxWidth:60 }}><Progress value={o.eff} color={o.eff>=80?SW_COLORS.ok:o.eff>=65?SW_COLORS.thread:SW_COLORS.alarm} height={4}/></div>
-                        </div>
-                      </td>
-                      <td style={{ padding:'10px 12px', fontFamily: SW_FONTS.mono, fontSize:11, color: SW_COLORS.muted, minWidth: 220 }}>
-                        <div style={{ display: 'flex', alignItems: 'center', gap: 6, flexWrap: 'wrap' }}>
-                          <span>{o.assignmentSummary ?? `SAM ${o.sam}`}</span>
-                          {o.overallocated && (
-                            <span
-                              title="This operator's non-rotation shareFrac sums to > 1.0. Engine cycle math will treat the most absent station as the bottleneck; consider redistributing assignments."
-                              style={{
-                                fontFamily: SW_FONTS.mono,
-                                fontSize: 9,
-                                fontWeight: 800,
-                                color: SW_COLORS.alarm,
-                                padding: '1px 6px',
-                                border: `1px solid ${SW_COLORS.alarm}`,
-                                borderRadius: 3,
-                                letterSpacing: '0.05em',
-                              }}
-                            >
-                              ⚠ OVERALLOCATED
-                            </span>
-                          )}
-                        </div>
-                        {o.stationDetails && o.stationDetails.length > 0 && (
-                          <div style={{ marginTop: 4, display: 'flex', flexDirection: 'column', gap: 2 }}>
-                            {o.stationDetails.map((s, idx) => {
-                              const sharedColor = s.sharePct < 100 ? SW_COLORS.alarm : SW_COLORS.steel;
-                              return (
-                                <div
-                                  key={idx}
-                                  style={{
-                                    display: 'grid',
-                                    gridTemplateColumns: '1fr auto',
-                                    gap: 6,
-                                    alignItems: 'center',
-                                    fontSize: 10,
-                                  }}
-                                >
-                                  <span style={{ color: SW_COLORS.ink, fontWeight: 600, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={s.wsName}>
-                                    {s.wsName}
-                                  </span>
-                                  <span style={{ color: sharedColor, fontWeight: 700, minWidth: 30, textAlign: 'right' }}>
-                                    {s.sharePct}%
-                                  </span>
-                                </div>
-                              );
-                            })}
-                          </div>
-                        )}
-                      </td>
-                    </tr>
-                    );
-                  })}
-                </tbody>
-              </table>
-            </Card>
-
-            <div>
-              <Card padding={16} style={{ marginBottom:14 }}>
-                <div style={{ ...SW_TYPE.heading, fontSize: 13, marginBottom: 10 }}>WORKFORCE</div>
-                <div style={{ display:'grid', gridTemplateColumns:'1fr 1fr', gap:8 }}>
-                  <Stat label="OPERATORS" value={operators.length}/>
-                  <Stat label="AVG EFF" value={avgEff} unit="%"/>
-                </div>
-              </Card>
-              <Card padding={16}>
-                <div style={{ ...SW_TYPE.heading, fontSize: 13, marginBottom: 10 }}>ROLE COVERAGE</div>
-                {ALL_WORKER_ARCHETYPES.filter((a) => operators.some((o) => o.archetype.role === a.role)).map((a) => {
-                  const c = operators.filter((o) => o.archetype.role === a.role).length;
-                  return (
-                    <div key={a.role} style={{ marginBottom:8 }}>
-                      <div style={{ display:'flex', justifyContent:'space-between', fontSize:12, fontWeight:600, marginBottom:3 }}>
-                        <span style={{ display:'inline-flex', alignItems:'center', gap:6 }}>
-                          <span style={{ color: a.color, fontSize:13 }}>{a.icon}</span>
-                          {a.label}
-                        </span>
-                        <span style={{ fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>{c}</span>
-                      </div>
-                      <Progress value={c} max={8} color={a.color} height={5}/>
-                    </div>
-                  );
-                })}
-              </Card>
-            </div>
-          </div>
-        )}
-
-        {tab==='machines' && (
-          <div style={{ display:'grid', gridTemplateColumns:'repeat(auto-fill, minmax(200px, 1fr))', gap: 12 }}>
-            {machineTypes.map(t => (
-              <Card key={t.spec.code} padding={14}>
-                <div style={{ display:'flex', justifyContent:'space-between', alignItems:'flex-start', gap:8 }}>
-                  <div style={{ minWidth:0 }}>
-                    <div style={{ ...SW_TYPE.heading, color: t.spec.color }}>
-                      <span style={{ marginRight:6 }}>{t.spec.icon}</span>{t.spec.shortName}
-                    </div>
-                    <div style={{ fontSize:11, color: SW_COLORS.muted, marginTop:2 }}>{t.spec.label}</div>
-                    <div style={{ fontFamily: SW_FONTS.mono, fontSize:10, fontWeight:700, color: SW_COLORS.muted, marginTop:4 }}>{t.spec.code}</div>
-                  </div>
-                  <span style={{ fontFamily: SW_FONTS.mono, fontSize:13, fontWeight:700, color: SW_COLORS.ink, whiteSpace:'nowrap' }}>×{t.count}</span>
-                </div>
-              </Card>
-            ))}
-          </div>
-        )}
-
-        {tab==='operations' && (
-          <OperationsPanel garments={garments} initialGarmentId={initialGarment} openNewGarment={openNewGarment}/>
-        )}
-
-        {tab==='skills' && (
-          <SkillMatrixPanel
-            operators={operators}
-            garmentId={skillsGarment}
-            setGarmentId={setSkillsGarment}
-            skillMatrix={skillMatrix}
-            setSkill={setSkill}
-            resetSkillMatrix={resetSkillMatrix}
-            garments={garments}
-          />
-        )}
-
+        <OperationsPanel garments={garments} initialGarmentId={initialGarment} openNewGarment={openNewGarment}/>
       </div>
     </div>
   );
@@ -396,36 +160,33 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
           const reader = new FileReader();
           reader.onload = () => {
             const buf = reader.result as ArrayBuffer;
-            // Try OB first — operation breakdowns are the common case and
-            // succeed quickly when the sheet matches. Only fall back to the
-            // layout parser when no OB header is found.
-            // Try OB first — operation breakdowns are the common case and
-            // succeed quickly when the sheet matches.
+            // Run BOTH parsers on every workbook. One file often carries the
+            // bulletin on one sheet and the machine layout on another; the
+            // old "OB first, layout only as a fallback" order took the
+            // bulletin and silently dropped the layout beside it.
+            const entries: ImportEntry[] = [];
+            let obError = '';
+            let layoutError = '';
             try {
-              const preview = parseGarmentXlsx(buf, file.name);
-              return resolve({ ok: true, entry: { kind: 'garment', preview } });
-            } catch (eOb) {
-              // Fall back to layout parser. Returns every layout sheet in
-              // the workbook (some files genuinely hold more than one);
-              // we expand them into individual batch entries.
-              try {
-                const floors = parseFloorXlsx(buf, file.name);
-                const entries: ImportEntry[] = floors.map((floor) => ({
-                  kind: 'layout',
-                  preview: floor,
-                  placement: placeLayoutStations(floor),
-                }));
-                return resolve({ ok: true, entry: entries });
-              } catch (eLayout) {
-                const ob = eOb instanceof Error ? eOb.message : String(eOb);
-                const lay = eLayout instanceof Error ? eLayout.message : String(eLayout);
-                return resolve({
-                  ok: false,
-                  file: file.name,
-                  reason: `Not an OB (${ob}) and not a Machine Layout (${lay}).`,
-                });
-              }
+              entries.push({ kind: 'garment', preview: parseGarmentXlsx(buf, file.name) });
+            } catch (e) {
+              obError = e instanceof Error ? e.message : String(e);
             }
+            try {
+              // Every layout sheet in the workbook (some files genuinely hold
+              // more than one) becomes its own batch entry.
+              for (const floor of parseFloorXlsx(buf, file.name)) {
+                entries.push({ kind: 'layout', preview: floor, placement: placeLayoutStations(floor) });
+              }
+            } catch (e) {
+              layoutError = e instanceof Error ? e.message : String(e);
+            }
+            if (entries.length > 0) return resolve({ ok: true, entry: entries });
+            return resolve({
+              ok: false,
+              file: file.name,
+              reason: `Not an OB (${obError}) and not a Machine Layout (${layoutError}).`,
+            });
           };
           reader.onerror = () => resolve({ ok: false, file: file.name, reason: 'Could not read the file.' });
           reader.readAsArrayBuffer(file);
@@ -455,6 +216,30 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
 
   const importPreview = importBatch[importBatchIndex] ?? null;
 
+  /** The bulletin that times a layout's stations, if one is on hand: one read
+   *  in this same batch, or one already saved in the project. Undefined when
+   *  none fits or none of its operations are on the layout. */
+  const bindingFor = (entry: Extract<ImportEntry, { kind: 'layout' }>): ObBinding | undefined => {
+    const inBatch = importBatch.flatMap((e) =>
+      e.kind === 'garment' ? [{ garment: e.preview.garment, fileName: e.preview.source.fileName }] : [],
+    );
+    const seen = new Set(inBatch.map((c) => c.garment.id));
+    const saved = Object.values(project.garmentEdits)
+      .filter((g) => !seen.has(g.id))
+      .map((garment) => ({ garment }));
+    const ob = pickObForLayout(
+      { fileName: entry.preview.source.fileName, style: entry.preview.source.style },
+      [...inBatch, ...saved],
+    );
+    if (!ob) return undefined;
+    const lineLabel = entry.preview.source.lineNo != null
+      ? `Line ${entry.preview.source.lineNo}`
+      : entry.placement.lineName;
+    const binding = bindObToLayout(entry.placement.stations, ob, lineLabel);
+    return binding.matched > 0 ? binding : undefined;
+  };
+  const previewBinding = importPreview?.kind === 'layout' ? bindingFor(importPreview) : undefined;
+
   const commitEntry = (entry: ImportEntry): string => {
     if (entry.kind === 'garment') {
       const g = entry.preview.garment;
@@ -462,9 +247,15 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
       setGarmentId(g.id);
       return `${g.name} (${g.operations.length} ops)`;
     }
-    const twinStore = useTwin.getState();
-    const result = commitFloorImport(twinStore, entry.preview, entry.placement);
-    return `${entry.placement.lineName} (${result.workstationCount} stations)`;
+    const binding = bindingFor(entry);
+    // The stations point at this bulletin by id, so it has to be in the
+    // library before the line that references it.
+    if (binding) project.setGarmentEdit(binding.garment.id, binding.garment);
+    const result = commitFloorImport(useTwin.getState(), entry.preview, entry.placement, { binding });
+    const timing = binding
+      ? `${binding.matched} timed from ${binding.source.name}`
+      : 'no bulletin matched';
+    return `${entry.placement.lineName} (${result.workstationCount} stations, ${timing})`;
   };
 
   const commitImport = () => {
@@ -555,7 +346,7 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
             }))}
           />
           <div style={{ flex: 1 }}/>
-          <Button variant="secondary" size="sm" icon="+" onClick={() => setNewGarmentOpen(true)}>New garment</Button>
+          <Button variant="secondary" size="sm" icon="+" title="New garment" onClick={() => setNewGarmentOpen(true)}>New</Button>
           {/* Import from Excel — feeds an industry operation-breakdown sheet
               (any standard ERP-exported bulletin) through
               `parseGarmentXlsx` and previews the result in a confirm modal.
@@ -575,10 +366,11 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
             variant="secondary"
             size="sm"
             icon="⇣"
+            title="Import garments from Excel"
             onClick={() => importInputRef.current?.click()}
             disabled={importing}
           >
-            {importing ? 'Reading…' : 'Import Excel'}
+            {importing ? 'Reading…' : 'Import'}
           </Button>
           {/* Built-in edited rows expose a Reset that drops the override but
               keeps the garment in the picker — separate from the delete
@@ -587,13 +379,14 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
             <Button
               variant="secondary"
               size="sm"
+              title="Reset to built-in"
               onClick={async () => {
                 if (await confirm({ title: 'Reset garment', message: `Reset ${garment.name} back to its built-in defaults? Your edits will be discarded.`, confirmLabel: 'Reset' })) {
                   project.resetGarment(garmentId);
                 }
               }}
             >
-              Reset to built-in
+              Reset
             </Button>
           )}
           {/* Delete works for every garment — built-ins are hidden from the
@@ -601,6 +394,7 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
           <Button
             variant="danger"
             size="sm"
+            title="Delete garment"
             onClick={async () => {
               if (!(await confirm({ title: 'Delete garment', message: `Delete ${garment.name}?`, confirmLabel: 'Delete', variant: 'danger' }))) return;
               const remaining = garments.all.filter((g) => g.id !== garmentId);
@@ -613,7 +407,7 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
               setGarmentId(nextId);
             }}
           >
-            Delete garment
+            Delete
           </Button>
         </div>
         {hiddenIds.length > 0 && (
@@ -810,11 +604,6 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
         </div>
       </Card>
 
-      <div style={{ padding: 12, background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontSize: 12, color: SW_COLORS.muted, lineHeight: 1.5 }}>
-        Edits flow live to <strong style={{ color: SW_COLORS.ink }}>LiveSim</strong>, the <strong style={{ color: SW_COLORS.ink }}>Line Balance</strong> tab on Reports, the
-        <strong style={{ color: SW_COLORS.ink }}> Factory Twin's run-line</strong>, and the <strong style={{ color: SW_COLORS.ink }}>skill matrix</strong>. Total SAM auto-recomputes on every change.
-        Built-in garments restore their defaults via <em>Reset to built-in</em>; custom garments live entirely in your project file.
-      </div>
 
       {importError && (
         <div
@@ -890,6 +679,7 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
         <LayoutPreviewModal
           preview={importPreview.preview}
           placement={importPreview.placement}
+          binding={previewBinding}
           batchIndex={importBatchIndex}
           batchTotal={importBatch.length}
           onCancel={cancelImport}
@@ -1091,6 +881,7 @@ function ImportPreviewModal({
 function LayoutPreviewModal({
   preview,
   placement,
+  binding,
   onCancel,
   onConfirm,
   onSkip,
@@ -1100,6 +891,8 @@ function LayoutPreviewModal({
 }: {
   preview: ImportedFloor;
   placement: LayoutPlacement;
+  /** The bulletin timing this layout's stations, when one was found. */
+  binding?: ObBinding;
   onCancel: () => void;
   onConfirm: () => void;
   onSkip?: () => void;
@@ -1112,6 +905,12 @@ function LayoutPreviewModal({
     for (const s of placement.stations) byCat.set(s.catalogId, (byCat.get(s.catalogId) ?? 0) + 1);
     return Array.from(byCat.entries()).sort((a, b) => b[1] - a[1]);
   }, [placement.stations]);
+  // SMV each station will run at, parallel to `placement.stations`.
+  const stationSmv = useMemo(() => {
+    if (!binding) return null;
+    const smvById = new Map(binding.garment.operations.map((o) => [o.id, o.smv]));
+    return binding.opIdByStation.map((id) => (id ? smvById.get(id) ?? null : null));
+  }, [binding]);
 
   // Schematic dimensions
   const cellPx = 18;
@@ -1181,6 +980,21 @@ function LayoutPreviewModal({
           <Tag>{`File: ${preview.source.fileName}`}</Tag>
         </div>
 
+        <div style={{ padding: '8px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, alignItems: 'center', borderBottom: `1px solid ${SW_COLORS.line}` }}>
+          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, marginRight: 6, letterSpacing: '0.5px' }}>TIMES</span>
+          {binding ? (
+            <>
+              <Tag>{`From: ${binding.source.name}`}</Tag>
+              <Tag>{`${binding.matched} of ${placement.stations.length} stations matched`}</Tag>
+              <Tag>{`${binding.unplacedOps.length} bulletin operations with no station`}</Tag>
+            </>
+          ) : (
+            <span style={{ fontSize: 11, color: SW_COLORS.warn }}>
+              No operation bulletin matched. Stations will run at catalogue default cycles.
+            </span>
+          )}
+        </div>
+
         {counts.length > 0 && (
           <div style={{ padding: '8px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: `1px solid ${SW_COLORS.line}` }}>
             <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, marginRight: 6, alignSelf: 'center', letterSpacing: '0.5px' }}>MIX</span>
@@ -1248,7 +1062,7 @@ function LayoutPreviewModal({
           <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.body, fontSize: 12 }}>
             <thead>
               <tr style={{ background: SW_COLORS.paperDeep }}>
-                {['Seq', 'Code', 'Name', 'Raw M/C', 'Mapped', 'Side'].map((h) => (
+                {['Seq', 'Code', 'Name', ...(stationSmv ? ['SMV'] : []), 'Raw M/C', 'Mapped', 'Side'].map((h) => (
                   <th key={h} style={{
                     padding: '6px 8px', textAlign: 'left',
                     fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700,
@@ -1260,11 +1074,16 @@ function LayoutPreviewModal({
               </tr>
             </thead>
             <tbody>
-              {placement.stations.map((s) => (
+              {placement.stations.map((s, i) => (
                 <tr key={s.seq} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
                   <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, color: SW_COLORS.muted, width: 32 }}>{s.seq + 1}</td>
                   <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{s.codeNo ?? ''}</td>
                   <td style={{ padding: '4px 8px' }}>{s.name}</td>
+                  {stationSmv && (
+                    <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11, color: stationSmv[i] == null ? SW_COLORS.warn : SW_COLORS.ink }}>
+                      {stationSmv[i] == null ? 'no match' : stationSmv[i]!.toFixed(3)}
+                    </td>
+                  )}
                   <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>{s.rawMachine}</td>
                   <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{s.catalogId}</td>
                   <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>{s.side}</td>
@@ -1276,7 +1095,7 @@ function LayoutPreviewModal({
 
         <div style={{ padding: '12px 18px', borderTop: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'flex', alignItems: 'center', justifyContent: 'space-between', gap: 12 }}>
           <div style={{ fontSize: 11, color: SW_COLORS.muted, maxWidth: 420 }}>
-            Confirming adds a new SewingLine + {placement.stations.length} workstations to the canonical Twin, placed to the right of whatever is already on the floor.
+            Adds the line and its {placement.stations.length} stations with a Source, Sink and operator pool, ready to run.
           </div>
           <div style={{ display: 'flex', gap: 8 }}>
             <Button variant="secondary" size="sm" onClick={onCancel}>Cancel</Button>
@@ -1378,330 +1197,3 @@ const headerField: React.CSSProperties = {
   fontWeight: 700,
   outline: 'none',
 };
-
-// ── Skill matrix ────────────────────────────────────────────────────────────
-
-interface SkillMatrixPanelProps {
-  operators: SeededOperator[];
-  garmentId: string;
-  setGarmentId: (id: string) => void;
-  skillMatrix: Record<string, Record<string, number>>;
-  setSkill: (operatorId: string, opId: string, efficiency: number) => void;
-  resetSkillMatrix: () => void;
-  garments: EffectiveGarments;
-}
-
-/**
- * Operator × Operation efficiency grid for one garment template.
- *
- * Defaults: an operator gets 1.0 efficiency on operations whose required
- * skill is in their archetype's primarySkills, 0.7 on secondarySkills, and
- * 0 (= cannot perform) otherwise. The user overrides any cell — overrides
- * persist to the project store.
- *
- * Cell colour is a heat: green (≥0.9) → yellow (0.6–0.9) → red (<0.6) →
- * grey (0 = ineligible). Click any cell to type a new value.
- */
-function SkillMatrixPanel({
-  operators, garmentId, setGarmentId, skillMatrix, setSkill, resetSkillMatrix, garments,
-}: SkillMatrixPanelProps) {
-  const confirm = useConfirm();
-  const garment = garments.byId[garmentId] ?? garments.all[0];
-  const ops = garment.operations;
-
-  function defaultEfficiency(arch: WorkerArchetype, opSkill: SkillId): number {
-    if (arch.primarySkills.includes(opSkill)) return arch.baseEfficiency;
-    if (arch.secondarySkills?.includes(opSkill)) return arch.baseEfficiency * 0.7;
-    return 0;
-  }
-
-  function effFor(op: SeededOperator, operation: Operation): number {
-    const stored = skillMatrix[op.id]?.[operation.id];
-    if (stored !== undefined) return stored;
-    return defaultEfficiency(op.archetype, operation.skill);
-  }
-
-  function cellColor(eff: number): string {
-    if (eff <= 0) return SW_COLORS.paperEdge;
-    if (eff < 0.6) return `${SW_COLORS.alarm}60`;
-    if (eff < 0.9) return `${SW_COLORS.thread}60`;
-    return `${SW_COLORS.ok}80`;
-  }
-
-  return (
-    <div style={{ display:'flex', flexDirection:'column', gap: 14 }}>
-      <div style={{ display:'flex', alignItems:'center', gap: 14, flexWrap: 'wrap' }}>
-        <div style={{ display:'flex', alignItems:'center', gap: 8 }}>
-          <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>GARMENT</span>
-          <ToggleGroup value={garmentId} onChange={setGarmentId} options={garments.all.map(g => ({ value: g.id, label: g.name.replace(/\s*\(.*\)/, '') }))}/>
-        </div>
-        <div style={{ flex: 1 }}/>
-        <div style={{ display:'flex', alignItems:'center', gap: 14, fontSize: 11, fontFamily: SW_FONTS.mono, color: SW_COLORS.muted }}>
-          <LegendChip color={SW_COLORS.ok} label="≥90"/>
-          <LegendChip color={SW_COLORS.thread} label="60–89"/>
-          <LegendChip color={SW_COLORS.alarm} label="<60"/>
-          <LegendChip color={SW_COLORS.paperEdge} label="—"/>
-        </div>
-        <Button variant="ghost" size="sm" onClick={async () => {
-          if (await confirm({ title: 'Reset skill matrix', message: 'Reset every skill cell to the role defaults?', confirmLabel: 'Reset' })) resetSkillMatrix();
-        }}>Reset to defaults</Button>
-      </div>
-
-      <Card padding={0} style={{ overflow: 'auto', maxHeight: 'calc(100vh - 280px)' }}>
-        <table style={{ borderCollapse: 'collapse', fontFamily: SW_FONTS.body, fontSize: 11 }}>
-          <thead>
-            <tr style={{ background: SW_COLORS.paperDeep }}>
-              <th style={{ position: 'sticky', left: 0, background: SW_COLORS.paperDeep, padding: '8px 10px', textAlign: 'left', minWidth: 200, borderRight: `1px solid ${SW_COLORS.line}`, fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '1px', zIndex: 1 }}>OPERATOR</th>
-              {ops.map((op) => (
-                <th key={op.id} title={`${op.code} ${op.name} · ${op.smv.toFixed(2)} min · ${op.machineCode}`}
-                  style={{ padding: '8px 4px', textAlign: 'center', minWidth: 56, fontFamily: SW_FONTS.mono, fontSize: 9, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px', borderBottom: `1px solid ${SW_COLORS.line}`, verticalAlign: 'bottom' }}>
-                  <div>{op.code ?? ''}</div>
-                  <div style={{ fontSize: 8, color: SW_COLORS.faint, marginTop: 2 }}>{op.machineCode}</div>
-                </th>
-              ))}
-            </tr>
-          </thead>
-          <tbody>
-            {operators.map((op) => (
-              <tr key={op.id} style={{ borderBottom: `1px solid ${SW_COLORS.line}` }}>
-                <td style={{ position: 'sticky', left: 0, background: SW_COLORS.paper, padding: '6px 10px', borderRight: `1px solid ${SW_COLORS.line}`, zIndex: 1 }}>
-                  <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
-                    <span style={{ width: 18, height: 18, borderRadius: 4, background: op.archetype.color, color: '#fff', display: 'inline-flex', alignItems: 'center', justifyContent: 'center', fontSize: 11 }}>{op.archetype.icon}</span>
-                    <div>
-                      <div style={{ fontSize: 11, fontWeight: 700 }}>{op.id} {op.name}</div>
-                      <div style={{ fontSize: 9, color: SW_COLORS.muted, fontFamily: SW_FONTS.mono }}>{op.archetype.label}</div>
-                    </div>
-                  </div>
-                </td>
-                {ops.map((operation) => {
-                  const eff = effFor(op, operation);
-                  return (
-                    <td key={operation.id} style={{ padding: 1, textAlign: 'center', background: cellColor(eff) }}>
-                      <NumberInput
-                        min={0} max={120} step={5} value={Math.round(eff * 100)}
-                        aria-label={`Skill %`}
-                        onChange={(v) => { if (v !== undefined) setSkill(op.id, operation.id, v / 100); }}
-                        style={{
-                          width: '100%', padding: '4px 0', textAlign: 'center',
-                          background: 'transparent', border: 'none',
-                          fontFamily: SW_FONTS.mono, fontWeight: 700, fontSize: 10,
-                          color: eff > 0 ? SW_COLORS.ink : SW_COLORS.faint,
-                        }}
-                        title={`${op.id} on ${operation.code}: ${(eff * 100).toFixed(0)}% efficiency`}
-                      />
-                    </td>
-                  );
-                })}
-              </tr>
-            ))}
-          </tbody>
-        </table>
-      </Card>
-
-      <div style={{ padding: 12, background: SW_COLORS.paper, border: `1px solid ${SW_COLORS.line}`, borderRadius: SW_RADIUS.sm, fontSize: 12, color: SW_COLORS.muted, lineHeight: 1.5 }}>
-        Cells default to the operator's archetype: <strong style={{ color: SW_COLORS.ink }}>primary skills = base efficiency</strong> (≈85% for sewing operators), <strong style={{ color: SW_COLORS.ink }}>secondary = 70% of base</strong>, otherwise 0 (ineligible). Override any cell to capture per-operator know-how — values persist locally and travel with the .swproj file.
-      </div>
-    </div>
-  );
-}
-
-function LegendChip({ color, label }: { color: string; label: string }) {
-  return (
-    <span style={{ display: 'inline-flex', alignItems: 'center', gap: 4 }}>
-      <span style={{ width: 10, height: 10, borderRadius: 2, background: color }}/>
-      {label}
-    </span>
-  );
-}
-
-// ── Demo seeding helpers — deterministic so the table is stable per session ──
-
-interface SeededOperator {
-  id: string;
-  name: string;
-  archetype: WorkerArchetype;
-  eff: number;
-  sam: string;
-  /** Parent sewing-line name when the row came from a real Twin operator;
-   *  blank for synthesised demo rows. */
-  lineName?: string;
-  /** "3 stns · rotation", "1 stn · primary", etc. — empty for demo rows. */
-  assignmentSummary?: string;
-  /** Per-station breakdown for twin-derived rows — drives the expandable
-   *  "stations" column so the user sees which workstations an operator
-   *  covers and at what share %. Empty / missing for demo rows. */
-  stationDetails?: Array<{ wsName: string; sharePct: number; role: string }>;
-  /** True when this operator's non-rotation shareFrac sums to > 1.0 —
-   *  surfaced as a ⚠ OVERALLOCATED chip. The validator emits a matching
-   *  warning string in `validateTwin`. */
-  overallocated?: boolean;
-}
-
-/** Map an Operator entity from the active twin onto the row shape the
- *  Operators table already knows how to render. Each operator's
- *  Assignment rows are summarised into a single "N stns · <role>" tag
- *  so the user sees fixed-station vs rotation membership at a glance. */
-function operatorsFromTwin(
-  operators: TwinOperator[],
-  assignments: Assignment[],
-  lines: SewingLine[],
-  workstationsById: Map<string, { id: string; name: string }>,
-): SeededOperator[] {
-  const linesById = new Map(lines.map((l) => [l.id, l]));
-  const byOperator = new Map<string, Assignment[]>();
-  for (const a of assignments) {
-    const arr = byOperator.get(a.operatorId) ?? [];
-    arr.push(a);
-    byOperator.set(a.operatorId, arr);
-  }
-  return operators.map((op, i) => {
-    const role = (op.archetypeId as WorkerRole) ?? 'sew_op';
-    const archetype = WORKER_ARCHETYPES[role] ?? WORKER_ARCHETYPES.sew_op;
-    const myAssignments = byOperator.get(op.id) ?? [];
-    // Pick the dominant assignment role for the summary tag. Rotation wins
-    // when any rotation_member assignment exists, otherwise the first
-    // assignment's role; falls back to "floater" for un-assigned operators.
-    const dominant =
-      myAssignments.find((a) => a.role === 'rotation_member')?.role ??
-      myAssignments[0]?.role ??
-      (op.floats ? 'floater' : 'floater');
-    const summary =
-      myAssignments.length === 0
-        ? op.floats
-          ? '— · floater'
-          : '— · unassigned'
-        : `${myAssignments.length} stn${myAssignments.length === 1 ? '' : 's'} · ${dominant}`;
-    // Per-station breakdown — drives the expandable list under the summary.
-    const stationDetails = myAssignments.map((a) => {
-      const sharePct =
-        a.shareFrac !== undefined
-          ? Math.round(a.shareFrac * 100)
-          : a.role === 'primary'
-            ? 100
-            : a.role === 'helper'
-              ? 30
-              : a.role === 'rotation_member'
-                ? Math.round(100 / Math.max(1, myAssignments.length))
-                : 0;
-      return {
-        wsName: workstationsById.get(a.wsId)?.name ?? a.wsId,
-        sharePct,
-        role: a.role,
-      };
-    });
-    // Σ shareFrac across non-rotation assignments. Rotation members are
-    // expected to sum near 1 (one operator splits attention across their
-    // rotation by design) so they don't count toward over-allocation.
-    const nonRotSum = myAssignments
-      .filter((a) => a.role !== 'rotation_member')
-      .reduce((s, a) => s + (a.shareFrac ?? (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0)), 0);
-    const overallocated = nonRotSum > 1.001;
-    // Average skill efficiency × 100 ⇒ display %.
-    const avgEff =
-      op.skills.length > 0
-        ? Math.round(
-            (op.skills.reduce((s, sk) => s + sk.efficiency, 0) / op.skills.length) * 100,
-          )
-        : Math.round(archetype.baseEfficiency * 100);
-    return {
-      id: `OPR-${String(i + 1).padStart(2, '0')}`,
-      name: op.name,
-      archetype,
-      eff: avgEff,
-      sam: '—',
-      lineName: op.lineId ? linesById.get(op.lineId)?.name ?? '—' : '—',
-      assignmentSummary: summary,
-      stationDetails,
-      overallocated,
-    };
-  });
-}
-
-const NAMES = ['Aanya','Rohan','Mei','Kofi','Lara','Yui','Tariq','Sara','Rafa','Nina','Diego','Eun','Jamal','Priya','Ola','Ravi','Lin','Pavel','Kemi','Iris','Boun','Asha','Nova','Tomi','Hina','Beto','Hai','Anya','Karim','Joon'];
-
-/**
- * Distribute operators across worker archetypes proportional to each
- * archetype's typical headcount on a 100-operator finishing-room. Counts
- * sum to ~30 to keep the table readable.
- */
-const ROLE_DISTRIBUTION: Partial<Record<WorkerArchetype['role'], number>> = {
-  sew_op: 14, helper: 3, cutter: 2, spreader: 1, bundler: 2,
-  qc_inline: 2, qc_final: 1, presser: 2, packer: 2, material_handler: 2,
-  supervisor: 1,
-};
-
-/**
- * Build a synthetic operator roster sized to match the factory headcount
- * configured across all lines. Roles are scaled proportionally from
- * `ROLE_DISTRIBUTION`; rounding drift is absorbed by the largest role
- * (sew_op) so the total exactly equals `target`. Falls back to the
- * unscaled distribution when `target` is 0 / undefined.
- */
-function buildOperators(target?: number): SeededOperator[] {
-  const baseSum = Object.values(ROLE_DISTRIBUTION).reduce((s, v) => s + (v || 0), 0);
-  const scale = target && baseSum ? target / baseSum : 1;
-  const counts = new Map<WorkerArchetype['role'], number>();
-  let assigned = 0;
-  for (const archetype of ALL_WORKER_ARCHETYPES) {
-    const base = ROLE_DISTRIBUTION[archetype.role] ?? 0;
-    if (base === 0) continue;
-    const scaled = scale === 1 ? base : Math.max(1, Math.round(base * scale));
-    counts.set(archetype.role, scaled);
-    assigned += scaled;
-  }
-  // Absorb rounding drift into sew_op so the total matches the factory.
-  if (target && assigned !== target) {
-    const drift = target - assigned;
-    const sewCount = counts.get('sew_op') ?? 0;
-    counts.set('sew_op', Math.max(1, sewCount + drift));
-  }
-  const out: SeededOperator[] = [];
-  let n = 1;
-  for (const archetype of ALL_WORKER_ARCHETYPES) {
-    const count = counts.get(archetype.role) ?? 0;
-    for (let i = 0; i < count; i++) {
-      const idx = (n - 1) % NAMES.length;
-      // Deterministic eff variation seeded by id.
-      const eff = Math.round(archetype.baseEfficiency * 100 + ((n * 17) % 25) - 12);
-      out.push({
-        id: `OPR-${n.toString().padStart(2, '0')}`,
-        name: NAMES[idx],
-        archetype,
-        eff: Math.max(40, Math.min(99, eff)),
-        sam: (1.4 + ((n * 13) % 17) * 0.08).toFixed(2),
-      });
-      n++;
-    }
-  }
-  return out;
-}
-
-interface MachineType {
-  spec: MachineSpec;
-  /** How many of this machine type the factory runs. */
-  count: number;
-}
-
-/**
- * Headcount per machine type for a balanced sewing line. Proportions match
- * the reference SMV sheet (4× 4OL, 10× SNL, 1× FB, 1× BS, 4× FL, 1× BH).
- */
-const MACHINE_DISTRIBUTION: Partial<Record<MachineSpec['code'], number>> = {
-  SNL: 10, '4OL': 4, FL: 4, FB: 1, KS: 1, BH: 1, BS: 1, BT: 1,
-  CUT: 2, SPR: 1, FUSE: 1, PRESS: 3, EMB: 1, INSP: 2,
-};
-
-/**
- * The machine tab is a catalog of the machine *types* on the floor — one card
- * per type with a count — rather than a per-unit inventory. Health, run-hours
- * and per-unit identity are intentionally out of scope for this tool.
- */
-function buildMachineTypes(): MachineType[] {
-  const out: MachineType[] = [];
-  for (const spec of ALL_MACHINES) {
-    if (spec.isManual) continue;
-    const count = MACHINE_DISTRIBUTION[spec.code] ?? 0;
-    if (count > 0) out.push({ spec, count });
-  }
-  return out;
-}

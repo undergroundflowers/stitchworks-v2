@@ -27,11 +27,12 @@
  *                              chromosomes. Slowest but converges past
  *                              local minima of the greedy heuristics.
  *
- * All balancers accept an optional `opEfficiency` map (op-id → 0.5..1.5)
- * derived from the skill matrix. When supplied, station loads are
- * computed against the *effective* SMV (= nominal ÷ efficiency), so
- * slower operators get lighter loads. Without it the balancer runs at
- * nominal SMV — same numbers an IE textbook would print.
+ * All balancers accept an optional `opEfficiency` map (op-id → 0.5..1.5).
+ * When supplied, station loads are computed against the *effective* SMV
+ * (= nominal ÷ efficiency), so slower work gets lighter loads. Without it
+ * the balancer runs at nominal SMV — same numbers an IE textbook would
+ * print. The app's line balance passes nothing: a proposed station has no
+ * operator yet, so its efficiency is unknown until it is placed.
  *
  * Pure logic. No React, no DOM, no Zustand. Safe to call from the engine,
  * the Reports page, or a selfcheck script.
@@ -73,7 +74,7 @@ export interface OperatorBucket {
 export interface BalancerOptions {
   ops: Operation[];
   operatorCount: number;
-  /** Optional per-op efficiency from the skill matrix; missing ⇒ 1.0. */
+  /** Optional per-op efficiency multiplier; missing ⇒ 1.0. */
   opEfficiency?: Record<string, number>;
   /** RNG seed for stochastic heuristics (COMSOAL, GA). Deterministic
    *  by default so the selfcheck is repeatable. */
@@ -99,9 +100,9 @@ export const DEFAULT_BALANCER: BalancerId = 'rpw';
 // SHARED HELPERS
 // ============================================================================
 
-/** Effective SMV under the skill matrix. `eff` is clamped to [0.5, 1.5]
- *  here too so a stale matrix entry can't blow up the balancer math
- *  (same clamp as the engine's `cycleMinFor`). */
+/** Effective SMV under the efficiency map. `eff` is clamped to [0.5, 1.5]
+ *  here too so a wild entry can't blow up the balancer math (same clamp as
+ *  the engine's `cycleMinFor`). */
 function effectiveSmv(op: Operation, opEfficiency?: Record<string, number>): number {
   const raw = opEfficiency?.[op.id];
   if (raw == null || !Number.isFinite(raw)) return op.smv;

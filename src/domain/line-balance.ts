@@ -30,6 +30,7 @@
 import type { GarmentTemplate } from './garments';
 import type { Operation } from './operations';
 import type { Twin, Workstation } from './twin';
+import { stationEfficiency } from './twin';
 import { serversFor } from '../simulation/pml-engine';
 import { balance, DEFAULT_BALANCER } from './balancers';
 import {
@@ -54,11 +55,12 @@ export interface BalanceStation {
   /** Bulletin SMV, min/piece, exactly as authored. The bar's base height. */
   nominalMin: number;
   /**
-   * Skill-matrix multiplier for this op (1 = on standard, >1 faster).
-   * Clamped to [0.5, 1.5] — the same clamp `cycleMinFor` applies, so the
-   * chart cannot claim a speed the engine will not run.
+   * The station's operator efficiency (1 = on standard, >1 faster), from
+   * `stationEfficiency` — the station's own figure, else its line's. The
+   * same clamp `cycleMinFor` applies, so the chart cannot claim a speed the
+   * engine will not run.
    */
-  skillEff: number;
+  efficiency: number;
   /**
    * Operator attendance at this station, 0..1. Summed `Assignment.shareFrac`
    * capped at 1, matching the engine's `buildShareFactorMap`. 1 = the station
@@ -169,13 +171,6 @@ export interface TaktReading {
 // ============================================================================
 // RESOLUTION — mirrors the engine, deliberately
 // ============================================================================
-
-/** The engine's skill clamp. Duplicated rather than exported from the engine
- *  so this module states the rule it relies on out loud. */
-function clampSkill(raw: number | undefined): number {
-  if (raw == null || !Number.isFinite(raw) || raw <= 0) return 1;
-  return Math.min(1.5, Math.max(0.5, raw));
-}
 
 /**
  * Per-workstation attendance, 0..1. Sum every assignment's `shareFrac` at the
@@ -291,8 +286,6 @@ export interface BuildLineBalanceOptions {
   /** Effective garments — built-ins with the project's edits applied. Passing
    *  the raw built-ins here is the bug that made imported bulletins invisible. */
   garmentsById: Record<string, GarmentTemplate>;
-  /** Per-op skill multipliers from `efficiencyFromSkillMatrix`. */
-  opEfficiency?: Record<string, number>;
 }
 
 /**
@@ -305,7 +298,7 @@ export interface BuildLineBalanceOptions {
  * the run.
  */
 export function buildLineBalance(opts: BuildLineBalanceOptions): LineBalance {
-  const { twin, lineId, garmentsById, opEfficiency } = opts;
+  const { twin, lineId, garmentsById } = opts;
   const line = (twin.lines ?? []).find((l) => l.id === lineId);
   const members = twin.workstations.filter((w) => w.lineId === lineId);
 
@@ -364,11 +357,11 @@ export function buildLineBalance(opts: BuildLineBalanceOptions): LineBalance {
       continue;
     }
 
-    const skillEff = clampSkill(opEfficiency?.[opId]);
+    const efficiency = stationEfficiency(ws, line);
     const shareFrac = shares.get(ws.id) ?? 1;
     const servers = Math.max(1, serversFor(ws, garmentsById));
     const staffed = staff.get(ws.id) ?? Math.max(0, ws.resources.workersRequired ?? 0);
-    const workContentMin = op.smv / skillEff / (shareFrac > 0 ? shareFrac : 1);
+    const workContentMin = op.smv / efficiency / (shareFrac > 0 ? shareFrac : 1);
     const cycleMin = workContentMin / servers;
 
     stations.push({
@@ -377,7 +370,7 @@ export function buildLineBalance(opts: BuildLineBalanceOptions): LineBalance {
       opId,
       op,
       nominalMin: op.smv,
-      skillEff,
+      efficiency,
       shareFrac,
       servers,
       staffed,

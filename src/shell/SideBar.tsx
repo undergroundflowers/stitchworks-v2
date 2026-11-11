@@ -56,8 +56,10 @@ export function SideBar() {
           .find(([prefix]) => location.pathname.startsWith(prefix))?.[1]
         ?? 'menu';
 
-  // Settings is rendered separately, pinned to the bottom.
-  const mainRoutes = ROUTES.filter((r) => r.kind === 'main' && r.id !== 'settings');
+  // Help and Settings are rendered separately, pinned to the bottom.
+  const mainRoutes = ROUTES.filter(
+    (r) => r.kind === 'main' && r.id !== 'settings' && r.id !== 'help',
+  );
 
   return (
     <div
@@ -126,12 +128,19 @@ export function SideBar() {
         ))}
       </div>
 
-      {/* Settings — pinned to the bottom. */}
-      <div style={{ borderTop: `1px solid ${SW_COLORS.lineSoft}`, padding: '8px 6px 10px' }}>
+      {/* Help and Settings — pinned to the bottom, glyph only. */}
+      <div style={{ borderTop: `1px solid ${SW_COLORS.lineSoft}`, padding: '8px 6px 10px', display: 'flex', flexDirection: 'column', gap: 2 }}>
+        <NavTile
+          route={ROUTES.find((r) => r.id === 'help')!}
+          active={currentRoute === 'help'}
+          onNavigate={() => navigate('/help')}
+          iconOnly
+        />
         <NavTile
           route={ROUTES.find((r) => r.id === 'settings')!}
           active={currentRoute === 'settings'}
           onNavigate={() => navigate('/settings')}
+          iconOnly
         />
       </div>
     </div>
@@ -142,11 +151,13 @@ interface NavTileProps {
   route: RouteDef;
   active: boolean;
   onNavigate: () => void;
+  /** Glyph only, no caption — the name still shows on hover and is read out. */
+  iconOnly?: boolean;
 }
 
 /** One row in the rail: icon + tiny label, with the active surface marked by a
  *  brand bar bleeding off the left edge. */
-function NavTile({ route, active, onNavigate }: NavTileProps) {
+function NavTile({ route, active, onNavigate, iconOnly = false }: NavTileProps) {
   return (
     <button
       type="button"
@@ -171,7 +182,7 @@ function NavTile({ route, active, onNavigate }: NavTileProps) {
         background: active ? SW_COLORS.brandLite : 'transparent',
         border: 'none',
         cursor: 'pointer',
-        padding: '8px 0 6px',
+        padding: iconOnly ? '8px 0' : '8px 0 6px',
         color: active ? SW_COLORS.brandText : alpha(SW_COLORS.ink, 0.75),
         fontFamily: SW_FONTS.mono,
         fontSize: 9,
@@ -201,17 +212,19 @@ function NavTile({ route, active, onNavigate }: NavTileProps) {
         />
       )}
       <span style={{ fontSize: 18, lineHeight: 1 }}>{route.icon}</span>
-      <span
-        style={{
-          textAlign: 'center',
-          whiteSpace: 'nowrap',
-          maxWidth: SIDEBAR_WIDTH - 8,
-          overflow: 'hidden',
-          textOverflow: 'ellipsis',
-        }}
-      >
-        {route.shortLabel ?? route.label}
-      </span>
+      {!iconOnly && (
+        <span
+          style={{
+            textAlign: 'center',
+            whiteSpace: 'nowrap',
+            maxWidth: SIDEBAR_WIDTH - 8,
+            overflow: 'hidden',
+            textOverflow: 'ellipsis',
+          }}
+        >
+          {route.shortLabel ?? route.label}
+        </span>
+      )}
     </button>
   );
 }

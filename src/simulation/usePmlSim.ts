@@ -25,7 +25,6 @@ import type { GarmentTemplate } from '../domain';
 import type { PmlSimResult } from './pml-engine';
 import { emptyPmlSimState, type PmlTwinView } from './pml-to-sim-state';
 import type { SimState } from './sim-state';
-import { useProject } from '../store/project';
 import { useSimScope } from '../store/simScope';
 import { useGarments } from '../store/garments';
 import { simSpecKey, type SimSpec } from './sim-spec';
@@ -58,7 +57,6 @@ export interface UseSimResult {
   state: SimState;
   playing: boolean;
   speed: number;
-  mode: 'virtual' | 'realtime';
   setPlaying: (p: boolean) => void;
   setSpeed: (s: number) => void;
   reset: () => void;
@@ -139,7 +137,6 @@ export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
   const setSpeed = useSimSession((s) => s.setSpeed);
   const sessionReset = useSimSession((s) => s.reset);
   const sessionStep = useSimSession((s) => s.step);
-  const mode = useProject((s) => s.time.executionMode);
 
   const slot = session?.runs[0];
   const fallbackView = useMemo<PmlTwinView>(
@@ -151,7 +148,6 @@ export function usePmlSim(twin: Twin, opts?: UsePmlSimOpts): UsePmlSimResult {
     state: slot?.state ?? emptyPmlSimState(),
     playing,
     speed,
-    mode,
     setPlaying,
     setSpeed,
     reset: sessionReset,

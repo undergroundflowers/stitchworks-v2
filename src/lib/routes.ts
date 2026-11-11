@@ -3,12 +3,13 @@
  *
  * Six of them, deliberately:
  *
- *   RESOURCES what the factory is made of — operators, machines, the garment
- *             operation libraries and the skill matrix
+ *   RESOURCES the garment operation bulletins — each style's operations,
+ *             their SMVs and the machine each one runs on
  *   BUILD     author the line
  *   RUN       watch it run
  *   INSIGHTS  find out what's wrong and fix it
  *   LAB       build any queueing system and analyse it, factory or not
+ *   HELP      the queueing-theory reference, shown once (the `?` tab)
  *   SETTINGS  project + units
  *
  * The array used to hold twelve entries for six tabs, because every
@@ -46,6 +47,7 @@ export const ROUTES: RouteDef[] = [
   { path: '/sim',       id: 'sim',       label: 'Run',      icon: '▷', kind: 'main' },
   { path: '/insights',  id: 'insights',  label: 'Insights', icon: '◎', kind: 'main' },
   { path: '/lab',       id: 'lab',       label: 'Queue Lab', shortLabel: 'Lab', icon: '∑', kind: 'main' },
+  { path: '/help',      id: 'help',      label: 'Help',     icon: '?', kind: 'main' },
   { path: '/settings',  id: 'settings',  label: 'Settings', icon: '⚙', kind: 'main' },
 ];
 

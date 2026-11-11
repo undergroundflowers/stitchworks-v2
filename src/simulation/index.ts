@@ -27,7 +27,7 @@ export type {
   StationHistoryPoint,
 } from './sim-state';
 
-export { buildSimConfig, efficiencyFromSkillMatrix, type BuildModelOptions } from './model';
+export { buildSimConfig, type BuildModelOptions } from './model';
 
 export {
   buildSimConfigFromTwin,

@@ -20,6 +20,8 @@ interface ButtonProps {
   full?: boolean;
   disabled?: boolean;
   style?: CSSProperties;
+  /** Hover text — the full name when the label is a short form. */
+  title?: string;
 }
 
 /**
@@ -61,6 +63,7 @@ export function Button({
   full,
   disabled,
   style,
+  title,
 }: ButtonProps) {
   const [hov, setHov] = useState(false);
   const v = variantColors(variant);
@@ -71,6 +74,7 @@ export function Button({
       onMouseEnter={() => setHov(true)}
       onMouseLeave={() => setHov(false)}
       disabled={disabled}
+      title={title}
       style={{
         background: hov && !disabled ? v.bgHov : v.bg,
         color: v.fg,

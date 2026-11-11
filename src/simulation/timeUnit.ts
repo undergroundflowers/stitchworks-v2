@@ -24,6 +24,15 @@ const SECONDS_PER: Record<ModelTimeUnit, number> = {
   day: 86_400,
 };
 
+/**
+ * The unit the engine's clock actually counts in. `SimState.time`, every
+ * sample and every frame of a recorded run is in sim MINUTES, whatever the
+ * project's `modelTimeUnit` says — the engine never reads that setting. Any
+ * display of a run's time must use this, or a project set to 'second' shows a
+ * full 480-minute shift as "8 min".
+ */
+export const ENGINE_TIME_UNIT: ModelTimeUnit = 'minute';
+
 /** Number of real seconds in one tick of the given model-time unit. */
 export function unitToSeconds(unit: ModelTimeUnit): number {
   return SECONDS_PER[unit];
@@ -140,7 +149,9 @@ export function simDayNumber(
   shiftDurationMin: number,
 ): number {
   const tMin = (t * SECONDS_PER[unit]) / 60;
-  return Math.max(1, Math.floor(tMin / Math.max(1, shiftDurationMin)) + 1);
+  // Ceil, not floor + 1: the last instant of a shift belongs to the day that
+  // is ending. A run parked on its final frame read "Day 2" otherwise.
+  return Math.max(1, Math.ceil(tMin / Math.max(1, shiftDurationMin)));
 }
 
 /**
@@ -153,8 +164,12 @@ export function shiftProgressPct(
   shiftDurationMin: number,
 ): number {
   const tMin = (t * SECONDS_PER[unit]) / 60;
-  const inShift = tMin % Math.max(1, shiftDurationMin);
-  return Math.min(100, (inShift / Math.max(1, shiftDurationMin)) * 100);
+  const shift = Math.max(1, shiftDurationMin);
+  const inShift = tMin % shift;
+  // Exactly on a shift boundary (and not at t = 0) is the END of a shift:
+  // 100 %, not the 0 % the modulo gives.
+  if (inShift === 0 && tMin > 0) return 100;
+  return Math.min(100, (inShift / shift) * 100);
 }
 
 /**

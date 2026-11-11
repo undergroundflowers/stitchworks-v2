@@ -19,7 +19,6 @@ import type { PmlSimResult } from './pml-engine';
 import { emptyPmlSimState, type PmlTwinView } from './pml-to-sim-state';
 import type { SimState, StationView } from './sim-state';
 import type { BuildFromTwinMeta } from './model-from-twin';
-import { useProject } from '../store/project';
 import { useSimScope } from '../store/simScope';
 import { useGarments } from '../store/garments';
 import { simSpecKey, type SimSpec } from './sim-spec';
@@ -98,7 +97,6 @@ export function useMultiPmlSim(
   const setSpeed = useSimSession((s) => s.setSpeed);
   const reset = useSimSession((s) => s.reset);
   const step = useSimSession((s) => s.step);
-  const mode = useProject((s) => s.time.executionMode);
 
   const states = useMemo<SimState[]>(
     () => lineTwins.map((_, i) => session?.runs[i]?.state ?? emptyPmlSimState()),
@@ -122,7 +120,7 @@ export function useMultiPmlSim(
     [session, lineTwins],
   );
 
-  return { states, views, results, playing, speed, mode, setPlaying, setSpeed, reset, step };
+  return { states, views, results, playing, speed, setPlaying, setSpeed, reset, step };
 }
 
 // ============================================================================

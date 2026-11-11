@@ -34,7 +34,6 @@ import {
   normalizeStationType,
   type StationType,
 } from '../domain/stationTypes';
-import { apparelLabelForKind } from '../domain/apparelPresets';
 import type { StationArt } from '../domain/station-art';
 import { readStationArtFile } from '../lib/import-station-svg';
 import {
@@ -297,10 +296,7 @@ export function StationTypeDialog({
               variant="light"
               size="sm"
               width="100%"
-              options={SELECTABLE_BLOCK_KINDS.map((k) => ({
-                value: k,
-                label: `${apparelLabelForKind(k)} · ${k}`,
-              }))}
+              options={SELECTABLE_BLOCK_KINDS.map((k) => ({ value: k, label: k }))}
             />
             <div style={{ marginTop: 4, fontSize: 10, color: SW_COLORS.muted, lineHeight: 1.45 }}>
               {PML_BLOCK_LIBRARY[draft.kind].blurb}

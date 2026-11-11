@@ -34,7 +34,6 @@ import {
   type BalanceSuggestion,
   type SuggestionSeverity,
 } from '../domain';
-import { efficiencyFromSkillMatrix } from '../simulation';
 import { getBlockKind } from '../domain/pml';
 import { useProject } from '../store/project';
 import { useGarments } from '../store/garments';
@@ -50,7 +49,6 @@ export function LineBalancePanel({ lineId }: LineBalancePanelProps) {
   const twin = useTwin(selectActiveTwin);
   const setBlock = useTwin((s) => s.setBlock);
   const garments = useGarments();
-  const skillMatrix = useProject((s) => s.skillMatrix);
   const shiftMin = useProject((s) => s.time.shiftDurationMin);
 
   /**
@@ -66,19 +64,9 @@ export function LineBalancePanel({ lineId }: LineBalancePanelProps) {
   const [targetPieces, setTargetPieces] = useState<number | undefined>(undefined);
   const [focusWsId, setFocusWsId] = useState<string | null>(null);
 
-  const opEfficiency = useMemo(() => {
-    const line = (twin.lines ?? []).find((l) => l.id === lineId);
-    const gid =
-      line?.garmentId
-      ?? twin.workstations.find((w) => w.lineId === lineId && w.operation.garmentId)?.operation
-        .garmentId;
-    const ops = (gid ? garments.byId[gid] : undefined)?.operations ?? [];
-    return efficiencyFromSkillMatrix(skillMatrix, ops);
-  }, [twin, lineId, garments.byId, skillMatrix]);
-
   const bal = useMemo(
-    () => buildLineBalance({ twin, lineId, garmentsById: garments.byId, opEfficiency }),
-    [twin, lineId, garments.byId, opEfficiency],
+    () => buildLineBalance({ twin, lineId, garmentsById: garments.byId }),
+    [twin, lineId, garments.byId],
   );
 
   const takt = readTakt(bal, { targetPieces: targetPieces ?? 0, shiftMin });
@@ -105,7 +93,6 @@ export function LineBalancePanel({ lineId }: LineBalancePanelProps) {
   };
 
   const headroom = best != null ? bal.bottleneckMin - best : null;
-  const skillTouched = Object.keys(opEfficiency).length;
 
   return (
     <Card padding={20} style={{ marginBottom: 14 }}>
@@ -128,9 +115,6 @@ export function LineBalancePanel({ lineId }: LineBalancePanelProps) {
             {bal.garment
               ? `${bal.garment.name} · ${bal.stations.length} station${bal.stations.length === 1 ? '' : 's'} · ${bal.servers} channel${bal.servers === 1 ? '' : 's'}`
               : 'No garment bound to this line yet'}
-            {skillTouched > 0
-              ? ` · ${skillTouched} operation${skillTouched === 1 ? '' : 's'} carry a skill rating`
-              : ' · no skill overrides'}
           </div>
         </div>
         <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
@@ -231,7 +215,7 @@ export function LineBalancePanel({ lineId }: LineBalancePanelProps) {
                     <b>{bal.bottleneck.name}</b> · {bal.bottleneck.op.name}
                     <br />
                     {min3(bal.bottleneck.nominalMin)} min SMV
-                    {bal.bottleneck.skillEff !== 1 && ` ÷ ${bal.bottleneck.skillEff.toFixed(2)} skill`}
+                    {bal.bottleneck.efficiency !== 1 && ` ÷ ${bal.bottleneck.efficiency.toFixed(2)} efficiency`}
                     {bal.bottleneck.shareFrac < 1 && ` ÷ ${bal.bottleneck.shareFrac.toFixed(2)} share`}
                     {bal.bottleneck.servers > 1 && ` ÷ ${bal.bottleneck.servers} channels`}
                     {' = '}

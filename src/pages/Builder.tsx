@@ -49,6 +49,7 @@ import {
   ZoomHud,
   useCanvasCamera,
   useConfirm,
+  useToast,
   NumberInput,
   CollapsedRail,
   PaneCollapseButton,
@@ -84,7 +85,7 @@ import {
   selectActiveTwin,
   type EntityColorKey,
 } from '../store/twin';
-import { useProject, useFactoryLibrary, useGarments } from '../store';
+import { useProject, useFactoryLibrary, useGarments, useFileLink, saveSwprojToFile } from '../store';
 import type {
   Assignment,
   Workstation,
@@ -126,14 +127,8 @@ import {
   type ApparelBlockPreset,
   type ApparelPresetId,
 } from '../domain/apparelPresets';
-import {
-  serversFor,
-  systemCapacityFor,
-  validatePmlGraph,
-  type PmlIssue,
-} from '../simulation/pml-engine';
-import { classify } from '../simulation/queueing';
-import { defaultDist, kendallServiceCode, type ServiceDist } from '../simulation/distributions';
+import { validatePmlGraph, type PmlIssue } from '../simulation/pml-engine';
+import { kendallServiceCode, type ServiceDist } from '../simulation/distributions';
 import { morphDist } from '../components/queueParamFields';
 import { runPmlOnTwin } from '../simulation/pml-runner';
 import {
@@ -1537,8 +1532,28 @@ export function BuilderPage() {
     activate: boolean;
   }>({ open: false, name: '', notes: '', activate: true });
 
-  const onSave = useCallback(() => {
+  const toast = useToast();
+  const linkedFile = useFileLink((s) => s.fileName);
+  const fileDirty = useFileLink((s) => s.dirty);
+  /**
+   * Save writes the whole factory to its .swproj file on disk. The first Save
+   * opens the Save dialog and links the factory to the chosen file; after that
+   * it overwrites that file. `saveAs` always asks for a new file.
+   */
+  const onSave = useCallback(async (opts: { saveAs?: boolean } = {}) => {
     touchActive();
+    const result = await saveSwprojToFile(opts);
+    if (result.kind === 'cancelled') return;
+    if (result.kind === 'error') {
+      toast({ kind: 'error', message: `Could not save the file: ${result.message}`, duration: 0 });
+      return;
+    }
+    if (result.kind === 'downloaded') {
+      toast({
+        kind: 'info',
+        message: `This browser cannot write files directly, so ${result.fileName} was downloaded instead.`,
+      });
+    }
     const t = new Date();
     const hh = String(t.getHours()).padStart(2, '0');
     const mm = String(t.getMinutes()).padStart(2, '0');
@@ -1548,7 +1563,20 @@ export function BuilderPage() {
     window.setTimeout(() => {
       setSavedAt((cur) => (cur === `${hh}:${mm}:${ss}` ? null : cur));
     }, 2400);
-  }, [touchActive]);
+  }, [touchActive, toast]);
+
+  // ⌘S saves to the linked file; ⇧⌘S saves to a new one. Works from inside
+  // inputs too, and stops the browser's own "Save page as…" dialog.
+  useEffect(() => {
+    function onKey(e: KeyboardEvent) {
+      if ((e.metaKey || e.ctrlKey) && (e.key === 's' || e.key === 'S')) {
+        e.preventDefault();
+        void onSave({ saveAs: e.shiftKey });
+      }
+    }
+    window.addEventListener('keydown', onKey);
+    return () => window.removeEventListener('keydown', onKey);
+  }, [onSave]);
 
   const onSaveAsOpen = useCallback(() => {
     // Default name: "<active name> (copy)" so the user sees the lineage; if
@@ -1631,19 +1659,6 @@ export function BuilderPage() {
             <Icon name="back" />
           </button>
           <ViewTitle title="Factory Builder" />
-          {/* Operations library. The page existed and was reachable by URL
-              only — no surface linked to `/resources`, so the garments, their
-              operation breakdowns, the operator roster and the machine
-              catalog that every station on this floor binds to could be read
-              in the Inspector's pickers and edited nowhere. */}
-          <button
-            onClick={() => navigate('/resources?tab=operations')}
-            style={btnIcon()}
-            title="Operations library — garments, operation breakdowns, operators, machines"
-            aria-label="Operations library"
-          >
-            <Icon name="bulletin" />
-          </button>
           {/* Pre-flight graph health chip — reads beside the view title,
               where the factory's identity is. It reports the health of the
               graph you have open, not of an action, so it belongs with the
@@ -1821,7 +1836,47 @@ export function BuilderPage() {
         >
           <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
           <button
-            onClick={onSave}
+            onClick={() => void onSave({ saveAs: true })}
+            title={
+              linkedFile
+                ? `Saving to ${linkedFile}${fileDirty ? ' — unsaved changes' : ''}. Click to save to a different file (⇧⌘S).`
+                : 'Not saved to a file yet. Click, or press ⌘S, to choose where to save it.'
+            }
+            aria-label={linkedFile ? `Linked file ${linkedFile}. Save to a different file` : 'Choose a file to save to'}
+            style={{
+              display: 'inline-flex',
+              alignItems: 'center',
+              gap: 6,
+              maxWidth: 200,
+              height: 30,
+              padding: '0 10px',
+              background: 'none',
+              border: `1px solid ${SW_COLORS.line}`,
+              borderRadius: 6,
+              color: linkedFile ? SW_COLORS.ink : SW_COLORS.muted,
+              fontFamily: SW_FONTS.mono,
+              fontSize: 11,
+              cursor: 'pointer',
+            }}
+          >
+            {linkedFile && (
+              <span
+                aria-hidden
+                style={{
+                  width: 6,
+                  height: 6,
+                  borderRadius: '50%',
+                  flex: '0 0 auto',
+                  background: fileDirty ? SW_COLORS.warn : SW_COLORS.ok,
+                }}
+              />
+            )}
+            <span style={{ overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }}>
+              {linkedFile ?? 'No file yet'}
+            </span>
+          </button>
+          <button
+            onClick={() => void onSave()}
             style={{
               ...btnPrim(),
               ...btnIcon(),
@@ -1833,10 +1888,10 @@ export function BuilderPage() {
             aria-label="Save"
             title={
               savedAt
-                ? `Saved at ${savedAt} — save again`
-                : activeScenarioId === null
-                  ? 'Save the current configuration into the canonical factory'
-                  : 'Save the current configuration into this scenario'
+                ? `Saved to ${linkedFile ?? 'file'} at ${savedAt}`
+                : linkedFile
+                  ? `Save to ${linkedFile} (⌘S)`
+                  : 'Save this factory to a .swproj file on your computer (⌘S)'
             }
           >
             <Icon name={savedAt ? 'check' : 'save'} />
@@ -3516,10 +3571,99 @@ function SewingLineBand({
   const bl = P(minX, maxY);
   const accent = DEPT_COLOR_HEX[line.color] ?? SW_COLORS.brand;
 
-  // Label anchored at the top-left corner.
-  const labelX = tl.sx + 8;
-  const labelY = tl.sy + 4;
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      <polygon
+        points={ptsToStr([tl, tr, br, bl])}
+        fill={accent}
+        fillOpacity={0.08}
+        stroke={accent}
+        strokeOpacity={0.85}
+        strokeWidth={1.6}
+        strokeDasharray="5 4"
+      />
+      <LineBandLabel line={line} twin={twin} accent={accent} x={tl.sx + 8} y={tl.sy + 4} />
+    </g>
+  );
+}
 
+/**
+ * Dashed outline around a sewing line's blocks on the PROCESS canvas — the
+ * same marking the 2D floor draws, so a line reads the same in every view.
+ *
+ * Drawn from where the blocks sit right now (`posOf`), not from the seed
+ * layout, so it follows a block as it is dragged. That staleness is what got
+ * the earlier lane bands removed.
+ */
+function ProcessLineBand({
+  line,
+  twin,
+  nodes,
+  posOf,
+}: {
+  line: SewingLine;
+  twin: ReturnType<typeof selectActiveTwin>;
+  nodes: ProcessNode[];
+  posOf: (wsId: string) => { x: number; y: number } | null | undefined;
+}) {
+  if (nodes.length === 0) return null;
+  let minX = Infinity, maxX = -Infinity, minY = Infinity, maxY = -Infinity;
+  for (const n of nodes) {
+    const p = posOf(n.ws.id) ?? { x: n.x, y: n.y };
+    minX = Math.min(minX, p.x);
+    minY = Math.min(minY, p.y);
+    maxX = Math.max(maxX, p.x + n.w);
+    maxY = Math.max(maxY, p.y + n.h);
+  }
+  // Sides clear the port dots; the top clears the label stack; the bottom
+  // clears each block's name, which sits below the plate.
+  minX -= PROCESS_BAND_PAD_X;
+  maxX += PROCESS_BAND_PAD_X;
+  minY -= PROCESS_BAND_PAD_TOP;
+  maxY += PROCESS_BAND_PAD_BOTTOM;
+  const accent = DEPT_COLOR_HEX[line.color] ?? SW_COLORS.brand;
+  return (
+    <g style={{ pointerEvents: 'none' }}>
+      <rect
+        x={minX}
+        y={minY}
+        width={maxX - minX}
+        height={maxY - minY}
+        rx={6}
+        fill={accent}
+        fillOpacity={0.08}
+        stroke={accent}
+        strokeOpacity={0.85}
+        strokeWidth={1.6}
+        strokeDasharray="5 4"
+      />
+      <LineBandLabel line={line} twin={twin} accent={accent} x={minX + 8} y={minY + 4} />
+    </g>
+  );
+}
+
+const PROCESS_BAND_PAD_X = 24;
+const PROCESS_BAND_PAD_TOP = 34;
+const PROCESS_BAND_PAD_BOTTOM = 30;
+
+/**
+ * The label stack pinned to a line outline's top-left corner: the line name,
+ * its production-system badge, and (when stations are shared) the share-debt
+ * chip. `x`, `y` is the name's text baseline origin.
+ */
+function LineBandLabel({
+  line,
+  twin,
+  accent,
+  x: labelX,
+  y: labelY,
+}: {
+  line: SewingLine;
+  twin: ReturnType<typeof selectActiveTwin>;
+  accent: string;
+  x: number;
+  y: number;
+}) {
   const badge = lineSystemBadge(line, twin);
   const nameWidth = Math.max(70, line.name.length * 5.6 + 18);
   const badgeWidth = Math.max(60, badge.length * 5 + 14);
@@ -3534,15 +3678,6 @@ function SewingLineBand({
 
   return (
     <g style={{ pointerEvents: 'none' }}>
-      <polygon
-        points={ptsToStr([tl, tr, br, bl])}
-        fill={accent}
-        fillOpacity={0.08}
-        stroke={accent}
-        strokeOpacity={0.85}
-        strokeWidth={1.6}
-        strokeDasharray="5 4"
-      />
       <rect
         x={labelX - 4}
         y={labelY - 10}
@@ -5121,6 +5256,18 @@ function BuilderProcessView({
               identical pitch to 2D at identical zoom. */}
           <CanvasGrid projection={FLAT_PROJECTION} cam={cam} stageSize={stageSize} />
 
+        {/* Sewing-line outlines — the same dashed marking as the 2D floor,
+            under the wires and blocks so it never catches a click. */}
+        {(twin.lines ?? []).map((line) => (
+          <ProcessLineBand
+            key={line.id}
+            line={line}
+            twin={twin}
+            nodes={Array.from(positions.values()).filter((n) => n.line?.id === line.id)}
+            posOf={posOf}
+          />
+        ))}
+
         {/* Connector wires (drawn before blocks so blocks sit on top).
             Wires stay full opacity when either endpoint is part of the focus,
             otherwise they fade with the rest of the diagram. */}
@@ -5278,49 +5425,6 @@ function BuilderProcessView({
                   strokeWidth={PROCESS_RING_STROKE}
                 />
               )}
-              {/* Line tag. This is what replaced the dashed lane bands: the
-                  band showed membership but could not be interrogated per
-                  block, and it was drawn from the seed rather than from where
-                  blocks actually sat, so it went stale the moment anyone
-                  dragged one. No line → no tag; absence is the signal. */}
-              {n.line && (() => {
-                const accent = DEPT_COLOR_HEX[n.line.color];
-                // Line names read "Line 1 · T-shirt (knit)" — take the part
-                // before the separator so the tag is the line, not a truncated
-                // garment with a dangling middle dot.
-                const code = n.line.name
-                  .split('\u00b7')[0]
-                  .trim()
-                  .toUpperCase()
-                  .replace(/\s+/g, '')
-                  .slice(0, 6);
-                const tagW = Math.max(22, Math.min(64, code.length * 5.4 + 10));
-                return (
-                  <g pointerEvents="none">
-                    <title>{n.line.name}</title>
-                    <rect
-                      x={0}
-                      y={-15}
-                      width={tagW}
-                      height={12}
-                      rx={3}
-                      fill={alpha(accent, 0.18)}
-                      stroke={alpha(accent, 0.55)}
-                      strokeWidth={1}
-                    />
-                    <text
-                      x={5}
-                      y={-6}
-                      fontFamily={SW_FONTS.mono}
-                      fontSize={8}
-                      fontWeight={700}
-                      fill={accent}
-                    >
-                      {code}
-                    </text>
-                  </g>
-                );
-              })()}
               {/* Symbol — a solid, category-coloured plate (AnyLogic-style)
                   carrying the PML **block** glyph.
                   
@@ -5631,8 +5735,7 @@ function BuilderProcessView({
  *
  * Render-only for now — editing assignments (drag an operator onto a
  * station, change shareFrac, mark a worker as shared) is a follow-up.
- * When there are no assignments we render a short hint so the user knows
- * the station is currently uncovered.
+ * When there are no assignments the summary says "no operator assigned".
  */
 function WorkstationAssignmentsView({
   ws,
@@ -5674,7 +5777,9 @@ function WorkstationAssignmentsView({
   // "shared 50/50", etc. — so the user reads the staffing model before they
   // need to scan individual rows.
   const summary = (() => {
-    if (rows.length === 0) return 'uncovered';
+    // Neutral wording on purpose: "uncovered" read as a fault, but the engine
+    // runs a station with no assignment as fully staffed (shareFactor 1).
+    if (rows.length === 0) return 'no operator assigned';
     const byRole = new Map<string, number>();
     for (const a of rows) byRole.set(a.role, (byRole.get(a.role) ?? 0) + 1);
     const sharedRows = rows.filter((a) => (a.shareFrac ?? 1) < 1 && a.role !== 'rotation_member');
@@ -5694,7 +5799,7 @@ function WorkstationAssignmentsView({
     if (sharedRows.length > 0) {
       parts.push(`${sharedRows.length} shared`);
     }
-    return parts.join(' · ') || 'uncovered';
+    return parts.join(' · ') || 'no operator assigned';
   })();
 
   // Slowest non-rotation shareFrac wins — that's also what the engine reads
@@ -5718,26 +5823,14 @@ function WorkstationAssignmentsView({
         <div style={{ display: 'flex', alignItems: 'center', gap: 5, minWidth: 0 }}>
           <div style={sectionLabel}>Operators on this station</div>
           {/* The three-line "no operator is assigned yet…" paragraph that used
-              to sit under this list said nothing the `uncovered` chip on the
+              to sit under this list said nothing the summary chip on the
               right does not, and it said it permanently, in a 260px column.
               Read once, then pure cost on every visit — so it lives behind
               the `?` with the rest of the explanation. */}
           <HelpDot label="How are operators assigned?">
-            An <strong>Assignment</strong> row ties one operator to one station,
-            with a role and a share of the shift. Seeded and imported twins write
-            them automatically; a station you place by hand starts{' '}
-            <strong>uncovered</strong> and needs one.
-            <br />
-            <br />
-            A station can carry several operators (primary + helpers, or a
-            rotation cell), and one operator can cover several stations — that is
-            what <strong>share</strong> below 100 % means. The engine divides the
-            station's cycle by the summed share, so an operator at 50 % doubles
-            the time a piece spends here.
-            <br />
-            <br />
-            This roster is not the same knob as the parallel-channel count the
-            engine runs the station on. Set that on the Line Balance tab.
+            Each row puts one operator on this station. <strong>Share</strong>{' '}
+            is how much of the shift they spend here — 50 % doubles the cycle.
+            No operator assigned = fully staffed.
           </HelpDot>
         </div>
         <div style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: rows.length === 0 ? SW_COLORS.muted : SW_COLORS.brand, whiteSpace: 'nowrap' }}>
@@ -5930,13 +6023,6 @@ function LinePolicyEditor({
   const defaults = DEFAULT_LINE_POLICY;
   const p: LinePolicy = line.policy ?? {};
 
-  // Field is considered "overridden" if the user has set it explicitly.
-  // `pieceFlow` is a boolean, so we test for `undefined` separately.
-  const overrideCount =
-    (p.bundleSize !== undefined ? 1 : 0) +
-    (p.pieceFlow !== undefined ? 1 : 0) +
-    (p.maxWipPerStation !== undefined ? 1 : 0);
-
   function patch(next: Partial<LinePolicy>) {
     const merged: LinePolicy = { ...p, ...next };
     // Strip keys whose value is undefined so a fully-cleared policy reverts
@@ -5984,10 +6070,14 @@ function LinePolicyEditor({
     placeholder: number,
     unit: string,
     onChange: (v: number | undefined) => void,
+    help?: { label: string; body: ReactNode },
   ) {
     return (
       <div>
-        <label style={{ ...fieldLabel, marginTop: 0 }}>{label}</label>
+        <label style={{ ...fieldLabel, marginTop: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
+          <span>{label}</span>
+          {help && <HelpDot label={help.label}>{help.body}</HelpDot>}
+        </label>
         <div style={{ display: 'flex', alignItems: 'center', gap: 4 }}>
           {/* allowEmpty: clearing the box IS the edit here — it drops the
               override and the field falls back to the default. */}
@@ -6020,7 +6110,7 @@ function LinePolicyEditor({
           padding: '3px 0',
           fontSize: 10,
           fontWeight: 700,
-          color: overrideCount > 0 ? SW_COLORS.brand : SW_COLORS.muted,
+          color: SW_COLORS.muted,
           display: 'flex',
           alignItems: 'center',
           gap: 6,
@@ -6028,11 +6118,6 @@ function LinePolicyEditor({
         title="Line behaviour knobs"
       >
         <span>POLICY</span>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 9, color: SW_COLORS.muted }}>
-          {overrideCount > 0
-            ? `${overrideCount} override${overrideCount === 1 ? '' : 's'}`
-            : 'defaults'}
-        </span>
       </div>
       <div
         style={{
@@ -6051,60 +6136,47 @@ function LinePolicyEditor({
             <label style={{ ...fieldLabel, marginTop: 0, display: 'flex', alignItems: 'center', gap: 4 }}>
               <span>Piece flow</span>
               <HelpDot label="What do the flow types mean?">
-                <div style={{ fontWeight: 700, marginBottom: 4 }}>How work moves down the line</div>
-                <div style={{ marginBottom: 6 }}>
-                  <strong>Batched (bundle)</strong> — pieces are tied into
-                  bundles and travel together. A station takes a whole bundle,
-                  works every piece in it, and only then hands it on.
+                <div style={{ marginBottom: 4 }}>
+                  <strong>Bundle</strong> — pieces move together; a station
+                  finishes the whole bundle before passing it on.
                 </div>
-                <div style={{ marginBottom: 6 }}>
-                  <strong>Piece-by-piece</strong> — one piece moves on as soon
-                  as it is finished. <strong>Max WIP/stn</strong> caps how many
-                  may pile up at any one station.
+                <div style={{ marginBottom: 4 }}>
+                  <strong>Piece</strong> — each piece moves on as soon as it is
+                  done.
                 </div>
-                <div style={{ fontWeight: 700, marginTop: 8, marginBottom: 4 }}>
-                  What it changes in the numbers
-                </div>
-                <div style={{ marginBottom: 6 }}>
-                  Setting it restamps the bundle size on every station on this
-                  line, and the run reads that station value:
-                </div>
-                <div style={{ fontFamily: SW_FONTS.mono, fontSize: 11, marginBottom: 6 }}>
-                  cycle per handoff = SMV × bundle
-                </div>
-                <div>
-                  So a 30-piece bundle makes each station hold work 30× longer
-                  per handoff than piece flow does, and releases it 30 pieces at
-                  a time. Same pieces per hour when nothing is starved — far
-                  longer queues, far more WIP, and a much longer throughput time
-                  for the first garment out.
-                </div>
+                <div>Same output per hour; bundles mean more WIP and longer waits.</div>
               </HelpDot>
             </label>
             <HudSelect
-              value={
-                p.pieceFlow === undefined
-                  ? 'default'
-                  : p.pieceFlow
-                    ? 'yes'
-                    : 'no'
-              }
-              onChange={(v) =>
-                patch({
-                  pieceFlow:
-                    v === 'default' ? undefined : v === 'yes' ? true : false,
-                })
-              }
+              // Two real choices only. An unset line simply shows the flow it
+              // will run with; picking either one stores it explicitly.
+              value={effectivePieceFlow ? 'yes' : 'no'}
+              onChange={(v) => patch({ pieceFlow: v === 'yes' })}
               variant="light"
               size="sm"
               width="100%"
               options={[
-                { value: 'default', label: `default · ${defaults.pieceFlow ? 'piece' : 'bundle'}` },
                 { value: 'yes', label: 'Piece-by-piece' },
                 { value: 'no', label: 'Batched (bundle)' },
               ]}
             />
           </div>
+          {numField(
+            'Efficiency',
+            line.efficiencyPct,
+            100,
+            '%',
+            (v) => onUpdateLine(line.id, { efficiencyPct: v }),
+            {
+              label: 'What does line efficiency do?',
+              body: (
+                <>
+                  Every station runs its SMV at this speed unless it sets its
+                  own. <strong>85</strong> = each operation takes 1 ÷ 0.85 as long.
+                </>
+              ),
+            },
+          )}
           {effectivePieceFlow
             ? numField(
                 'Max WIP/stn',
@@ -6112,6 +6184,15 @@ function LinePolicyEditor({
                 defaults.maxWipPerStation,
                 'pcs',
                 (v) => patch({ maxWipPerStation: v }),
+                {
+                  label: 'What does 0 mean?',
+                  body: (
+                    <>
+                      <strong>0</strong> = no limit. Otherwise, the most pieces
+                      that can wait at a station.
+                    </>
+                  ),
+                },
               )
             : numField(
                 'Bundle size',
@@ -6200,7 +6281,6 @@ function Inspector(props: InspectorProps) {
 
 function InspectorBody(props: InspectorProps) {
   const confirm = useConfirm();
-  const navigate = useNavigate();
   // The factory's name is `project.meta.name` — what the user typed on the
   // Menu and what the TopBar shows. `twin.name` is the *scenario's* label and
   // seeds to the literal string "My factory", so this header used to greet
@@ -6237,24 +6317,10 @@ function InspectorBody(props: InspectorProps) {
           {factoryName || props.twin.name}
         </div>
 
-        <div style={{ ...SW_TYPE.body, color: SW_COLORS.muted, marginBottom: 12 }}>
-          Click a station to inspect it, or drop one from the palette anywhere
-          on the floor.
-        </div>
-
         <InspectorGroup
           id="factory.lines"
           title={`Sewing lines · ${lines.length}`}
           defaultOpen
-          right={
-            <button
-              onClick={() => props.onAddLine()}
-              style={{ ...btnSec(), padding: '3px 9px', fontSize: 10 }}
-              title="Create a new production line"
-            >
-              + ADD LINE
-            </button>
-          }
         >
           <div style={{ display: 'flex', flexDirection: 'column', gap: 8, marginTop: 6 }}>
             {lines.length === 0 && (
@@ -6322,6 +6388,16 @@ function InspectorBody(props: InspectorProps) {
                 </div>
               );
             })}
+            {/* Sits under the last card rather than in the group header: a new
+                line appears at the end of this list, so the button is where
+                the result lands. */}
+            <button
+              onClick={() => props.onAddLine()}
+              style={{ ...btnSec(), width: '100%', padding: '6px 9px', fontSize: 10 }}
+              title="Create a new production line"
+            >
+              + ADD LINE
+            </button>
           </div>
         </InspectorGroup>
       </div>
@@ -6335,6 +6411,12 @@ function InspectorBody(props: InspectorProps) {
   // Every line in the factory is assignable — the floor is free space, so a
   // station's line membership is not constrained by where it physically sits.
   const allLines = props.twin.lines ?? [];
+  // Fields that do not apply to this block are left out, not shown empty.
+  // A Source or Sink does no sewing, so it has no operation to bind and no
+  // queue to tune; a block that seizes no operator has no staffing to set.
+  const blockSpec = getBlockSpec(ws).spec;
+  const bindsOperation = blockSpec.category !== 'lifecycle';
+  const usesResources = !!blockSpec.usesResources;
   // Stat tiles — authoring data (bulletin SMV, staffing), never sim results;
   // those stay in the Sim view.
   const boundOp =
@@ -6372,15 +6454,17 @@ function InspectorBody(props: InspectorProps) {
       </div>
 
       {/* Stat tiles — bulletin SMV and required staffing, side by side. */}
-      {(boundOp || ws.resources.workersRequired > 0) && (
+      {usesResources && (boundOp || ws.resources.workersRequired > 0) && (
         <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 8, margin: '12px 0 2px' }}>
           {/* SMV is the mean service time and OPR is the parallel-channel
               count, so both are Kendall–Lee quantities and carry their symbol. */}
-          <InspectorStat
-            label={<>SMV <Sym quantity="serviceTime" bracketed color={SW_COLORS.brandText} /></>}
-            value={boundOp ? boundOp.smv.toFixed(2) : '—'}
-            unit="min"
-          />
+          {boundOp && (
+            <InspectorStat
+              label={<>SMV <Sym quantity="serviceTime" bracketed color={SW_COLORS.brandText} /></>}
+              value={boundOp.smv.toFixed(2)}
+              unit="min"
+            />
+          )}
           <InspectorStat
             label={<>OPR <Sym quantity="servers" bracketed color={SW_COLORS.brandText} /></>}
             value={String(ws.resources.workersRequired)}
@@ -6411,7 +6495,7 @@ function InspectorBody(props: InspectorProps) {
             size="sm"
             width="100%"
             options={[
-              { value: '', label: '— Unassigned (free-standing fixture) —' },
+              { value: '', label: 'Unassigned' },
               ...allLines.map((l) => ({
                 value: l.id,
                 label: l.name,
@@ -6482,18 +6566,8 @@ function InspectorBody(props: InspectorProps) {
             <div style={{ ...sectionLabel, marginBottom: 6, display: 'flex', alignItems: 'center', gap: 6 }}>
               <span>{onProcess ? 'Position on PROCESS (cells)' : 'Position on floor (cells)'}</span>
               <HelpDot label="What are these measured from?">
-                Cells from the canvas origin — the <strong>0,0</strong> dot where
-                the two brighter axis rules cross. x runs right, y runs down.
-                Selecting a station marks it on the canvas with a dot carrying
-                these same two numbers, so you can always see which square
-                they belong to.
-                <div style={{ marginTop: 8, color: SW_COLORS.muted }}>
-                  A station has one position per canvas: where the machine
-                  stands on the <strong>floor</strong>, and where its block sits
-                  in the <strong>PROCESS</strong> graph. These fields edit
-                  whichever canvas you are on — currently{' '}
-                  <strong>{onProcess ? 'PROCESS' : 'the floor'}</strong>.
-                </div>
+                Cells from the <strong>0,0</strong> dot. x runs right, y runs
+                down. Each canvas keeps its own position.
               </HelpDot>
             </div>
             <div style={{ display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 6 }}>
@@ -6535,7 +6609,7 @@ function InspectorBody(props: InspectorProps) {
         title="Operations"
         active={props.lens === 'operations'}
       >
-        {(() => {
+        {bindsOperation && (() => {
           const garmentId =
             ws.operation.garmentId ??
             props.twin.lines.find((l) => l.id === ws.lineId)?.garmentId ??
@@ -6571,39 +6645,6 @@ function InspectorBody(props: InspectorProps) {
                   ...(garment ? [] : [{ value: garmentId ?? '', label: `${garmentId} (unknown)` }]),
                 ]}
               />
-              {/* Where the two lists above come FROM, and how to change them.
-                  This section reads a garment's operation bulletin and binds
-                  one row of it to the station, but it is read-only: the SMVs,
-                  the machine codes and the op list itself are authored on the
-                  Operations library — a page nothing in the app linked to, so
-                  a user who wanted to add a garment or fix an SMV had no way
-                  in and no reason to believe the feature existed. */}
-              <div style={{ display: 'flex', gap: 6, marginTop: 6 }}>
-                <button
-                  type="button"
-                  onClick={() =>
-                    navigate(
-                      `/resources?tab=operations${garmentId ? `&garment=${encodeURIComponent(garmentId)}` : ''}`,
-                    )
-                  }
-                  style={{ ...btnSec(), flex: 1, padding: '3px 6px', fontSize: 10 }}
-                  title={
-                    garment
-                      ? `Open "${garment.name}" in the Operations library — ${garment.operations.length} operations, their SMVs and machines`
-                      : 'Open the Operations library'
-                  }
-                >
-                  EDIT BULLETIN →
-                </button>
-                <button
-                  type="button"
-                  onClick={() => navigate('/resources?tab=operations&new=1')}
-                  style={{ ...btnSec(), padding: '3px 8px', fontSize: 10 }}
-                  title="Add a garment — paste or import its operation breakdown"
-                >
-                  + GARMENT
-                </button>
-              </div>
               <div style={{ height: 8 }} />
               <label style={fieldLabel}>Operation</label>
               <HudSelect
@@ -6636,22 +6677,32 @@ function InspectorBody(props: InspectorProps) {
             </>
           );
         })()}
-        <label style={fieldLabel}>Free text (storage racks, generic tables, …)</label>
+        <label style={fieldLabel}>Comment</label>
         <input
           value={ws.operation.freeText ?? ''}
           onChange={(e) => props.onSetOperation(ws.id, { freeText: e.target.value || undefined })}
           placeholder="e.g. fabric rolls — knit cotton"
           style={inputBase}
         />
-        <div style={{ height: 12 }} />
-        <ServiceQueueParams ws={ws} />
+        {bindsOperation && (
+          <>
+            <div style={{ height: 12 }} />
+            <ServiceQueueParams ws={ws} />
+          </>
+        )}
       </LensSection>
 
+      {usesResources && (
       <LensSection id="ws.resources" title="Resources" active={props.lens === 'resources'}>
         <NumField
           label={<>Workers required <Sym quantity="servers" bracketed color={SW_COLORS.brandText} /></>}
           value={ws.resources.workersRequired}
           onChange={(v) => props.onSetResources(ws.id, { workersRequired: v })}
+        />
+        <StationEfficiencyField
+          ws={ws}
+          line={ws.lineId ? props.twin.lines.find((l) => l.id === ws.lineId) : undefined}
+          onChange={(v) => props.onSetResources(ws.id, { efficiencyPct: v })}
         />
         <div style={{ height: 12 }} />
         <WorkstationAssignmentsView
@@ -6661,6 +6712,7 @@ function InspectorBody(props: InspectorProps) {
           connectors={props.twin.connectors ?? []}
         />
       </LensSection>
+      )}
 
       {/* KPI targets and the last run's observed numbers used to sit here, as
           the third lens section. They have moved to RUN's per-station drawer.
@@ -6841,21 +6893,6 @@ function BlockSection({
       {/* Authored sim parameters — only shown when the block kind has any. */}
       <BlockParamFields ws={ws} block={block} onSetBlock={onSetBlock} />
 
-      {block.spec.usesResources && (
-        <div
-          style={{
-            marginTop: 8,
-            padding: '6px 8px',
-            background: SW_COLORS.paperDeep,
-            border: `1px dashed ${SW_COLORS.line}`,
-            borderRadius: 4,
-            fontSize: 11,
-            color: SW_COLORS.muted,
-          }}
-        >
-          ⚡ Draws on a ResourcePool · Seize → Delay → Release
-        </div>
-      )}
     </div>
   );
 }
@@ -6922,7 +6959,6 @@ function BlockParamFields({
         ))}
       </div>
       <ArrivalProcessField ws={ws} block={block} onSetBlock={onSetBlock} />
-      <KendallReadout ws={ws} kind={block.kind} />
     </>
   );
 }
@@ -6989,64 +7025,6 @@ function ArrivalProcessField({
             : `Gaps follow the chosen distribution at a mean ${ratePerHr.toFixed(0)}/hr — a ${code} arrival process. The closed-form numbers assume M, so treat them as an approximation.`}
       </div>
     </>
-  );
-}
-
-/**
- * The station's Kendall–Lee classification, live, under the c and N fields.
- *
- * The point is to make the queueing model tangible while authoring rather than
- * something the user only meets on an analysis page: type 2 into Servers and
- * watch `M/M/1 : ∞/FCFS` become `M/M/2 : ∞/FCFS`; cap the buffer at 8 and watch
- * it become `M/M/2 : 8/FCFS`. Resolved through the same `serversFor` /
- * `systemCapacityFor` the engine uses, so the label can't disagree with what
- * will actually be simulated.
- */
-function KendallReadout({ ws, kind }: { ws: Workstation; kind: PmlBlockKind }) {
-  if (kind !== 'Service' && kind !== 'Queue') return null;
-  const servers = kind === 'Queue' ? 1 : serversFor(ws);
-  const capacity = systemCapacityFor(ws);
-  const smv = getBlockParams(ws).cycleS / 60;
-  const notation = classify(defaultDist(Math.max(0.001, smv)), servers, capacity, 'FCFS');
-  const finite = Number.isFinite(capacity);
-  return (
-    <div
-      style={{
-        marginTop: 8,
-        padding: '6px 8px',
-        borderRadius: SW_RADIUS.sm,
-        border: `1px solid ${alpha(SW_COLORS.bobbin, 0.35)}`,
-        background: alpha(SW_COLORS.bobbin, 0.08),
-      }}
-    >
-      <div
-        style={{
-          fontFamily: SW_FONTS.mono,
-          fontSize: 9,
-          fontWeight: 800,
-          color: SW_COLORS.muted,
-          letterSpacing: '0.12em',
-        }}
-      >
-        QUEUEING MODEL
-      </div>
-      <div
-        style={{
-          fontFamily: SW_FONTS.mono,
-          fontSize: 13,
-          fontWeight: 800,
-          color: SW_COLORS.bobbin,
-          marginTop: 2,
-        }}
-      >
-        {notation.label}
-      </div>
-      <div style={{ fontSize: 10, color: SW_COLORS.muted, marginTop: 2 }}>
-        {finite
-          ? `Finite buffer — arrivals that find ${capacity} bundles here are turned away and counted as balks.`
-          : 'Unbounded buffer — the queue can grow without limit if ρ reaches 1.'}
-      </div>
-    </div>
   );
 }
 
@@ -7140,6 +7118,11 @@ function PortList({
       });
     }
   };
+
+  // A block with no ports on this side (a Source has no inputs, a Sink no
+  // outputs) gets no section at all — a dashed "none" box is a field that
+  // does not apply, and those are not shown.
+  if (ports.length === 0) return null;
 
   return (
     <div>
@@ -7476,6 +7459,51 @@ function LensSection({ id, title, active, children }: { id: string; title: strin
   );
 }
 
+/**
+ * The station's operator efficiency, percent of standard. Blank inherits the
+ * line's figure (shown as the placeholder), and the line's blank is 100: the
+ * same two-step fallback `stationEfficiency` resolves for the engine, so what
+ * the box shows is what the run uses.
+ */
+function StationEfficiencyField({
+  ws,
+  line,
+  onChange,
+}: {
+  ws: Workstation;
+  line: SewingLine | undefined;
+  onChange: (v: number | undefined) => void;
+}) {
+  const inherited = line?.efficiencyPct ?? 100;
+  const own = ws.resources.efficiencyPct;
+  return (
+    <div>
+      <label style={{ ...fieldLabel, display: 'flex', alignItems: 'center', gap: 4 }}>
+        <span>Efficiency</span>
+        <HelpDot label="What is station efficiency?">
+          Speed against standard. <strong>85</strong> = this station takes 1 ÷ 0.85
+          as long per operation. Blank uses the line&apos;s figure.
+        </HelpDot>
+      </label>
+      <div style={{ display: 'flex', alignItems: 'center', gap: 6 }}>
+        {/* allowEmpty: clearing the box drops the override and the station
+            falls back to its line. */}
+        <NumberInput
+          value={own}
+          allowEmpty
+          placeholder={String(inherited)}
+          step={5}
+          onChange={onChange}
+          style={inputBase}
+        />
+        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 10, color: SW_COLORS.muted, whiteSpace: 'nowrap' }}>
+          %{own == null ? ' · from line' : ''}
+        </span>
+      </div>
+    </div>
+  );
+}
+
 function NumField({ label, value, onChange, step }: { label: ReactNode; value: number; onChange: (v: number) => void; step?: number }) {
   return (
     <div>
@@ -7509,7 +7537,7 @@ function EntityIdRow({ id }: { id: string }) {
   useEffect(() => {
     if (!copied) return;
     // Dwell, not a transition — long enough to read the confirmation, short
-    // enough that the label is back to COPY before the next station.
+    // enough that the copy icon is back before the next station.
     const t = setTimeout(() => setCopied(false), 1400);
     return () => clearTimeout(t);
   }, [copied]);
@@ -7517,6 +7545,7 @@ function EntityIdRow({ id }: { id: string }) {
     <button
       type="button"
       title="Entity id — the same id on the floor, in PROCESS and in exports. Click to copy."
+      aria-label={copied ? 'ID copied' : 'Copy ID'}
       onClick={() => {
         // Clipboard is permissioned and absent over plain http on a LAN
         // address; the id stays selectable either way, so a refusal is not
@@ -7550,8 +7579,8 @@ function EntityIdRow({ id }: { id: string }) {
       >
         {id}
       </span>
-      <span style={{ flex: 'none', ...SW_TYPE.micro, fontSize: 9, color: copied ? SW_COLORS.ok : SW_COLORS.muted }}>
-        {copied ? 'COPIED' : 'COPY'}
+      <span style={{ flex: 'none', display: 'inline-flex', color: copied ? SW_COLORS.ok : SW_COLORS.muted }}>
+        <Icon name={copied ? 'check' : 'duplicate'} size={12} />
       </span>
     </button>
   );
@@ -7614,10 +7643,7 @@ function IsoLegend({ lens, canvasMode }: { lens: Lens; canvasMode: CanvasMode })
   ];
   const row = lensRows.find((r) => r.key === lens)!;
   return (
-    <CanvasLegend
-      label={canvasMode === 'process' ? 'PROCESS' : canvasMode === 'iso' ? 'ISO' : '2D'}
-      width={224}
-    >
+    <CanvasLegend width={224}>
       {/* Connector kinds — what a line between two stations means. */}
       <LegendRow
         glyph={<FlowGlyph color={SW_COLORS.brand} width={2.4} />}

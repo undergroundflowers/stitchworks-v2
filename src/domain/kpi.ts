@@ -348,10 +348,10 @@ export function demandTaktGap(opts: { actualPph: number; demandPph: number }): n
 /**
  * Intrinsic vs dynamic balance ratio — measures how much of the achieved
  * line-balance ratio comes from the bulletin's natural workload distribution
- * (intrinsic) versus operator skill flex (dynamic).
+ * (intrinsic) versus operator efficiency (dynamic).
  *
  * intrinsic = balance assuming every operator runs at nominal speed.
- * dynamic   = balance after applying the skill matrix.
+ * dynamic   = balance after applying each station's efficiency.
  *
  * A ratio close to 1 means the bulletin itself is well-shaped — most of the
  * balance is intrinsic. A ratio significantly < 1 means the line depends on

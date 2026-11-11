@@ -1,8 +1,8 @@
 /**
  * Project store — the single source of truth for everything the user
- * "owns" inside Stitchworks: factory metadata, the live-sim configuration,
- * and the skill matrix. Persisted to
- * localStorage automatically via zustand/middleware/persist.
+ * "owns" inside Stitchworks: factory metadata, the garment library and
+ * saved scenarios. Persisted to IndexedDB automatically via
+ * zustand/middleware/persist.
  *
  * The shape is versioned (`schemaVersion`); future migrations bump the
  * version and add a `migrate` step in the persist config.
@@ -25,8 +25,8 @@ const TEST_GARMENT_PATTERN = /^(dvss|dsvs|asdf|test|casdcz)/i;
 
 /**
  * Schema version.
- *   v2 — introduced the `time` slice (model-time-unit, start date, execution
- *        mode, real-time scale); see `TimeSettings`.
+ *   v2 — introduced the `time` slice (model-time-unit, start date, real-time
+ *        scale); see `TimeSettings`.
  *   v3 — sewing-lines pivot. Dropped the asset-library slices (machine /
  *        worker / product edits, customs, hidden flags and uploaded images).
  *        The migration deletes those keys outright so IndexedDB payloads
@@ -42,8 +42,14 @@ const TEST_GARMENT_PATTERN = /^(dvss|dsvs|asdf|test|casdcz)/i;
  *        synchro / straight) are out of scope until the app models them
  *        properly; the key is deleted so a saved payload stops pinning a
  *        choice nothing reads.
+ *   v8 — dropped the skill matrix, operator name overrides and the per-line
+ *        `operators` headcount on the legacy factory seed. Efficiency is a
+ *        property of the station (or its line) on the twin now, and the
+ *        headcount is whatever the stations on the floor add up to; the
+ *        matrix was a roster of invented operators averaged back into one
+ *        number per operation, and the headcount fed only that roster.
  */
-export const PROJECT_SCHEMA_VERSION = 7 as const;
+export const PROJECT_SCHEMA_VERSION = 8 as const;
 
 export interface ProjectMeta {
   name: string;
@@ -51,10 +57,6 @@ export interface ProjectMeta {
   createdAt: string;
   modifiedAt: string;
 }
-
-/** Operator id → (operation id → efficiency 0..1). Sparse — missing entries
- *  fall back to the worker archetype's default efficiency. */
-export type SkillMatrix = Record<string, Record<string, number>>;
 
 /** Display preferences. Persisted with the project so they roam with
  *  an exported `.swproj` file. Render sites must consume these (see
@@ -80,14 +82,12 @@ const defaultUnits: UnitsPrefs = {
  *   - Calendar time: model time projected onto a real `Date` via
  *                    `date(t) = startDate + t × modelTimeUnit`.
  *   - Wall time:     the user's device clock. Bound to model time only
- *                    during playback, via `executionMode` and `realTimeScale`.
+ *                    during playback, via `realTimeScale`.
  *
  * `UnitsPrefs` above stays a *display-formatting* struct (length, date
  * format). `TimeSettings` here is *semantics* that affects what the numbers
  * actually mean.
  */
-export type ExecutionMode = 'virtual' | 'realtime';
-
 export interface TimeSettings {
   /** What one tick of engine `time` represents. Default `'minute'`. */
   modelTimeUnit: ModelTimeUnit;
@@ -100,16 +100,13 @@ export interface TimeSettings {
   /** Shift duration in MINUTES. Real-world human concept, so kept in
    *  minutes regardless of `modelTimeUnit`. Default 480 = 8 h. */
   shiftDurationMin: number;
-  /** Playback pacing. `virtual` = run as fast as compute allows;
-   *  `realtime` = pace at `realTimeScale` model-time-units per real-second. */
-  executionMode: ExecutionMode;
   /**
-   * Model-time-units per ONE real second when `executionMode = 'realtime'`.
+   * Playback pacing: model-time-units per ONE real second.
    * Examples (with `modelTimeUnit = 'minute'`):
    *   1   ⇒ 1 model-min per real-sec  (true real time)
    *   60  ⇒ 60 model-min per real-sec (1 model-hour per real-second)
    *   480 ⇒ full 8-hr shift in 1 real second
-   * Ignored when `executionMode = 'virtual'`. Default 1.
+   * Default 1.
    */
   realTimeScale: number;
 }
@@ -120,9 +117,24 @@ function defaultTimeSettings(createdAtISO?: string): TimeSettings {
     startDate: createdAtISO ?? new Date().toISOString(),
     shiftStartMinuteOfDay: 8 * 60,
     shiftDurationMin: 480,
-    executionMode: 'realtime',
     realTimeScale: 1,
   };
+}
+
+/**
+ * Stored time settings laid over the defaults.
+ *
+ * Also drops `executionMode`, a field older saves and `.swproj` files carry.
+ * It chose between paced playback and a "virtual" mode that jumped straight
+ * to the end of the shift; that mode is gone, so playback is always paced and
+ * a project saved with it on must not keep the dead key.
+ */
+function timeSettingsFrom(createdAtISO: string | undefined, stored: unknown): TimeSettings {
+  const { executionMode: _removed, ...rest } = (stored ?? {}) as Partial<TimeSettings> & {
+    executionMode?: unknown;
+  };
+  void _removed;
+  return { ...defaultTimeSettings(createdAtISO), ...rest };
 }
 
 /**
@@ -149,7 +161,6 @@ export interface Line {
   name: string;
   floorId: string;
   garmentTemplateId: string;
-  operators: number;
   lastKpis?: ScenarioKpis;
   /** Wall-clock when lastKpis was captured. */
   lastRunAt?: string;
@@ -214,8 +225,6 @@ export interface Scenario {
   config: {
     garmentTemplateId: string;
     operators: number;
-    /** Sparse overrides at save time — recreate the run if needed. */
-    skillMatrix: SkillMatrix;
     /** Snapshot of the active twin at save time. Lets a scenario carry its
      *  own factory layout (lines, workstations, connectors) so loading R1
      *  vs R2 swaps the floor, not just the per-garment config. Optional
@@ -234,11 +243,6 @@ export interface ProjectState {
   /** The project's working production system. Drives bundleSize in the sim
    *  and is surfaced in the LiveSim HUD so the user can confirm their layout
    *  choice is being honoured. */
-
-  /** Operator name overrides (id → name). */
-  operatorNames: Record<string, string>;
-
-  skillMatrix: SkillMatrix;
 
   scenarios: Scenario[];
 
@@ -285,9 +289,6 @@ export interface ProjectState {
   setUnit: <K extends keyof UnitsPrefs>(key: K, value: UnitsPrefs[K]) => void;
   /** Patch one time-semantics field. */
   setTime: <K extends keyof TimeSettings>(key: K, value: TimeSettings[K]) => void;
-  setOperatorName: (id: string, name: string) => void;
-  setSkill: (operatorId: string, opId: string, efficiency: number) => void;
-  resetSkillMatrix: () => void;
 
   /** Save a scenario from the current state + a freshly-captured KPI run.
    *  When `twin` is supplied, the scenario stores a deep clone of the
@@ -310,11 +311,6 @@ export interface ProjectState {
   deleteScenario: (id: string) => void;
   /** Rename a scenario in place. */
   renameScenario: (id: string, name: string) => void;
-  /**
-   * Restore a scenario's skill matrix into the live project. The scenario
-   * itself is not deleted — loading is non-destructive to the saved row.
-   */
-  loadScenario: (id: string) => void;
 
   // ── Factory CRUD ─────────────────────────────────────────────────────────
   /** Add a floor to the factory. Returns the created floor's id. */
@@ -429,31 +425,48 @@ function defaultFactory(): FactoryStructure {
       { id: 'F3', name: 'Floor 3 · Finishing', description: 'Press + pack — 2 lines',         color: 'thread' },
     ],
     lines: [
-      { id: 'L1', name: 'Line 1', floorId: 'F1', garmentTemplateId: 'tshirt',     operators: 25 },
-      { id: 'L2', name: 'Line 2', floorId: 'F1', garmentTemplateId: 'polo',       operators: 28 },
-      { id: 'L3', name: 'Line 3', floorId: 'F1', garmentTemplateId: 'shirt',      operators: 22 },
-      { id: 'L4', name: 'Line 4', floorId: 'F1', garmentTemplateId: 'sweatshirt', operators: 24 },
-      { id: 'L5', name: 'Cut A',  floorId: 'F2', garmentTemplateId: 'tshirt',     operators: 6 },
-      { id: 'L6', name: 'Cut B',  floorId: 'F2', garmentTemplateId: 'shirt',      operators: 8 },
-      { id: 'L7', name: 'Finish A', floorId: 'F3', garmentTemplateId: 'tshirt',   operators: 10 },
-      { id: 'L8', name: 'Finish B', floorId: 'F3', garmentTemplateId: 'shirt',    operators: 8 },
+      { id: 'L1', name: 'Line 1', floorId: 'F1', garmentTemplateId: 'tshirt' },
+      { id: 'L2', name: 'Line 2', floorId: 'F1', garmentTemplateId: 'polo' },
+      { id: 'L3', name: 'Line 3', floorId: 'F1', garmentTemplateId: 'shirt' },
+      { id: 'L4', name: 'Line 4', floorId: 'F1', garmentTemplateId: 'sweatshirt' },
+      { id: 'L5', name: 'Cut A',  floorId: 'F2', garmentTemplateId: 'tshirt' },
+      { id: 'L6', name: 'Cut B',  floorId: 'F2', garmentTemplateId: 'shirt' },
+      { id: 'L7', name: 'Finish A', floorId: 'F3', garmentTemplateId: 'tshirt' },
+      { id: 'L8', name: 'Finish B', floorId: 'F3', garmentTemplateId: 'shirt' },
     ],
+  };
+}
+
+/** Drop the v7 `skillMatrix` a saved scenario's config may still carry. */
+function stripScenarioSkillMatrix(sc: Scenario): Scenario {
+  const cfg = sc.config as Scenario['config'] & { skillMatrix?: unknown };
+  if (!('skillMatrix' in cfg)) return sc;
+  const { skillMatrix: _dropped, ...rest } = cfg;
+  void _dropped;
+  return { ...sc, config: rest };
+}
+
+/** Drop the v7 per-line `operators` headcount off the legacy factory seed. */
+function stripLineHeadcount(factory: FactoryStructure): FactoryStructure {
+  return {
+    ...factory,
+    lines: factory.lines.map((l) => {
+      const { operators: _dropped, ...rest } = l as Line & { operators?: unknown };
+      void _dropped;
+      return rest;
+    }),
   };
 }
 
 const defaults: Omit<
   ProjectState,
   | 'rename'
-  | 'setOperatorName'
-  | 'setSkill'
-  | 'resetSkillMatrix'
   | 'resetProject'
   | 'loadProject'
   | 'exportProject'
   | 'saveScenario'
   | 'deleteScenario'
   | 'renameScenario'
-  | 'loadScenario'
   | 'addFloor'
   | 'removeFloor'
   | 'renameFloor'
@@ -481,8 +494,6 @@ const defaults: Omit<
   return {
     schemaVersion: PROJECT_SCHEMA_VERSION,
     meta,
-    operatorNames: {},
-    skillMatrix: {},
     scenarios: [],
     factory: defaultFactory(),
     garmentEdits: {},
@@ -529,22 +540,6 @@ export const useProject = create<ProjectState>()(
       setTime: (key, value) =>
         set((s) => touch({ ...s, time: { ...s.time, [key]: value } })),
 
-      setOperatorName: (id, name) =>
-        set((s) => touch({ ...s, operatorNames: { ...s.operatorNames, [id]: name } })),
-
-      setSkill: (operatorId, opId, efficiency) =>
-        set((s) => {
-          const opRow = { ...(s.skillMatrix[operatorId] ?? {}) };
-          if (efficiency <= 0) delete opRow[opId];
-          else opRow[opId] = Math.max(0, Math.min(1.5, efficiency));
-          return touch({
-            ...s,
-            skillMatrix: { ...s.skillMatrix, [operatorId]: opRow },
-          });
-        }),
-
-      resetSkillMatrix: () => set((s) => touch({ ...s, skillMatrix: {} })),
-
       saveScenario: (input) => {
         const cur = get();
         const id = `scn-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
@@ -557,7 +552,6 @@ export const useProject = create<ProjectState>()(
           config: {
             garmentTemplateId,
             operators,
-            skillMatrix: JSON.parse(JSON.stringify(cur.skillMatrix)) as SkillMatrix,
             twin: input.twin ? (JSON.parse(JSON.stringify(input.twin)) as Twin) : undefined,
           },
           kpis: input.kpis,
@@ -576,16 +570,6 @@ export const useProject = create<ProjectState>()(
             scenarios: s.scenarios.map((x) => (x.id === id ? { ...x, name } : x)),
           }),
         ),
-
-      loadScenario: (id) =>
-        set((s) => {
-          const scenario = s.scenarios.find((x) => x.id === id);
-          if (!scenario) return s;
-          return touch({
-            ...s,
-            skillMatrix: JSON.parse(JSON.stringify(scenario.config.skillMatrix)) as SkillMatrix,
-          });
-        }),
 
       addFloor: (input) => {
         const id = `F${Date.now().toString(36)}`;
@@ -791,13 +775,9 @@ export const useProject = create<ProjectState>()(
           rename: get().rename,
           setUnit: get().setUnit,
           setTime: get().setTime,
-          setOperatorName: get().setOperatorName,
-          setSkill: get().setSkill,
-          resetSkillMatrix: get().resetSkillMatrix,
           saveScenario: get().saveScenario,
           deleteScenario: get().deleteScenario,
           renameScenario: get().renameScenario,
-          loadScenario: get().loadScenario,
           addFloor: get().addFloor,
           removeFloor: get().removeFloor,
           renameFloor: get().renameFloor,
@@ -839,20 +819,18 @@ export const useProject = create<ProjectState>()(
           ...cur,
           schemaVersion: PROJECT_SCHEMA_VERSION,
           meta: { ...defaults.meta, ...s.meta, modifiedAt: new Date().toISOString() },
-          operatorNames: s.operatorNames ?? {},
-          skillMatrix: s.skillMatrix ?? {},
-          scenarios: s.scenarios ?? [],
-          factory: s.factory ?? defaultFactory(),
+          // v7 and earlier carried a skill matrix, operator names and a
+          // per-line headcount; none is read back. Not copying them is the
+          // migration — the file loads, and the next save writes v8.
+          scenarios: (s.scenarios ?? []).map(stripScenarioSkillMatrix),
+          factory: stripLineHeadcount(s.factory ?? defaultFactory()),
           garmentEdits: s.garmentEdits ?? {},
           stationTypes: (s.stationTypes ?? []).map(normalizeStationType),
           hiddenGarmentIds: s.hiddenGarmentIds ?? {},
           units: { ...defaultUnits, ...s.units },
           // v1 files have no `time` field — fill from defaults anchored on
           // the project's creation date so calendar projections are sensible.
-          time: {
-            ...defaultTimeSettings(s.meta?.createdAt ?? defaults.meta.createdAt),
-            ...(s.time ?? {}),
-          },
+          time: timeSettingsFrom(s.meta?.createdAt ?? defaults.meta.createdAt, s.time),
         }));
         return { ok: true };
       },
@@ -862,8 +840,6 @@ export const useProject = create<ProjectState>()(
         return {
           schemaVersion: s.schemaVersion,
           meta: s.meta,
-          operatorNames: s.operatorNames,
-          skillMatrix: s.skillMatrix,
           scenarios: s.scenarios,
           factory: s.factory,
           garmentEdits: s.garmentEdits,
@@ -885,8 +861,6 @@ export const useProject = create<ProjectState>()(
       partialize: (state) => ({
         schemaVersion: state.schemaVersion,
         meta: state.meta,
-        operatorNames: state.operatorNames,
-        skillMatrix: state.skillMatrix,
         scenarios: state.scenarios,
         factory: state.factory,
         garmentEdits: state.garmentEdits,
@@ -973,6 +947,20 @@ export const useProject = create<ProjectState>()(
           }
           p = next as Partial<ProjectState>;
         }
+        // v7 → v8: the skill matrix, operator-name overrides and the legacy
+        // per-line headcount are gone. Efficiency lives on the twin's
+        // stations and lines now, and the headcount is derived from the
+        // stations on the floor, so each key is deleted rather than carried.
+        if (fromVersion < 8) {
+          const next = { ...p } as Record<string, unknown>;
+          delete next.skillMatrix;
+          delete next.operatorNames;
+          const scenarios = next.scenarios as Scenario[] | undefined;
+          if (scenarios) next.scenarios = scenarios.map(stripScenarioSkillMatrix);
+          const factory = next.factory as FactoryStructure | undefined;
+          if (factory) next.factory = stripLineHeadcount(factory);
+          p = next as Partial<ProjectState>;
+        }
         return { ...p, schemaVersion: PROJECT_SCHEMA_VERSION } as Partial<ProjectState>;
       },
       // Payloads written before a slice existed hydrate it as undefined, and
@@ -988,7 +976,7 @@ export const useProject = create<ProjectState>()(
           // Re-clamped on the way in: a payload hand-edited or written by an
           // older build can hold a footprint the canvas cannot draw.
           stationTypes: (p.stationTypes ?? []).map(normalizeStationType),
-          time: { ...defaultTimeSettings(p.meta?.createdAt ?? current.meta.createdAt), ...(p.time ?? {}) },
+          time: timeSettingsFrom(p.meta?.createdAt ?? current.meta.createdAt, p.time),
         };
       },
     },
@@ -1015,23 +1003,42 @@ export function downloadProjectJson(state: ProjectState): void {
 }
 
 /**
+ * Turn the text of a chosen project file into JSON, naming the file in any
+ * complaint. An empty file is called out on its own: it is what a Save that
+ * opened the dialog and then failed to write leaves behind, and "unexpected
+ * end of JSON input" does not tell the user that.
+ */
+export function parseProjectFileText(text: string, fileName: string): unknown {
+  if (text.trim() === '') {
+    throw new Error(`"${fileName}" is empty — nothing was ever written to it. Save the factory again, then open that file.`);
+  }
+  try {
+    return JSON.parse(text);
+  } catch {
+    throw new Error(`"${fileName}" is not a .swproj file — its contents are not JSON.`);
+  }
+}
+
+/**
  * Pop a file picker, parse the chosen `.swproj` (or `.json`), and feed it to
  * `loadProject`. Resolves to a result describing success or the failure
- * reason for the caller to show to the user.
+ * reason for the caller to show to the user. Rejects with an AbortError when
+ * the dialog closes without a file, so callers can stay quiet on a cancel.
  */
 export function pickProjectFile(): Promise<unknown> {
   return new Promise((resolve, reject) => {
     const input = document.createElement('input');
     input.type = 'file';
     input.accept = '.swproj,.json,application/json';
+    const cancelled = () => reject(new DOMException('No file chosen', 'AbortError'));
+    input.oncancel = cancelled;
     input.onchange = () => {
       const file = input.files?.[0];
-      if (!file) return reject(new Error('No file chosen'));
+      if (!file) return cancelled();
       const reader = new FileReader();
       reader.onload = () => {
         try {
-          const text = reader.result as string;
-          resolve(JSON.parse(text));
+          resolve(parseProjectFileText(reader.result as string, file.name));
         } catch (e) {
           reject(e);
         }

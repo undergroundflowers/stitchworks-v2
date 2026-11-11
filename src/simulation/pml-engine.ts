@@ -31,7 +31,8 @@
  * harness, future export).
  */
 
-import type { Twin, Workstation } from '../domain/twin';
+import type { SewingLine, Twin, Workstation } from '../domain/twin';
+import { stationEfficiency } from '../domain/twin';
 import {
   getBlockSpec,
   getBlockParams,
@@ -268,11 +269,6 @@ export interface PmlSimOpts {
    *  per-block running totals into `result.samples`. Default 1 min.
    *  Set to 0 to disable sampling (saves memory / time). */
   samplePeriodMin?: number;
-  /** Per-op skill-efficiency multipliers keyed by Operation.id. Drives
-   *  the cycle-time adjustment: effective cycle = nominal / efficiency.
-   *  Computed by `efficiencyFromSkillMatrix(skillMatrix, ops)` upstream.
-   *  Missing / 1.0 ⇒ engine runs at nominal speed (today's behaviour). */
-  opEfficiency?: Record<string, number>;
   /** P2 — record an entity-level flow-event stream (`result.flow`). Off by
    *  default: recording is purely additive (it never touches sim state) but
    *  can be large, so callers opt in. Drives real bundle animation (replaces
@@ -802,22 +798,21 @@ interface BlockState {
  */
 function cycleMinFor(
   ws: Workstation,
-  opEfficiency?: Record<string, number>,
+  line: SewingLine | undefined,
   shareFactor: number = 1,
+  catalog?: GarmentCatalog,
 ): number {
-  // P2: skill efficiency applies at every cycle source, not just the
-  // op-derived path. Pilot factories author block.params.cycleS directly
-  // from op.smv × bundleSize, so if skill effi is only applied to the
-  // op-derived branch the multiplier silently no-ops on pilot lines.
-  const opId = ws.operation?.opId;
-  const raw = opId ? opEfficiency?.[opId] : undefined;
-  const eff = clampSkillEfficiency(raw);
+  // Efficiency applies at every cycle source, not just the op-derived
+  // path. Pilot factories author block.params.cycleS directly from
+  // op.smv × bundleSize, so if it were only applied to the op-derived
+  // branch the multiplier would silently no-op on pilot lines.
+  const eff = stationEfficiency(ws, line);
   const share = clampShareFactor(shareFactor);
   const overrideCycleS = ws.block?.params?.cycleS;
   if (overrideCycleS != null && overrideCycleS > 0) {
     return (overrideCycleS / 60) / eff / share;
   }
-  const opCycleMin = opCycleMinFor(ws);
+  const opCycleMin = opCycleMinFor(ws, catalog);
   if (opCycleMin != null) {
     return opCycleMin / eff / share;
   }
@@ -944,24 +939,17 @@ function buildRotationCells(twin: Twin): {
   return { cells, byWsId };
 }
 
-/** Skill efficiency multiplier — clamp to [0.5, 1.5] so a stale or wild
- *  matrix entry can't drive cycles to absurd values. 1.0 = nominal speed. */
-function clampSkillEfficiency(raw: number | undefined): number {
-  if (raw == null || !Number.isFinite(raw)) return 1;
-  return Math.min(1.5, Math.max(0.5, raw));
-}
-
 /** If the workstation is bound to a garment operation, return the cycle
  *  time per agent (in MINUTES) derived from the bulletin's SMV times the
  *  bundle size. Returns null when the binding is incomplete or the op
  *  lookup misses — caller falls back to the catalog default. */
-function opCycleMinFor(ws: Workstation): number | null {
-  const opId = ws.operation?.opId;
-  const garmentId = ws.operation?.garmentId;
-  if (!opId || !garmentId) return null;
-  const garment = GARMENT_TEMPLATES[garmentId];
-  if (!garment) return null;
-  const op = garment.operations.find((o) => o.id === opId);
+function opCycleMinFor(ws: Workstation, catalog?: GarmentCatalog): number | null {
+  // Through the effective catalog, like c / N / discipline. Reading the frozen
+  // built-ins here meant a station bound to an IMPORTED or edited bulletin
+  // never got its SMV: it fell through to the catalog's generic cycle, so an
+  // imported line ran every sewing station at the same 35 s whatever the
+  // operation bulletin said.
+  const op = resolveOp(ws, catalog);
   if (!op || !(op.smv > 0)) return null;
   const bundleSize = Math.max(1, Math.round(ws.operation?.bundleSize ?? 1));
   return op.smv * bundleSize;
@@ -986,7 +974,7 @@ function opCycleMinFor(ws: Workstation): number | null {
 function cycleDistFor(
   ws: Workstation,
   catalog: GarmentCatalog | undefined,
-  opEfficiency: Record<string, number> | undefined,
+  line: SewingLine | undefined,
   shareFactor: number,
 ): ServiceDist | undefined {
   const base = getBlockParams(ws).cycleDist ?? resolveOp(ws, catalog)?.serviceDistribution;
@@ -998,8 +986,7 @@ function cycleDistFor(
   // silently faster than the identical station on the deterministic path.
   // scaleServiceDist moves location and scale together, so Cs is preserved and
   // the Kendall service code does not change.
-  const opId = ws.operation?.opId;
-  const eff = clampSkillEfficiency(opId ? opEfficiency?.[opId] : undefined);
+  const eff = stationEfficiency(ws, line);
   const share = clampShareFactor(shareFactor);
   const factor = 1 / (eff * share);
   return factor === 1 ? base : scaleServiceDist(base, factor);
@@ -1194,17 +1181,19 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // ── Build block states ─────────────────────────────────────────────────────
   // shareFactorMap captures the engine-visible slowdown for each shared
   // workstation. Computed once up front so cycleMinFor can be a pure
-  // function of (ws, efficiency, shareFactor) without re-scanning assignments.
+  // function of (ws, line, shareFactor) without re-scanning assignments.
   const shareFactorMap = buildShareFactorMap(twin);
   // Rotation cells — modular/TSS cells where N operators time-share
   // across M stations. KPIs are derived from the time-fraction model via
   // shareFactor; this structure drives the visual rotation pointer in
   // `PmlSimSample.rotationPointers` so the canvas can animate the marker.
   const { cells: rotationCells, byWsId: rotationCellByWsId } = buildRotationCells(twin);
+  const linesById = new Map(twin.lines.map((l) => [l.id, l]));
   const blocks = new Map<string, BlockState>();
   for (const ws of twin.workstations) {
     const spec = getBlockSpec(ws);
     const shareFactor = shareFactorMap.get(ws.id) ?? 1;
+    const line = ws.lineId ? linesById.get(ws.lineId) : undefined;
     blocks.set(ws.id, {
       ws,
       kind: spec.kind,
@@ -1216,8 +1205,8 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       inflowPieces: 0,
       busyMin: 0,
       inService: 0,
-      cycleMin: cycleMinFor(ws, opts.opEfficiency, shareFactor),
-      cycleDist: cycleDistFor(ws, opts.garmentsById, opts.opEfficiency, shareFactor),
+      cycleMin: cycleMinFor(ws, line, shareFactor, opts.garmentsById),
+      cycleDist: cycleDistFor(ws, opts.garmentsById, line, shareFactor),
       arrivalIntervalMin: arrivalIntervalFor(ws),
       arrivalDist: arrivalDistFor(ws),
       passProb: passProbFor(ws),
@@ -2052,12 +2041,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     routeToOpId: string | undefined;
     maxAttempts: number;
   } | null {
-    const opId = ws.operation?.opId;
-    const garmentId = ws.operation?.garmentId;
-    if (!opId || !garmentId) return null;
-    const garment = GARMENT_TEMPLATES[garmentId];
-    if (!garment) return null;
-    const op = garment.operations.find((o) => o.id === opId);
+    // Effective catalog, so a rework rate authored on an imported or edited
+    // bulletin is honoured rather than silently read as "no rework".
+    const op = resolveOp(ws, opts.garmentsById);
     if (!op || !(op.reworkRate && op.reworkRate > 0)) return null;
     return {
       rate: Math.min(1, Math.max(0, op.reworkRate)),
