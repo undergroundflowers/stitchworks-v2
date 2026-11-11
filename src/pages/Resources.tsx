@@ -557,7 +557,7 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
           <div style={{ flex: 1 }}/>
           <Button variant="secondary" size="sm" icon="+" onClick={() => setNewGarmentOpen(true)}>New garment</Button>
           {/* Import from Excel — feeds an industry operation-breakdown sheet
-              (Modelama / Brandix / generic ERP export) through
+              (any standard ERP-exported bulletin) through
               `parseGarmentXlsx` and previews the result in a confirm modal.
               Hidden <input> + button click forwards via ref. */}
           <input
@@ -1684,7 +1684,7 @@ interface MachineType {
 
 /**
  * Headcount per machine type for a balanced sewing line. Proportions match
- * the Brandix-era SMV sheet (4× 4OL, 10× SNL, 1× FB, 1× BS, 4× FL, 1× BH).
+ * the reference SMV sheet (4× 4OL, 10× SNL, 1× FB, 1× BS, 4× FL, 1× BH).
  */
 const MACHINE_DISTRIBUTION: Partial<Record<MachineSpec['code'], number>> = {
   SNL: 10, '4OL': 4, FL: 4, FB: 1, KS: 1, BH: 1, BS: 1, BT: 1,

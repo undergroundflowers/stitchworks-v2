@@ -1,7 +1,7 @@
 /**
  * Excel → GarmentTemplate importer. Reads operation-bulletin spreadsheets in
- * the format used by Modelama, Brandix, and most other ERP-exported
- * production sheets, and converts them into a Stitchworks `GarmentTemplate`
+ * the format used by most ERP-exported production sheets, and converts
+ * them into a Stitchworks `GarmentTemplate`
  * with proper `Operation[]` records.
  *
  * Shape we target (rows are 0-indexed):

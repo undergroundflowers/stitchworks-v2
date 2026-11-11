@@ -3,9 +3,9 @@
  * common knit-and-woven categories. Stitchworks ships these so a new project
  * can pick a template and have a runnable simulation in minutes.
  *
- * The T-shirt bulletin is sourced from the real Brandix Unit-3 operation
- * breakdown sheet (Operation-Breakdown-and-SMV-of-T-shirt-of-Knit-Garments.xlsx)
- * — total SAM 8.41 min, 25 operations, 100% target 178 pcs/hr.
+ * The T-shirt bulletin is derived from a real industry operation-breakdown
+ * sheet — total SAM 8.41 min, 25 operations, 100% target 178 pcs/hr. The
+ * source sheet is not redistributed; only the SMV figures are seeded here.
  */
 
 import type { Operation } from './operations';
@@ -29,7 +29,7 @@ export interface GarmentTemplate {
   bestFor: string;
 }
 
-// ── T-shirt template — sourced from Brandix Unit-3 SMV sheet ──────────────
+// ── T-shirt template — derived from an industry SMV sheet ─────────────────
 // Total SAM: 8.41 min · 100% target/hr: 178 · 25 operators
 const TSHIRT_OPS: Operation[] = [
   { id: 'ts-01', code: 'OP-01', name: 'Care label attach',                    smv: 0.12, machineCode: 'SNL', skill: 'stitching',   category: 'sewing' },

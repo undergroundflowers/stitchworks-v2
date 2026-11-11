@@ -93,7 +93,7 @@ function newId(): string {
   return `fac-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 6)}`;
 }
 
-/** Comparison key: trimmed and case-insensitive. "Brandix" and "brandix " collide. */
+/** Comparison key: trimmed and case-insensitive. "Acme" and "acme " collide. */
 function nameKey(s: string): string {
   return s.trim().toLowerCase();
 }

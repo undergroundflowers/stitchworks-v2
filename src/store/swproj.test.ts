@@ -159,13 +159,13 @@ describe('archiveAndImportSwproj (Menu import)', () => {
   });
 
   it('suffixes a name that collides with a factory already in the library', () => {
-    archiveAndImportSwproj(envelopeNamed('Brandix'));
-    const second = archiveAndImportSwproj(envelopeNamed('Brandix'));
+    archiveAndImportSwproj(envelopeNamed('Acme'));
+    const second = archiveAndImportSwproj(envelopeNamed('Acme'));
 
     expect(second.ok).toBe(true);
-    expect(second.name).toBe('Brandix (2)');
+    expect(second.name).toBe('Acme (2)');
     expect(useFactoryLibrary.getState().savedFactories.map((f) => f.name)).toEqual([
-      'Brandix',
+      'Acme',
       'Open Factory',
     ]);
   });

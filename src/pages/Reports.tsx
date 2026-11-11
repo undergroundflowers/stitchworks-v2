@@ -464,7 +464,7 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
               </div>
             </div>
             <div style={{ fontSize: 12, color: SW_COLORS.muted, marginBottom: 12, lineHeight: 1.45 }}>
-              Each row compares the operation bulletin's IE-declared output (per the Modelama xlsx header) against the stochastic sim mean. Green ✓ = within ±15%; amber △ = within ±30%; red ✗ = significantly off. A red row means the operator headcount, machine balance or skill model needs adjustment.
+              Each row compares the operation bulletin's IE-declared output (per the imported sheet's header) against the stochastic sim mean. Green ✓ = within ±15%; amber △ = within ±30%; red ✗ = significantly off. A red row means the operator headcount, machine balance or skill model needs adjustment.
             </div>
             <div style={{ overflowX: 'auto' }}>
               <table style={{ width: '100%', borderCollapse: 'collapse', fontSize: 12 }}>

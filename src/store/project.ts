@@ -410,7 +410,7 @@ function defaultMeta(): ProjectMeta {
   const now = new Date().toISOString();
   return {
     name: 'Test Factory',
-    factory: 'Brandix Unit-3',
+    factory: 'Reference Unit-3',
     createdAt: now,
     modifiedAt: now,
   };
