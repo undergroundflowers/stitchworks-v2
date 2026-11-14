@@ -306,7 +306,18 @@ export function LiveSimPage() {
   // both surfaces replay the same shift, and TIME SETUP can change it.
   const simSeed = useSimScope((s) => s.seed);
   const setSimSeed = useSimScope((s) => s.setSeed);
-  const baseSim = usePmlSim(simSourceTwin, { garment, recordFlow: true, seed: simSeed });
+  // The run is as long as the shift TIME SETUP says. It used to be a fixed 480
+  // minutes: the SHIFT DURATION field moved the day counter and the progress
+  // bar and left the engine alone, so a 10-hour shift simulated eight.
+  const runMinutes = Math.max(1, Math.round(project.time.shiftDurationMin));
+  const stopAtPieces = useSimScope((s) => s.stopAtPieces);
+  const setStopAtPieces = useSimScope((s) => s.setStopAtPieces);
+  const baseSim = usePmlSim(simSourceTwin, {
+    garment,
+    recordFlow: true,
+    seed: simSeed,
+    durationMin: runMinutes,
+  });
 
   // ── Multi-line scope ────────────────────────────────────────────────────
   // When no specific line is selected and the twin has more than one wired
@@ -336,7 +347,11 @@ export function LiveSimPage() {
         : [],
     [inMultiLineScope, wiredLineBuilds, activeTwin],
   );
-  const multiSim = useMultiPmlSim(multiInputs, { recordFlow: true, seed: simSeed });
+  const multiSim = useMultiPmlSim(multiInputs, {
+    recordFlow: true,
+    seed: simSeed,
+    durationMin: runMinutes,
+  });
   const multiLineIds = useMemo(
     () => wiredLineBuilds.map((lb) => lb.line.id),
     [wiredLineBuilds],
@@ -593,7 +608,7 @@ export function LiveSimPage() {
             <NumberInput
               aria-label="Shift duration in minutes"
               min={30}
-              max={1440}
+              max={2880}
               step={30}
               value={project.time.shiftDurationMin}
               onChange={(v) => {
@@ -646,6 +661,36 @@ export function LiveSimPage() {
           />
         </div>
 
+        {/* Stop at output. Turns "what does a shift make" into "how long does
+            the order take": the run ends the moment this many pieces are
+            finished, and the shift length above becomes only a ceiling. */}
+        <div style={{ gridColumn: '1 / -1' }}>
+          <span style={setupLabel}>STOP AT OUTPUT</span>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 8 }}>
+            <NumberInput
+              aria-label="Stop the run at this many finished pieces"
+              min={0}
+              max={1000000}
+              step={100}
+              value={stopAtPieces}
+              onChange={(v) => {
+                if (v !== undefined) setStopAtPieces(v);
+              }}
+              style={{ ...setupInput, width: 90 }}
+            />
+            <span
+              style={{
+                fontFamily: SW_FONTS.mono,
+                fontSize: 10,
+                color: alpha(SW_COLORS.ink, 0.55),
+                whiteSpace: 'nowrap',
+              }}
+            >
+              {stopAtPieces > 0 ? 'pcs · then the run ends' : 'pcs · 0 = run the whole shift'}
+            </span>
+          </div>
+        </div>
+
         {/* Random seed. Same seed ⇒ same run, so a comparison between two
             layouts is fair; a new seed is a different roll of the same dice,
             which is how you tell a real effect from luck. */}
@@ -693,7 +738,7 @@ export function LiveSimPage() {
           </div>
           <div style={{ marginTop: 6, fontFamily: SW_FONTS.body, fontSize: 11, lineHeight: 1.45, color: alpha(SW_COLORS.ink, 0.55) }}>
             Same seed, same run. A new seed reruns the shift with different random
-            service times and arrivals. Insights uses this seed too.
+            service times and arrivals. Statistics uses this seed too.
           </div>
         </div>
       </div>
@@ -762,6 +807,21 @@ export function LiveSimPage() {
           minWidth: 0,
         }}
       >
+        {/* Three cells: identity on the left, the line picker in the middle,
+            the Builder escape hatch on the right. The two side cells are equal
+            flex shares, which is what puts the picker at the true centre of
+            the bar rather than merely between two unequal clusters. Neither
+            side shrinks below its own content, so at a narrow width the picker
+            slides off-centre instead of anything overlapping. */}
+        <div
+          style={{
+            flex: '1 1 0',
+            minWidth: 'max-content',
+            display: 'flex',
+            alignItems: 'center',
+            gap: 14,
+          }}
+        >
         {/* Back to menu — same affordance, same spot as the Builder's, so
             leaving a surface is the same gesture on every tab. */}
         <button
@@ -786,7 +846,7 @@ export function LiveSimPage() {
           <Icon name="back" />
         </button>
         <ViewTitle title="Live Sim" surface="dark" />
-        <div style={{ width: 1, height: 20, flex: 'none', background: '#ffffff20' }} />
+        </div>
 
         {/* The run's clock used to sit here, and a TIME SETUP button next to
             it opened the drawer that defined what the clock counted. Both are
@@ -811,9 +871,17 @@ export function LiveSimPage() {
               setSearchParams(params);
             }}
           />
-        ) : (
-          <div style={{ flex: 1 }} />
-        )}
+        ) : null}
+
+        <div
+          style={{
+            flex: '1 1 0',
+            minWidth: 'max-content',
+            display: 'flex',
+            justifyContent: 'flex-end',
+            alignItems: 'center',
+          }}
+        >
 
         {/* EDIT IN BUILDER — opens a fresh, isolated Builder draft in a new
             browser tab. We DO NOT touch the active twin: instead we build a
@@ -907,6 +975,7 @@ export function LiveSimPage() {
             </button>
           );
         })()}
+        </div>
       </div>
 
       {/* SIMULATION FLOOR — every remaining pixel. The transport dock rides
@@ -3511,9 +3580,10 @@ function SewingLinesScope({
         display: 'flex',
         alignItems: 'center',
         gap: 8,
-        // Claims the space the old rail held, and shrinks before any of the
-        // fixed controls do — the picker narrows, the buttons never squash.
-        flex: '1 1 0',
+        // Sized to its content and centred by the equal cells either side of
+        // it (see the bar). Still the first thing to give way if the bar runs
+        // out of room — the buttons never squash.
+        flex: '0 1 auto',
         minWidth: 0,
       }}
     >

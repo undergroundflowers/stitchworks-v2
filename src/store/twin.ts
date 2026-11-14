@@ -153,6 +153,12 @@ export interface TwinState {
    *  rebalanced to `1 / (N - 1)`. No-op when the station's primary
    *  isn't shared. */
   unshareWorkstation: (wsId: string) => void;
+  /** How a shared operator's time reaches their stations: `timeSplit` is a
+   *  fixed share of the shift at each, `onDemand` sends them to whichever
+   *  station has work. See `Operator.shareMode`. */
+  setOperatorShareMode: (operatorId: string, mode: 'timeSplit' | 'onDemand') => void;
+  /** Which of an on-demand operator's stations is served first. 1 = first. */
+  setAssignmentPriority: (assignmentId: string, priority: number) => void;
 
   // ── Workstation CRUD ─────────────────────────────────────────────────────
   addWorkstation: (input: {
@@ -588,12 +594,49 @@ export const useTwin = create<TwinState>()(
                 shareFrac: 1,
               });
 
+            // An operator left covering one station is no longer shared, so
+            // the question of how their time is dealt out goes with it.
+            const nextOperators = operators.map((o) => {
+              if (o.id !== sharedOpId || remainingCount > 1 || !o.shareMode) return o;
+              const { shareMode: _drop, ...rest } = o;
+              void _drop;
+              return rest;
+            });
+
             return {
               ...twin,
-              operators: [...operators, freshOp],
+              operators: [...nextOperators, freshOp],
               assignments: nextAssignments,
             };
           }),
+        );
+      },
+
+      setOperatorShareMode: (operatorId, mode) => {
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            operators: (twin.operators ?? []).map((o) => {
+              if (o.id !== operatorId) return o;
+              // `timeSplit` is the absence of the field, so a file that has
+              // never used on-demand sharing stays byte-identical on save.
+              const { shareMode: _drop, ...rest } = o;
+              void _drop;
+              return mode === 'onDemand' ? { ...rest, shareMode: 'onDemand' as const } : rest;
+            }),
+          })),
+        );
+      },
+
+      setAssignmentPriority: (assignmentId, priority) => {
+        const next = Math.max(1, Math.min(9, Math.round(priority)));
+        set((s) =>
+          updateActive(s, (twin) => ({
+            ...twin,
+            assignments: (twin.assignments ?? []).map((a) =>
+              a.id === assignmentId ? { ...a, priority: next } : a,
+            ),
+          })),
         );
       },
 

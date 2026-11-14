@@ -18,7 +18,7 @@
 
 import type { GarmentTemplate, Operation } from '../domain';
 import type { Twin, Workstation, SewingLine } from '../domain/twin';
-import { wsBaseFootprint, stationEfficiencyIn } from '../domain/twin';
+import { wsBaseFootprint, stationEfficiencyIn, DEFAULT_LINE_POLICY } from '../domain/twin';
 import type { SimConfig } from './sim-state';
 import type { ServiceDist, QueueDiscipline } from './index';
 import type { ModelTimeUnit } from './timeUnit';
@@ -368,7 +368,7 @@ export function buildSimConfigFromTwin(opts: BuildFromTwinOptions): BuildFromTwi
   const seedBundleSize =
     bundleSizeSamples.length > 0
       ? Math.max(1, Math.round(bundleSizeSamples.reduce((s, v) => s + v, 0) / bundleSizeSamples.length))
-      : garment.defaultBundleSize;
+      : DEFAULT_LINE_POLICY.bundleSize;
   const piecesPerHour = bottleneckCycle > 0 ? 60 / bottleneckCycle : 0;
   const bundlesPerHour = piecesPerHour / Math.max(1, seedBundleSize);
   const arrivalRatePerHour = opts.arrivalRatePerHour ?? bundlesPerHour * 1.1;

@@ -51,6 +51,9 @@ export interface UsePmlSimOpts {
   /** Steady-state warm-up in sim MINUTES. Defaults to the shared scope's
    *  setting; pass 0 to measure across the whole run. */
   warmupMin?: number;
+  /** End the run at this many finished pieces. Defaults to the shared scope's
+   *  setting; 0 runs the whole duration. */
+  stopAtPieces?: number;
 }
 
 export interface UseSimResult {
@@ -84,6 +87,7 @@ export interface UsePmlSimResult extends UseSimResult {
  */
 function useSingleLineSpec(twin: Twin, opts: UsePmlSimOpts | undefined): SimSpec {
   const scopeWarmup = useSimScope((s) => s.warmupMin);
+  const scopeStopAt = useSimScope((s) => s.stopAtPieces);
   // Effective catalog (built-ins + project edits) — see the note on
   // `SimSpec.garmentsById`.
   const garmentsById = useGarments().byId;
@@ -92,6 +96,7 @@ function useSingleLineSpec(twin: Twin, opts: UsePmlSimOpts | undefined): SimSpec
   const garment = opts?.garment;
   const recordFlow = opts?.recordFlow ?? false;
   const warmupMin = opts?.warmupMin ?? scopeWarmup;
+  const stopAtPieces = opts?.stopAtPieces ?? scopeStopAt;
 
   return useMemo<SimSpec>(
     () => ({
@@ -109,8 +114,9 @@ function useSingleLineSpec(twin: Twin, opts: UsePmlSimOpts | undefined): SimSpec
       samplePeriodMin: 1,
       recordFlow,
       warmupMin: Math.max(0, Math.min(warmupMin, durationMin - 1)),
+      stopAtPieces,
     }),
-    [twin, garment, garmentsById, durationMin, seed, recordFlow, warmupMin],
+    [twin, garment, garmentsById, durationMin, seed, recordFlow, warmupMin, stopAtPieces],
   );
 }
 
@@ -173,7 +179,6 @@ function emptyMeta(twin: Twin): PmlTwinView['meta'] {
     garment: {
       id: 'pml-twin',
       name: twin.name,
-      defaultBundleSize: 1,
       operations: [],
     } as unknown as PmlTwinView['meta']['garment'],
     garmentPinned: false,

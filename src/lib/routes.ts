@@ -45,8 +45,9 @@ export const ROUTES: RouteDef[] = [
   { path: '/resources', id: 'resources', label: 'Resources', icon: '▦', kind: 'main' },
   { path: '/line',      id: 'line',      label: 'Build',    icon: '◆', kind: 'main' },
   { path: '/sim',       id: 'sim',       label: 'Run',      icon: '▷', kind: 'main' },
-  { path: '/insights',  id: 'insights',  label: 'Insights', icon: '◎', kind: 'main' },
+  { path: '/insights',  id: 'insights',  label: 'Statistics', icon: '◎', kind: 'main' },
   { path: '/lab',       id: 'lab',       label: 'Queue Lab', shortLabel: 'Lab', icon: '∑', kind: 'main' },
+  { path: '/reports',   id: 'reports',   label: 'Reports',  icon: '⌬', kind: 'main' },
   { path: '/help',      id: 'help',      label: 'Help',     icon: '?', kind: 'main' },
   { path: '/settings',  id: 'settings',  label: 'Settings', icon: '⚙', kind: 'main' },
 ];
@@ -64,6 +65,8 @@ export const ROUTES: RouteDef[] = [
 export const DRILL_PATHS = {
   workstation: (deptId: string, wsId: string, from?: string) =>
     `/workstation/${deptId}/${wsId}${from ? `?from=${encodeURIComponent(from)}` : ''}`,
+  /** BUILD, opened with one station selected so its Inspector is showing. */
+  buildStation: (wsId: string) => `/line?ws=${encodeURIComponent(wsId)}`,
 } as const;
 
 /**

@@ -12,20 +12,13 @@
  * read on the row it is about and Apply sits beside the numbers behind it.
  */
 
-import { useSearchParams } from 'react-router-dom';
-import {
-  Card,
-  LineScopePicker,
-  LineSimEmpty,
-  SectionHeader,
-  ToggleGroup,
-} from '../components';
+import { Navigate, useNavigate, useSearchParams } from 'react-router-dom';
+import { LineScopePicker, LineSimEmpty, PageTitleBar, ViewSwitch } from '../components';
+import { OperatorLoadPanel } from '../components/OperatorLoadPanel';
 import { SW_COLORS } from '../design/tokens';
 import { useLineSim } from '../simulation/useLineSim';
-import { UtilizationBarChart, QueueParetoChart } from '../components/charts';
 import { QueueIndexPage } from './QueueIndex';
 import { QueueAnalyticsPage } from './QueueAnalytics';
-import { ReportsPage } from './Reports';
 
 /**
  * INSIGHTS is the single analysis surface, so the pages that used to be their
@@ -33,9 +26,17 @@ import { ReportsPage } from './Reports';
  * session and the shared scope, so nothing about them changes — they simply
  * stop being separate destinations the user has to know about.
  */
-type InsightTab = 'queues' | 'stations' | 'timeline' | 'reports';
+type InsightTab = 'queues' | 'timeline';
 
-const INSIGHT_TABS: InsightTab[] = ['queues', 'stations', 'timeline', 'reports'];
+const INSIGHT_TABS: InsightTab[] = ['queues', 'timeline'];
+
+/**
+ * `?tab=` values that used to be tabs here and now live on REPORTS, which has
+ * its own place on the rail: `reports` itself, and `stations` ("Where the load
+ * sits"), whose two charts Reports already drew. A saved link to either is
+ * sent on to `/reports` rather than silently opening the queue table.
+ */
+const MOVED_TO_REPORTS = new Set(['reports', 'stations']);
 
 /**
  * Default tab, and the one that carries no `?tab=` so the plain URL stays
@@ -45,7 +46,8 @@ const INSIGHT_TABS: InsightTab[] = ['queues', 'stations', 'timeline', 'reports']
 const DEFAULT_TAB: InsightTab = 'queues';
 
 export function InsightsPage() {
-  const { state, allLines, emptyReason, unassignedStationCount } = useLineSim();
+  const navigate = useNavigate();
+  const { allLines, emptyReason, unassignedStationCount, runs, twin } = useLineSim();
   /**
    * The open tab lives in the URL, not in component state.
    *
@@ -57,7 +59,8 @@ export function InsightsPage() {
    * the browser back button then has to chew through.
    */
   const [searchParams, setSearchParams] = useSearchParams();
-  const requested = searchParams.get('tab') as InsightTab | null;
+  const param = searchParams.get('tab');
+  const requested = param as InsightTab | null;
   const tab: InsightTab = requested && INSIGHT_TABS.includes(requested) ? requested : DEFAULT_TAB;
   const setTab = (v: InsightTab) => {
     const next = new URLSearchParams(searchParams);
@@ -65,6 +68,8 @@ export function InsightsPage() {
     else next.set('tab', v);
     setSearchParams(next, { replace: true });
   };
+
+  if (param && MOVED_TO_REPORTS.has(param)) return <Navigate to="/reports" replace />;
 
   if (emptyReason) {
     return (
@@ -79,72 +84,69 @@ export function InsightsPage() {
   }
 
   return (
-    <div style={{ width: '100%', height: '100%', overflow: 'auto', background: SW_COLORS.paperDeep, padding: 24 }}>
-      {/* A toolbar, not a page header. The kicker / title / sub that used to
-          sit here ("Insights — What to fix on this line") named the surface
-          the nav had already named and spent three lines doing it, so the
-          controls now start at the top of the page: the tabs at the left
-          edge, aligned with the cards they switch, and the scope picker at
-          the far right. Wraps at narrow widths instead of crushing either. */}
-      <div
-        style={{
-          display: 'flex',
-          alignItems: 'center',
-          justifyContent: 'space-between',
-          flexWrap: 'wrap',
-          gap: 10,
-          marginBottom: 16,
-        }}
-      >
-        <ToggleGroup
-          value={tab}
-          onChange={(v) => setTab(v as InsightTab)}
-          options={[
-            { value: 'queues', label: 'Σ Per-station queues' },
-            { value: 'stations', label: '▤ Where the load sits' },
-            { value: 'timeline', label: '∿ Over time' },
-            { value: 'reports', label: '⌬ Reports' },
-          ]}
-        />
-        <LineScopePicker lines={allLines} />
-      </div>
+    <div
+      style={{
+        width: '100%',
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        background: SW_COLORS.paperDeep,
+      }}
+    >
+      {/* The same title bar RESOURCES, BUILD and RUN open with. The line
+          picker sits in its centre — the same place RUN puts it — because it
+          scopes every tab below, not any one of them. */}
+      <PageTitleBar
+        title="Statistics"
+        onBack={() => navigate('/')}
+        center={<LineScopePicker lines={allLines} />}
+        right={
+          // Table view / graph view. The same orange pill BUILD and RUN use
+          // for their views, icons only — the two shapes say what the words
+          // did, and the tooltip still names each.
+          <ViewSwitch<InsightTab>
+            inline
+            value={tab}
+            onChange={setTab}
+            options={[
+              { value: 'queues', label: <TableGlyph />, title: 'Table: per-station queues' },
+              { value: 'timeline', label: <ChartGlyph />, title: 'Graphs: stations over time' },
+            ]}
+          />
+        }
+      />
 
-      {tab === 'queues' && <QueueIndexPage embedded />}
-      {tab === 'timeline' && <QueueAnalyticsPage embedded />}
-      {tab === 'reports' && <ReportsPage embedded />}
-
-      {/* Side by side, not stacked. Both charts draw through a 600-unit
-          viewBox at `width: 100%`, so a full-width card blew them up ~2.5×:
-          giant bars, giant labels, and each panel taller than the viewport.
-          At half width they land near their intended scale, and the two
-          readings of the same run — who is saturated, where WIP piles up —
-          can be compared without scrolling between them. `alignItems:
-          start` so the shorter chart doesn't stretch to match the taller. */}
-      {tab === 'stations' && (
-        <div
-          style={{
-            display: 'grid',
-            gridTemplateColumns: 'repeat(2, minmax(0, 1fr))',
-            alignItems: 'start',
-            gap: 16,
-          }}
-        >
-          <Card>
-            <SectionHeader
-              title="Operator saturation by station"
-              sub="ρ̂ measured from the run. The bar furthest right is the constraint — it sets what the line can deliver."
-            />
-            <UtilizationBarChart stations={state.stations.map((s) => ({ ...s, lineName: '' }))} />
-          </Card>
-          <Card>
-            <SectionHeader
-              title="Where WIP collects"
-              sub="Average bundles waiting per station, worst first, with the cumulative share. A short head means a few stations hold most of your work-in-progress."
-            />
-            <QueueParetoChart stations={state.stations.map((s) => ({ ...s, lineName: '' }))} />
-          </Card>
-        </div>
+      <div style={{ flex: 1, minHeight: 0, overflow: 'auto', padding: 24 }}>
+      {tab === 'queues' && (
+        <>
+          <QueueIndexPage embedded />
+          {/* Stations above, people below: the same run read by who did the
+              work rather than where it was done. */}
+          <OperatorLoadPanel runs={runs} twin={twin} />
+        </>
       )}
+      {tab === 'timeline' && <QueueAnalyticsPage embedded />}
+      </div>
     </div>
+  );
+}
+
+/** A table: an outlined grid with a header rule and two columns. */
+function TableGlyph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+      <rect x="1.75" y="2.75" width="12.5" height="10.5" />
+      <path d="M1.75 6.25h12.5M1.75 9.75h12.5M6.5 6.25v7" />
+    </svg>
+  );
+}
+
+/** A line chart: two axes and a rising trace. */
+function ChartGlyph() {
+  return (
+    <svg width="16" height="16" viewBox="0 0 16 16" fill="none" stroke="currentColor" strokeWidth="1.5" aria-hidden>
+      <path d="M2 2v12h12" />
+      <path d="M4.5 10.5l3-3.5 2.5 2 3.5-5" />
+    </svg>
   );
 }

@@ -125,6 +125,10 @@ export function buildFlowPlayback(flow: readonly FlowEvent[]): FlowPlayback {
         case 'block':
           if (cur && cur.wsId === e.wsId) cur.blockT = e.t;
           break;
+        case 'merge':
+        // Absorbed into another agent at a Combine / Assembler. Terminal for
+        // this id exactly as a Sink is; the joined garment has its own stay.
+        // falls through
         case 'sink':
           // Terminal: the agent is consumed at the Sink. The move(->Sink) just
           // opened a zero-duration stay at the Sink -- close it here so the

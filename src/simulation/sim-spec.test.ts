@@ -138,6 +138,19 @@ describe('simSpecKey — reacts to every engine-visible parameter', () => {
     ['a removed connector', (t) => { t.connectors.splice(1, 1); }],
     ['a rewired connector', (t) => { t.connectors[1].toWsId = t.workstations[0].id; }],
     ['an assignment shareFrac', (t) => { t.assignments![0].shareFrac = 0.5; }],
+    ['a source lot size', (t) => {
+      const src = t.workstations.find((w) => getBlockKind(w) === 'Source')!;
+      src.block!.params!.maxArrivals = 2000;
+    }],
+    ['a source priority', (t) => {
+      const src = t.workstations.find((w) => getBlockKind(w) === 'Source')!;
+      src.block!.params!.sourcePriority = 2;
+    }],
+    // How a shared operator's time is dealt out, and in what order, are both
+    // read by the engine. Neither is on a workstation, so neither would move
+    // the key unless operators and priorities are fingerprinted themselves.
+    ['an operator going on demand', (t) => { t.operators![0].shareMode = 'onDemand'; }],
+    ['an assignment serve order', (t) => { t.assignments![0].priority = 2; }],
     ['a removed assignment', (t) => { t.assignments!.splice(0, 1); }],
     ['line policy', (t) => {
       t.lines[0].policy = { ...t.lines[0].policy, bundleSize: 3 };
@@ -172,6 +185,12 @@ describe('simSpecKey — reacts to run parameters', () => {
   });
   it('reacts to flow recording', () => {
     expect(simSpecKey({ ...spec, recordFlow: !spec.recordFlow })).not.toBe(base);
+  });
+  it('reacts to a stop-at-output target', () => {
+    expect(simSpecKey({ ...spec, stopAtPieces: 1600 })).not.toBe(base);
+  });
+  it('treats an absent stop-at-output and 0 as the same run', () => {
+    expect(simSpecKey({ ...spec, stopAtPieces: 0 })).toBe(simSpecKey({ ...spec, stopAtPieces: undefined }));
   });
   it('reacts to a station efficiency', () => {
     const line = spec.lines[0];

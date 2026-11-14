@@ -44,7 +44,6 @@ import {
   type Workstation,
 } from '../domain/twin';
 import type { GarmentTemplate } from '../domain/garments';
-import type { Operation } from '../domain/operations';
 import { catalogForMachine } from '../domain/reference-twin';
 
 // ── Layout geometry ────────────────────────────────────────────────────────
@@ -125,28 +124,24 @@ function carrierFor(bundleSize?: number): MaterialFlow {
  * `rotationOrder` remain in the Assignment model, so a rotation cell is still
  * expressible by hand, and re-seeding one is a small change if systems come
  * back.
- *
- * Skills are inferred from each operation's declared `skill` field.
  */
 function seedOperatorsAndAssignments(args: {
-  ops: Operation[];
   workstations: Workstation[];
   lineId: string;
 }): { operators: Operator[]; assignments: Assignment[] } {
-  const { ops, workstations, lineId } = args;
+  const { workstations, lineId } = args;
   if (workstations.length === 0) {
     return { operators: [], assignments: [] };
   }
 
   // One primary operator per workstation, named after the op they're tied
-  // to. Per-operator skills are just the one skill that op requires —
-  // sufficient for the engine; the user cross-trains in Resources.
+  // to.
   const operators: Operator[] = workstations.map((_ws, i) => ({
     id: newOperatorId(),
     lineId,
     name: `OPR-${String(i + 1).padStart(2, '0')}`,
     archetypeId: 'sew_op',
-    skills: ops[i] ? [{ skillId: ops[i].skill, efficiency: 1 }] : [],
+    skills: [],
     multiplicity: 1,
   }));
   const assignments: Assignment[] = operators.map((op, i) => ({
@@ -186,12 +181,9 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
   // with the op's catalog machine, cycle time and PML Service block so the
   // Builder canvas renders a recognisable line on first paint.
   const positions = layoutStations(ops.length);
-  // Bundle size to stamp on each workstation: the garment's own bundle when
-  // it declares one, else the default policy's. A piece-flow line stamps 1
-  // because every station then processes exactly one piece per cycle.
-  const stationBundleSize = policy.pieceFlow
-    ? 1
-    : seed.garment?.defaultBundleSize ?? policy.bundleSize;
+  // Bundle size to stamp on each workstation: the line policy's. A piece-flow
+  // line stamps 1 because every station then processes one piece per cycle.
+  const stationBundleSize = policy.pieceFlow ? 1 : policy.bundleSize;
   const workstations = ops.map((op, i) => {
     const catalogId = catalogForMachine(op.machineCode);
     const ws = makeWorkstation({
@@ -253,7 +245,6 @@ export function buildSeededDraftTwin(seed: DraftLineSeed): DraftBuildResult {
   }
 
   const { operators, assignments } = seedOperatorsAndAssignments({
-    ops,
     workstations,
     lineId,
   });

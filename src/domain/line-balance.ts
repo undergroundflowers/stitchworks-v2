@@ -30,7 +30,7 @@
 import type { GarmentTemplate } from './garments';
 import type { Operation } from './operations';
 import type { Twin, Workstation } from './twin';
-import { stationEfficiency } from './twin';
+import { stationEfficiency, DEFAULT_LINE_POLICY } from './twin';
 import { serversFor } from '../simulation/pml-engine';
 import { balance, DEFAULT_BALANCER } from './balancers';
 import {
@@ -377,7 +377,7 @@ export function buildLineBalance(opts: BuildLineBalanceOptions): LineBalance {
       workContentMin,
       cycleMin,
       capacityPerHr: cycleMin > 0 ? 60 / cycleMin : 0,
-      bundleSize: Math.max(1, Math.round(ws.operation.bundleSize ?? garment.defaultBundleSize)),
+      bundleSize: Math.max(1, Math.round(ws.operation.bundleSize ?? DEFAULT_LINE_POLICY.bundleSize)),
     });
   }
 

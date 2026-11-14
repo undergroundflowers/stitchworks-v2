@@ -170,6 +170,28 @@ export interface StationHistoryPoint {
   inSystemNow: number;
   /** Instantaneous queue depth at this instant. */
   queueLenNow: number;
+  /**
+   * Start of the STEP this point closes: the time of the point before it (0
+   * for the first). The four `*Step` fields below are means over
+   * `(stepFrom, time]` only — what the station did in that one stretch — where
+   * the fields above are means over the whole run so far.
+   *
+   * These are exact means of the step, taken by differencing the engine's
+   * cumulative integrals, not a reading at the step's last instant. A reading
+   * at one instant would be a whole number that misses everything between two
+   * points; this cannot miss anything, because it is the integral.
+   */
+  stepFrom: number;
+  /** Share of the step the operators were busy: Δ∫busy dt / (c · Δt). */
+  utilizationStep: number;
+  /** Mean bundles in system over the step: Δ∫L dt / Δt. */
+  inSystemStep: number;
+  /** Mean bundles waiting over the step: Δ∫Lq dt / Δt. */
+  queueLenStep: number;
+  /** Mean wait, in minutes, of the bundles that STARTED service in the step.
+   *  `NaN` when none did — there is no wait to average, which is not the same
+   *  as a wait of zero. */
+  meanWqMinStep: number;
 }
 
 export interface SimState {

@@ -533,6 +533,10 @@ export interface PmlBlockParams {
    *  numbered Source, FIFO within a class. Only bites where two Sources
    *  feed the same station. Default 1. */
   sourcePriority?: number;
+  /** Source — release this many agents, then stop. Models a fixed lot handed
+   *  to the line (an order of 2,000 bodies) rather than an endless stream.
+   *  0 or absent = no limit. */
+  maxArrivals?: number;
   /**
    * Service / Queue — per-station queue discipline, the `e` field of
    * Kendall–Lee. Overrides the bound operation's discipline for THIS station
@@ -718,6 +722,8 @@ export interface ResolvedBlockParams {
   piecesPerAgent: number;
   /** Source — priority class stamped on emitted bundles. 1 = highest. */
   sourcePriority: number;
+  /** Source — total agents to release. 0 = no limit. */
+  maxArrivals: number;
   /** Service — parallel-server cap at the station. Default 1. */
   servers: number;
   /** Service / Delay / Hold / Conveyor / MoveTo — per-agent cycle distribution
@@ -780,6 +786,9 @@ export function getBlockParams(
   // station degrades to FCFS, which is the correct single-class answer.
   const sourcePriority = Math.max(1, Math.round(p.sourcePriority ?? 1));
 
+  // Lot size for a finite Source — explicit > unlimited.
+  const maxArrivals = Math.max(0, Math.round(p.maxArrivals ?? 0));
+
   // Parallel-server cap for Service blocks. Stations are single-server by
   // default (one machine per workstation); reinforced stations bump this.
   const servers = Math.max(1, Math.round(p.servers ?? numProp(fx, 'servers') ?? 1));
@@ -799,6 +808,7 @@ export function getBlockParams(
     batchSize,
     piecesPerAgent,
     sourcePriority,
+    maxArrivals,
     servers,
     cycleDist,
     arrivalDist,
@@ -908,6 +918,22 @@ const FIELD_SOURCE_PRIORITY: ParamFieldSpec = {
 };
 
 /**
+ * Lot size for a Source: how much work is handed to the line in total.
+ *
+ * An endless Source answers "what does a shift make". A finite one answers
+ * "how long does this order take", and it is also the only honest way to model
+ * a rack of parts — 2,000 labels are 2,000 labels, not a tap.
+ */
+const FIELD_MAX_ARRIVALS: ParamFieldSpec = {
+  id: 'maxArrivals',
+  label: 'Lot size',
+  unit: ' bundles',
+  step: 100,
+  hint: 'Stops releasing after this many. 0 = never stops.',
+  resolveDefault: (r) => r.maxArrivals,
+};
+
+/**
  * Parallel servers c at a station.
  *
  * The engine and the analytical layer have always read this (via `serversFor`),
@@ -946,7 +972,7 @@ const FIELD_QUEUE_CAPACITY: ParamFieldSpec = {
 
 /** Per-kind list of authored fields, in the order the Inspector renders. */
 export const PARAM_FIELDS_BY_KIND: Partial<Record<PmlBlockKind, ParamFieldSpec[]>> = {
-  Source: [FIELD_SOURCE_RATE, FIELD_PIECES_PER_AGENT, FIELD_SOURCE_PRIORITY],
+  Source: [FIELD_SOURCE_RATE, FIELD_PIECES_PER_AGENT, FIELD_MAX_ARRIVALS, FIELD_SOURCE_PRIORITY],
   Service: [FIELD_CYCLE_S, FIELD_SERVERS, FIELD_QUEUE_CAPACITY],
   // A Queue has no servers, but it does have a capacity, and the engine
   // enforces it (`canAcceptAt`). It previously had no fields at all.

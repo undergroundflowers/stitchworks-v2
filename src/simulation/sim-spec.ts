@@ -55,6 +55,9 @@ export interface SimSpec {
    */
   recordFlow: boolean;
   warmupMin: number;
+  /** End each line's run when it has finished this many pieces. 0 / absent =
+   *  run to `durationMin`. See `PmlSimOpts.stopAtProduced`. */
+  stopAtPieces?: number;
 }
 
 // ============================================================================
@@ -70,6 +73,7 @@ export interface BuildSimSpecInput {
   seed: number;
   warmupMin: number;
   samplePeriodMin?: number;
+  stopAtPieces?: number;
 }
 
 /**
@@ -111,6 +115,7 @@ export function buildSimSpec(input: BuildSimSpecInput): SimSpec {
     // entity stream there and skip the memory cost on factory-wide runs.
     recordFlow: scope.kind === 'line' || lines.length === 1,
     warmupMin: Math.max(0, Math.min(input.warmupMin, input.durationMin - 1)),
+    stopAtPieces: Math.max(0, Math.round(input.stopAtPieces ?? 0)),
   };
 }
 
@@ -150,6 +155,8 @@ function wsSignature(
     p.capacity,
     p.batchSize,
     p.piecesPerAgent,
+    p.sourcePriority,
+    p.maxArrivals,
     ws.block?.params?.queueDiscipline ?? '',
     JSON.stringify(p.cycleDist ?? null),
     JSON.stringify(p.arrivalDist ?? null),
@@ -210,14 +217,23 @@ function lineSignature(
     .sort()
     .join(';');
   const assigns = (twin.assignments ?? [])
-    .map((a) => `${a.operatorId}@${a.wsId}:${a.role}:${a.shareFrac ?? ''}:${a.rotationOrder ?? ''}`)
+    .map(
+      (a) =>
+        `${a.operatorId}@${a.wsId}:${a.role}:${a.shareFrac ?? ''}:${a.rotationOrder ?? ''}:${a.priority ?? ''}`,
+    )
+    .sort()
+    .join(';');
+  // How an operator's time is dealt out is read by the engine: flipping one to
+  // on-demand changes which station they serve next, so it has to move the key.
+  const operators = (twin.operators ?? [])
+    .map((o) => `${o.id}:${o.shareMode ?? ''}:${o.multiplicity ?? ''}`)
     .sort()
     .join(';');
   const meta = twin.lines
     .filter((l) => l.id === line.lineId)
     .map((l) => `${l.id}:${l.garmentId ?? ''}:${l.efficiencyPct ?? ''}:${JSON.stringify(l.policy ?? null)}`)
     .join(';');
-  return [line.lineId, line.garment?.id ?? '', meta, ws, conns, assigns].join('#');
+  return [line.lineId, line.garment?.id ?? '', meta, ws, conns, assigns, operators].join('#');
 }
 
 /**
@@ -230,6 +246,7 @@ export function simSpecKey(spec: SimSpec): string {
     spec.samplePeriodMin,
     spec.recordFlow ? 'f1' : 'f0',
     spec.warmupMin,
+    spec.stopAtPieces ?? 0,
     ...spec.lines.map((line) => lineSignature(line, spec.garmentsById)),
   ].join('~');
   return `${spec.lines.length}-${fnv1a(body)}`;

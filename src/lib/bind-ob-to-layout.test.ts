@@ -11,20 +11,17 @@ import type { GarmentTemplate, Operation } from '../domain';
  */
 
 function op(id: string, name: string, smv: number, extra: Partial<Operation> = {}): Operation {
-  return { id, code: id.toUpperCase(), name, smv, machineCode: 'SNL', skill: 'stitching', category: 'sewing', ...extra };
+  return { id, code: id.toUpperCase(), name, smv, machineCode: 'SNL', ...extra };
 }
 
 function bulletin(ops: Operation[], id = 'ob-1', name = 'Style 4401 shirt'): GarmentTemplate {
   return {
     id,
     name,
-    class: 'shirt' as GarmentTemplate['class'],
     description: '',
     operations: ops,
-    defaultBundleSize: 20,
     totalSmv: ops.reduce((s, o) => s + o.smv, 0),
     hourlyTarget100: 0,
-    bestFor: '',
   };
 }
 

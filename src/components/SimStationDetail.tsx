@@ -16,19 +16,14 @@
  * directly under it.
  */
 
-import { useState, type CSSProperties, type ReactNode } from 'react';
+import type { CSSProperties, ReactNode } from 'react';
 import { Card } from './Card';
 import { SectionHeader } from './SectionHeader';
-import { ToggleGroup } from './ToggleGroup';
-import { MetricLabel, Sym } from './Sym';
+import { Sym } from './Sym';
 import { NumberInput } from './NumberInput';
 import { QueueAnalysisPanel } from './QueueAnalysisPanel';
 import { useTwin, selectActiveTwin } from '../store/twin';
-import {
-  StationTimeseriesChart,
-  StationTimeseriesGrid,
-  type StationMetric,
-} from './StationTimeseriesChart';
+import { StationTimeseriesChart } from './StationTimeseriesChart';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import type { StationView, StationHistoryPoint } from '../simulation';
 
@@ -41,7 +36,6 @@ export function SimStationDetail({
   history: StationHistoryPoint[];
   onClose: () => void;
 }) {
-  const [compareMetric, setCompareMetric] = useState<StationMetric>('rho');
   const warm = history.length > 1;
 
   return (
@@ -99,33 +93,7 @@ export function SimStationDetail({
           title="Sim vs theory"
           sub={`Last ${history.length * 5} sim-min. Solid is what the simulator saw; dashed is the steady-state target from queueing theory.`}
         />
-        <StationTimeseriesGrid station={station} history={history} height={80} />
-      </Card>
-
-      {/* Focus one metric */}
-      <Card>
-        <SectionHeader
-          title="Focus one metric"
-          sub="Zoom in on a single observable — same data as the grid, larger so drift from the target line is easy to read."
-          right={
-            <ToggleGroup<StationMetric>
-              value={compareMetric}
-              options={[
-                { value: 'rho', label: <MetricLabel name="Saturation" quantity="rho" /> },
-                { value: 'L', label: <MetricLabel name="At station" quantity="L" /> },
-                { value: 'Wq', label: <MetricLabel name="Wait" quantity="Wq" /> },
-                { value: 'Lq', label: <MetricLabel name="Waiting" quantity="Lq" /> },
-              ]}
-              onChange={setCompareMetric}
-            />
-          }
-        />
-        <StationTimeseriesChart
-          history={history}
-          metric={compareMetric}
-          analyticalRef={analyticalRefFor(station, compareMetric)}
-          height={180}
-        />
+        <StationTimeseriesChart station={station} history={history} />
       </Card>
     </div>
   );
@@ -251,15 +219,6 @@ function TargetRow({
       </span>
     </div>
   );
-}
-
-function analyticalRefFor(station: StationView, metric: StationMetric): number {
-  switch (metric) {
-    case 'rho': return station.analytical.rho;
-    case 'L':   return station.analytical.L;
-    case 'Lq':  return station.analytical.Lq;
-    case 'Wq':  return station.analytical.Wq * 60; // queueing.ts returns hours
-  }
 }
 
 // Functions (not consts) so SW_COLORS/SW_RADIUS are read at render time — the

@@ -197,7 +197,7 @@ export function buildGarmentTwin(
       ...ws.operation,
       opId: op.id,
       garmentId: garment.id,
-      bundleSize: garment.defaultBundleSize,
+      bundleSize: DEFAULT_LINE_POLICY.bundleSize,
       freeText: op.notes ?? `SMV ${op.smv.toFixed(3)} min`,
     };
     ws.kpiTargets = {

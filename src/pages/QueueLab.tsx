@@ -18,6 +18,7 @@
  */
 
 import { useEffect, useMemo, useRef, useState } from 'react';
+import { useNavigate } from 'react-router-dom';
 import {
   Button,
   Card,
@@ -31,6 +32,7 @@ import {
   ToggleGroup,
   DistPicker,
   ViewTitle,
+  PageTitleBar,
   useConfirm,
   CollapsedRail,
   PaneCollapseButton,
@@ -61,6 +63,7 @@ import { isSeedSystem } from '../domain/lab-systems';
 type ResultScope = 'stage' | 'network';
 
 export function QueueLabPage() {
+  const navigate = useNavigate();
   const systems = useLab((s) => s.systems);
   const activeId = useLab((s) => s.activeId);
   const selectedNodeId = useLab((s) => s.selectedNodeId);
@@ -107,9 +110,19 @@ export function QueueLabPage() {
   }, []);
 
   return (
-    /* The route shell clips its child, so the horizontal scroll has to be
-       owned here rather than by loosening an overflow every page shares. */
-    <div style={{ height: '100%', overflowX: 'auto', background: SW_COLORS.paperDeep }}>
+    <div
+      style={{
+        height: '100%',
+        display: 'flex',
+        flexDirection: 'column',
+        background: SW_COLORS.paperDeep,
+      }}
+    >
+    {/* The same title bar every other surface opens with. */}
+    <PageTitleBar title="Queue Lab" onBack={() => navigate('/')} />
+    {/* The route shell clips its child, so the horizontal scroll has to be
+        owned here rather than by loosening an overflow every page shares. */}
+    <div style={{ flex: 1, minHeight: 0, overflowX: 'auto', background: SW_COLORS.paperDeep }}>
     <div
       style={{
         height: '100%',
@@ -165,6 +178,7 @@ export function QueueLabPage() {
       ) : (
         <CollapsedRail side="right" label="PARAMETERS" onExpand={() => setParamsOpen(true)} />
       )}
+    </div>
     </div>
     </div>
   );

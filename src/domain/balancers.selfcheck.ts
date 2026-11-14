@@ -124,14 +124,14 @@ if (rpwBeatsLpt < 3) {
 // heuristics actually have to disagree.
 console.log('\n=== Synthetic precedence-chain bulletin ===');
 const syntheticOps: Operation[] = [
-  { id: 'a', name: 'A', smv: 1.0, machineCode: 'SNL', skill: 'stitching', category: 'sewing', precedes: ['b', 'c'] },
-  { id: 'b', name: 'B', smv: 0.8, machineCode: 'SNL', skill: 'stitching', category: 'sewing', precedes: ['d'] },
-  { id: 'c', name: 'C', smv: 0.5, machineCode: 'SNL', skill: 'stitching', category: 'sewing', precedes: ['d'] },
-  { id: 'd', name: 'D', smv: 0.9, machineCode: 'SNL', skill: 'stitching', category: 'sewing', precedes: ['e'] },
-  { id: 'e', name: 'E', smv: 0.4, machineCode: 'SNL', skill: 'stitching', category: 'sewing', precedes: ['f'] },
-  { id: 'f', name: 'F', smv: 0.7, machineCode: 'SNL', skill: 'stitching', category: 'sewing', precedes: ['g'] },
-  { id: 'g', name: 'G', smv: 0.6, machineCode: 'SNL', skill: 'stitching', category: 'sewing', precedes: ['h'] },
-  { id: 'h', name: 'H', smv: 0.5, machineCode: 'SNL', skill: 'stitching', category: 'sewing' },
+  { id: 'a', name: 'A', smv: 1.0, machineCode: 'SNL', precedes: ['b', 'c'] },
+  { id: 'b', name: 'B', smv: 0.8, machineCode: 'SNL', precedes: ['d'] },
+  { id: 'c', name: 'C', smv: 0.5, machineCode: 'SNL', precedes: ['d'] },
+  { id: 'd', name: 'D', smv: 0.9, machineCode: 'SNL', precedes: ['e'] },
+  { id: 'e', name: 'E', smv: 0.4, machineCode: 'SNL', precedes: ['f'] },
+  { id: 'f', name: 'F', smv: 0.7, machineCode: 'SNL', precedes: ['g'] },
+  { id: 'g', name: 'G', smv: 0.6, machineCode: 'SNL', precedes: ['h'] },
+  { id: 'h', name: 'H', smv: 0.5, machineCode: 'SNL' },
 ];
 const syntheticResults = new Map<string, BalancerResult>();
 for (const h of HEURISTICS) {

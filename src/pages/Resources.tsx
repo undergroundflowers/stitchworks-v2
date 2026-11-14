@@ -1,4 +1,4 @@
-import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
+import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
 import { alpha } from '../design/color-utils';
 import { Card, Button, Stat, Tag, HudSelect, EmptyState, NewGarmentTemplateDialog, NumberInput, useConfirm, Icon, ViewTitle } from '../components';
 import { useRef, useState, useMemo } from 'react';
@@ -7,8 +7,6 @@ import {
   ALL_MACHINES,
   type MachineCode,
   type Operation,
-  type OperationCategory,
-  type SkillId,
   type GarmentTemplate,
   GARMENT_TEMPLATES,
 } from '../domain';
@@ -80,9 +78,6 @@ export function ResourcesPage() {
           <Icon name="back" />
         </button>
         <ViewTitle title="Resources" />
-        <span style={{ ...SW_TYPE.caption, color: SW_COLORS.muted }}>
-          🪡 Operations · {garments.all.length} {garments.all.length === 1 ? 'garment' : 'garments'}
-        </span>
       </div>
 
       <div style={{ flex:1, overflow:'auto', padding:'24px' }}>
@@ -93,19 +88,6 @@ export function ResourcesPage() {
 }
 
 // ── Operations editor ───────────────────────────────────────────────────────
-
-const ALL_SKILL_IDS: SkillId[] = [
-  'stitching', 'overlock', 'flatlock', 'kansai', 'feed_of_arm',
-  'buttonhole', 'button_sew', 'bartack', 'embroidery',
-  'cutting_manual', 'cutting_cad', 'spreading', 'fusing',
-  'pressing', 'inspection', 'packing', 'bundling',
-  'material_handling', 'supervision',
-];
-
-const ALL_OPERATION_CATEGORIES: OperationCategory[] = [
-  'sewing', 'manual', 'cutting', 'spreading', 'pressing',
-  'fusing', 'inspection', 'embroidery', 'finishing',
-];
 
 interface OperationsPanelProps {
   garments: EffectiveGarments;
@@ -310,8 +292,6 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
       name: 'New operation',
       smv: 0.30,
       machineCode: 'SNL',
-      skill: 'stitching',
-      category: 'sewing',
     };
     project.addOperation(garmentId, builtIn, newOp);
   }
@@ -462,37 +442,13 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
                 style={headerField}/>
             </div>
           </div>
-          {/* Bundle size + Total SAM share one card — they're both "size of a
-              run" measurements and read more naturally as a pair than as two
-              separate columns. */}
+          {/* Total SAM — the one derived figure in the header. */}
           <div style={{
-            display: 'grid',
-            gridTemplateColumns: '1fr 1fr',
             border: `1px solid ${SW_COLORS.line}`,
             borderRadius: SW_RADIUS.sm,
             background: SW_COLORS.paperDeep,
             overflow: 'hidden',
           }}>
-            <label style={{ padding: '6px 10px', borderRight: `1px solid ${SW_COLORS.line}`, display: 'block', cursor: 'text' }}>
-              <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Default bundle size</div>
-              {/* Borderless on purpose — the surrounding `<label>` cell is the
-                  well and the whole cell is the click target, so a second
-                  border inside it would read as a box in a box. It still needs
-                  `color` + `colorScheme`: transparent over `paperDeep` left the
-                  UA's dark `fieldtext` on a dark ground. */}
-              <NumberInput value={garment.defaultBundleSize} min={1} max={500}
-                aria-label="Default bundle size"
-                onChange={(v) => { if (v !== undefined) patch({ defaultBundleSize: v }); }}
-                style={{
-                  ...headerField,
-                  padding: 0,
-                  border: 'none',
-                  borderRadius: 0,
-                  background: 'transparent',
-                  fontFamily: SW_FONTS.mono,
-                  fontSize: 14,
-                }}/>
-            </label>
             <div style={{ padding: '6px 10px' }}>
               <div style={{ fontSize: 11, fontWeight: 700, color: SW_COLORS.muted, marginBottom: 4 }}>Total SAM</div>
               {/* Ink, not brand — this one is summed from the operations table,
@@ -511,7 +467,7 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
         <table style={{ width: '100%', borderCollapse: 'collapse', fontFamily: SW_FONTS.body, fontSize: 12 }}>
           <thead>
             <tr style={{ background: SW_COLORS.paperDeep, borderBottom: `1px solid ${SW_COLORS.line}` }}>
-              {['#', 'Order', 'Code', 'Name', 'SMV (min)', 'Machine', 'Skill', 'Category', ''].map((h) => (
+              {['#', 'Order', 'Code', 'Name', 'SMV (min)', 'Machine', ''].map((h) => (
                 <th key={h} style={{ padding: '10px 10px', textAlign: 'left', fontFamily: SW_FONTS.mono, fontSize: 10, fontWeight: 700, color: SW_COLORS.muted, letterSpacing: '0.5px' }}>{h}</th>
               ))}
             </tr>
@@ -554,28 +510,6 @@ function OperationsPanel({ garments, initialGarmentId, openNewGarment }: Operati
                     mono
                     width="100%"
                     options={ALL_MACHINES.map((m) => ({ value: m.code, label: `${m.code} · ${m.shortName}` }))}
-                  />
-                </td>
-                <td style={{ padding: '6px 6px' }}>
-                  <HudSelect
-                    value={op.skill}
-                    onChange={(v) => project.updateOperation(garmentId, builtIn, op.id, { skill: v as SkillId })}
-                    variant="light"
-                    size="sm"
-                    mono
-                    width="100%"
-                    options={ALL_SKILL_IDS.map((s) => ({ value: s, label: s.replace(/_/g, ' ') }))}
-                  />
-                </td>
-                <td style={{ padding: '6px 6px' }}>
-                  <HudSelect
-                    value={op.category}
-                    onChange={(v) => project.updateOperation(garmentId, builtIn, op.id, { category: v as OperationCategory })}
-                    variant="light"
-                    size="sm"
-                    mono
-                    width="100%"
-                    options={ALL_OPERATION_CATEGORIES.map((c) => ({ value: c, label: c }))}
                   />
                 </td>
                 <td style={{ padding: '6px 10px', textAlign: 'right' }}>
@@ -773,11 +707,10 @@ function ImportPreviewModal({
           </button>
         </div>
 
-        <div style={{ padding: '12px 18px', borderBottom: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'grid', gridTemplateColumns: 'repeat(4, 1fr)', gap: 10 }}>
+        <div style={{ padding: '12px 18px', borderBottom: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paperDeep, display: 'grid', gridTemplateColumns: 'repeat(3, 1fr)', gap: 10 }}>
           <Stat label="Operations" value={totalCount.toString()} />
           <Stat label="Total SAM" value={`${g.totalSmv.toFixed(3)} min`} />
           <Stat label="Target / hr @100%" value={`${g.hourlyTarget100}`} />
-          <Stat label="Class" value={g.class} />
         </div>
 
         <div style={{ padding: '8px 18px', display: 'flex', flexWrap: 'wrap', gap: 6, borderBottom: `1px solid ${SW_COLORS.line}`, background: SW_COLORS.paper }}>
@@ -837,8 +770,6 @@ function ImportPreviewModal({
                   <td style={{ padding: '4px 8px' }}>{op.name}</td>
                   <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11, textAlign: 'right' }}>{op.smv.toFixed(3)}</td>
                   <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{op.machineCode}</td>
-                  <td style={{ padding: '4px 8px', fontFamily: SW_FONTS.mono, fontSize: 11 }}>{op.skill}</td>
-                  <td style={{ padding: '4px 8px', fontSize: 11, color: SW_COLORS.muted }}>{op.category}</td>
                   <td style={{ padding: '4px 8px', fontSize: 11, color: SW_COLORS.muted, maxWidth: 240, overflow: 'hidden', textOverflow: 'ellipsis', whiteSpace: 'nowrap' }} title={op.notes ?? ''}>{op.notes ?? ''}</td>
                 </tr>
               ))}

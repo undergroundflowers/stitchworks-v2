@@ -10,6 +10,7 @@ import type { GarmentTemplate } from '../domain';
 import type { SimConfig } from './sim-state';
 import type { ServiceDist, QueueDiscipline } from './index';
 import type { ModelTimeUnit } from './timeUnit';
+import { DEFAULT_LINE_POLICY } from '../domain/twin';
 
 export interface BuildModelOptions {
   garment: GarmentTemplate;
@@ -62,7 +63,7 @@ export function buildSimConfig(opts: BuildModelOptions): SimConfig {
 
   const bottleneckCycle = Math.max(...ops.map((op, i) => op.smv / stationServers[i]));
   const piecesPerHour = bottleneckCycle > 0 ? 60 / bottleneckCycle : 0;
-  const bundleSize = opts.bundleSize ?? garment.defaultBundleSize;
+  const bundleSize = opts.bundleSize ?? DEFAULT_LINE_POLICY.bundleSize;
   const bundlesPerHour = piecesPerHour / Math.max(1, bundleSize);
   // 10 % headroom keeps the head of the line loaded.
   const arrivalRatePerHour = opts.arrivalRatePerHour ?? bundlesPerHour * 1.1;

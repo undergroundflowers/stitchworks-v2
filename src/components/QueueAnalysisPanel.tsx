@@ -201,7 +201,7 @@ export function QueueAnalysisPanel({ station, onChange }: QueueAnalysisPanelProp
       {/* The textbook's probability sub-problems. Rows the active model has
           no closed form for render as a dash rather than being hidden, so the
           user can see which questions this Kendall class can answer. */}
-      <ProbabilityBlock station={station} />
+      <ProbabilityQuestions station={station} />
 
       {/* Throughput + WIP summary (sewing-floor language) */}
       <Footer station={station} />
@@ -372,7 +372,7 @@ function KpiRowView({ row, alt }: { row: KpiRow; alt: boolean }) {
  * rail back up past six. Each row shows the formula it evaluates so the number
  * is traceable to the page.
  */
-function ProbabilityBlock({ station }: { station: StationView }) {
+export function ProbabilityQuestions({ station }: { station: StationView }) {
   const a = station.analytical;
   const [n, setN] = useState(3);
   const [w, setW] = useState(5);

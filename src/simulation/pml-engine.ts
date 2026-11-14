@@ -31,7 +31,7 @@
  * harness, future export).
  */
 
-import type { SewingLine, Twin, Workstation } from '../domain/twin';
+import type { Assignment, SewingLine, Twin, Workstation } from '../domain/twin';
 import { stationEfficiency } from '../domain/twin';
 import {
   getBlockSpec,
@@ -128,8 +128,15 @@ export function validatePmlGraph(twin: Twin): PmlIssue[] {
   for (const ws of blockByKind.get('ResourcePool') ?? []) {
     poolScopes.add(ws.lineId ?? FACTORY_POOL_KEY);
   }
+  // A station that names its operator, or says outright that it has none, has
+  // already answered the question this warning asks. Only a station that says
+  // nothing about who runs it is worth flagging.
+  const staffedWs = new Set(
+    (twin.assignments ?? []).filter((a) => a.role !== 'floater').map((a) => a.wsId),
+  );
   for (const ws of blockByKind.get('Service') ?? []) {
     const scope = ws.lineId ?? FACTORY_POOL_KEY;
+    if (staffedWs.has(ws.id) || ws.resources?.workersRequired === 0) continue;
     if (!poolScopes.has(scope)) {
       issues.push({
         level: 'warn',
@@ -294,6 +301,18 @@ export interface PmlSimOpts {
    * transient to stay visible on the charts.
    */
   warmupMin?: number;
+  /**
+   * End the run the instant this many pieces have reached a Sink, instead of
+   * at `durationMin`. `durationMin` stays in force as the ceiling, so a line
+   * that can never reach the target still stops.
+   *
+   * This is the "how long does the order take" question — the dual of "how
+   * much does a shift make" — and it cannot be answered by reading a fixed-
+   * length run off a chart without losing the sub-minute end time. When it
+   * fires, `result.durationMin` is the minute the target was reached and every
+   * rate and utilisation is measured over that window. 0 / absent = off.
+   */
+  stopAtProduced?: number;
 }
 
 /**
@@ -482,6 +501,10 @@ export interface BlockObserved {
  *   • `unblock`      — a previously blocked agent finally advanced; its
  *                      server is freed. Pairs 1:1 with an earlier `block`.
  *   • `sink`         — the agent reached a Sink (`wsId` = Sink).
+ *   • `merge`        — the agent was absorbed into another at a Combine /
+ *                      Assembler (`wsId` = that block). Terminal, like `sink`,
+ *                      but it is not output: the garment it joined carries on
+ *                      under a new id.
  */
 export type FlowEventKind =
   | 'spawn'
@@ -490,7 +513,8 @@ export type FlowEventKind =
   | 'endService'
   | 'block'
   | 'unblock'
-  | 'sink';
+  | 'sink'
+  | 'merge';
 
 export interface FlowEvent {
   /** Sim time in MINUTES. Events are pushed in non-decreasing `t` order. */
@@ -506,9 +530,41 @@ export interface FlowEvent {
   pieces: number;
 }
 
+/**
+ * One operator's share of a run.
+ *
+ * Station utilisation answers "how busy is this machine". This answers the
+ * other question a line-balancing study asks — "how busy is this PERSON" —
+ * which is a different number the moment one operator covers two stations.
+ */
+export interface OperatorObserved {
+  operatorId: string;
+  name: string;
+  /** How the operator's time reaches their stations. `onDemand` operators are
+   *  a resource the engine seizes; the other two are fixed attendance. */
+  mode: 'dedicated' | 'timeSplit' | 'onDemand';
+  /** Heads this record stands for (`Operator.multiplicity`). */
+  capacity: number;
+  /** Working minutes inside the observed window, summed over heads. */
+  busyMin: number;
+  /** `busyMin / (capacity · observedMin)`, 0..1. */
+  utilization: number;
+  /** Where those minutes went, most-preferred station first. */
+  stations: { wsId: string; priority: number; busyMin: number }[];
+}
+
 export interface PmlSimResult {
-  /** Run duration in minutes (mirrors opts). */
+  /**
+   * Minutes actually simulated. Equal to `opts.durationMin` unless
+   * `stopAtProduced` ended the run early, in which case it is the minute the
+   * target was reached.
+   */
   durationMin: number;
+  /** True when `stopAtProduced` ended the run before `opts.durationMin`. */
+  stoppedAtTarget: boolean;
+  /** Per-operator utilisation, for every operator the twin assigns to a
+   *  station in this run. Empty when the twin carries no assignments. */
+  operators: OperatorObserved[];
   /** Total agents (pieces) that hit any Sink — good output. Includes pieces
    *  that needed rework as long as they ultimately passed. */
   totalProduced: number;
@@ -621,6 +677,21 @@ interface OperatorPool {
 }
 
 /**
+ * One named operator who serves several stations on demand. Unlike a pool,
+ * the stations are an explicit list with a preference order.
+ */
+interface OperatorResource {
+  operatorId: string;
+  /** Heads behind this record (`Operator.multiplicity`). */
+  capacity: number;
+  /** Heads working right now. */
+  busy: number;
+  /** Stations covered. `priority` 1 is served first; ties go to the piece that
+   *  has waited longest. */
+  stations: { wsId: string; priority: number }[];
+}
+
+/**
  * Which operator pool a workstation draws from. The sewing line is the
  * resource-scoping container: a line's operators are billed against that
  * line and no other. The floor itself is free space, so a station with no
@@ -714,6 +785,18 @@ interface BlockState {
   /** Source-only: priority class stamped on every bundle this Source emits.
    *  1 = highest. */
   sourcePriority: number;
+  /** Source-only: stop after this many agents. 0 = no limit. */
+  maxArrivals: number;
+  /** Source-only: agents released so far. */
+  emitted: number;
+  /**
+   * Combine / Assembler: the input ports that must each hold an agent before
+   * the block fires — the WIRED ones, garment stream first. An Assembler ships
+   * with three part ports; requiring all three would mean a body-plus-label
+   * join never fires because nothing was ever going to arrive on the third.
+   * Empty for every other kind.
+   */
+  syncPorts: string[];
   /** P2 — SYSTEM capacity K (agents allowed in this block = waiting + in
    *  service), matching the analytical M/M/c/K model so DES and theory agree.
    *  `Infinity` ⇒ unbounded (the default, and today's behaviour). Service:
@@ -838,7 +921,7 @@ function clampShareFactor(raw: number | undefined): number {
  * service rate is bounded by the most absent operator. No assignment ⇒
  * shareFactor = 1 (engine matches today's behaviour for un-staffed twins).
  */
-function buildShareFactorMap(twin: Twin): Map<string, number> {
+export function buildShareFactorMap(twin: Twin): Map<string, number> {
   // Sum shareFracs across all assignments at each ws, then cap at 1
   // because the station's max throughput is bounded by "one operator
   // serving one piece at a time" on a single-server cell. For a station
@@ -846,8 +929,14 @@ function buildShareFactorMap(twin: Twin): Map<string, number> {
   // modular cell where 6 operators each spend 1/27 of time here,
   // capacity = 6/27 → engine cycle 27/6 ≈ 4.5×.
   const sums = new Map<string, number>();
+  const onDemand = onDemandOperatorIds(twin);
   for (const a of twin.assignments ?? []) {
-    const sf = a.shareFrac ?? (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0);
+    // An on-demand operator is a resource the run seizes, not a fixed slice of
+    // attendance. Their station runs at its own pace WHEN they are there, so
+    // it takes no slowdown here — the waiting for them is simulated instead.
+    const sf = onDemand.has(a.operatorId)
+      ? 1
+      : (a.shareFrac ?? (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0));
     if (sf <= 0) continue;
     sums.set(a.wsId, (sums.get(a.wsId) ?? 0) + sf);
   }
@@ -857,6 +946,15 @@ function buildShareFactorMap(twin: Twin): Map<string, number> {
     if (capped < 1) out.set(wsId, capped);
   }
   return out;
+}
+
+/** Operators the engine treats as a seized resource rather than a time slice. */
+function onDemandOperatorIds(twin: Twin): Set<string> {
+  const ids = new Set<string>();
+  for (const o of twin.operators ?? []) {
+    if (o.shareMode === 'onDemand') ids.add(o.id);
+  }
+  return ids;
 }
 
 /**
@@ -1189,11 +1287,35 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // `PmlSimSample.rotationPointers` so the canvas can animate the marker.
   const { cells: rotationCells, byWsId: rotationCellByWsId } = buildRotationCells(twin);
   const linesById = new Map(twin.lines.map((l) => [l.id, l]));
+  // Which input ports actually have something wired into them. Read once,
+  // before the block states, because a Combine / Assembler fires on its WIRED
+  // ports and that set is fixed for the run.
+  const wiredInPorts = new Map<string, Set<string>>();
+  {
+    const wsById = new Map(twin.workstations.map((w) => [w.id, w]));
+    for (const c of twin.connectors) {
+      const to = wsById.get(c.toWsId);
+      if (!to || !wsById.has(c.fromWsId)) continue;
+      const portId = c.toPort ?? getBlockSpec(to).inputs[0]?.id;
+      if (!portId) continue;
+      const set = wiredInPorts.get(c.toWsId) ?? new Set<string>();
+      set.add(portId);
+      wiredInPorts.set(c.toWsId, set);
+    }
+  }
   const blocks = new Map<string, BlockState>();
   for (const ws of twin.workstations) {
     const spec = getBlockSpec(ws);
     const shareFactor = shareFactorMap.get(ws.id) ?? 1;
     const line = ws.lineId ? linesById.get(ws.lineId) : undefined;
+    const isSync = spec.kind === 'Combine' || spec.kind === 'Assembler';
+    // Spec order is kept, so the first wired port is the garment stream. With
+    // nothing wired the block falls back to every port and simply never fires,
+    // which is what an unconnected join should do.
+    const wired = wiredInPorts.get(ws.id);
+    const syncPorts = isSync
+      ? spec.inputs.filter((port) => !wired || wired.has(port.id)).map((port) => port.id)
+      : [];
     blocks.set(ws.id, {
       ws,
       kind: spec.kind,
@@ -1215,6 +1337,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       discipline: disciplineFor(ws, opts.garmentsById),
       piecesPerAgent: Math.max(1, Math.round(getBlockParams(ws).piecesPerAgent)),
       sourcePriority: Math.max(1, Math.round(getBlockParams(ws).sourcePriority)),
+      maxArrivals: getBlockParams(ws).maxArrivals,
+      emitted: 0,
+      syncPorts,
       // P2 — finite-buffer state. Unbounded by default → identical to the
       // pre-P2 push-semantics engine.
       sysCapacity: systemCapacityFor(ws, opts.garmentsById),
@@ -1295,6 +1420,46 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     operatorPools.set(key, pool);
   }
 
+  // ── Build on-demand operators ─────────────────────────────────────────────
+  // An operator marked `onDemand` is a resource in the AnyLogic sense: every
+  // station they cover has to SEIZE them to start a piece and hands them back
+  // when it finishes. Which station gets them next is decided at each release,
+  // by assignment priority and then by the piece that has waited longest.
+  //
+  // This is deliberately separate from `operatorPools`. A pool is anonymous
+  // capacity shared by a whole line; an on-demand operator is one named person
+  // covering a named set of stations. A station can need both.
+  const opResources: OperatorResource[] = [];
+  const opResByWs = new Map<string, OperatorResource>();
+  for (const o of twin.operators ?? []) {
+    if (o.shareMode !== 'onDemand') continue;
+    const stations: { wsId: string; priority: number }[] = [];
+    for (const a of twin.assignments ?? []) {
+      if (a.operatorId !== o.id) continue;
+      if (a.role === 'floater' || a.role === 'rotation_member') continue;
+      const b = blocks.get(a.wsId);
+      if (!b || !isServer(b)) continue;
+      stations.push({ wsId: a.wsId, priority: Math.max(1, Math.round(a.priority ?? 1)) });
+    }
+    if (stations.length === 0) continue;
+    const res: OperatorResource = {
+      operatorId: o.id,
+      capacity: Math.max(1, Math.round(o.multiplicity ?? 1)),
+      busy: 0,
+      stations,
+    };
+    opResources.push(res);
+    for (const st of stations) {
+      if (opResByWs.has(st.wsId)) {
+        warnings.push(
+          `"${blocks.get(st.wsId)?.ws.name ?? st.wsId}" has more than one on-demand operator. The run uses the first; the others are ignored at this station.`,
+        );
+        continue;
+      }
+      opResByWs.set(st.wsId, res);
+    }
+  }
+
   // ── Build routing (precompute output → target lookup) ─────────────────────
   const routing = new Map<string, Routing>();
   for (const ws of twin.workstations) routing.set(ws.id, { outputs: new Map() });
@@ -1348,6 +1513,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   let piecesLost = 0;
   let leadTimeAccum = 0;
   let nextAgentId = 1;
+  // Stop-at-output. `stop.at` is set inside the Sink the moment the target
+  // is met; the event loop checks it after each event that can move a piece.
+  //
+  // Held on an object, not in a `let`: the assignment happens inside a nested
+  // function, and TypeScript would otherwise narrow the variable to `null` at
+  // every read in the loop.
+  const stopAtProduced = Math.max(0, Math.floor(opts.stopAtProduced ?? 0));
+  const stop: { at: number | null } = { at: null };
   // ── Event queue ────────────────────────────────────────────────────────────
   const pq = new MinHeap<Event>((a, b) => a.time - b.time);
 
@@ -1389,8 +1562,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       // the plotted ρ̂ a step function that could never converge onto the flat
       // analytical line drawn beside it.
       advanceAreas(b, t);
-      const portQ = [...b.queueByInputPort.values()].reduce((s, q) => s + q.length, 0);
-      const queueLen = b.queue.length + portQ;
+      const queueLen = waitingCount(b);
       if (queueLen > liveBottleneckQ) {
         liveBottleneckQ = queueLen;
         liveBottleneckWsId = b.ws.id;
@@ -1438,6 +1610,30 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   // Initial sample at t=0 so the timeline doesn't start empty.
   if (samplePeriodMin > 0) takeSample(0);
 
+  /** Does this block queue pieces for a server that an operator runs? */
+  function isServer(b: BlockState): boolean {
+    return b.kind === 'Service';
+  }
+
+  /**
+   * Garments waiting at this block — the number behind queue length, L̄q and
+   * the bottleneck pick.
+   *
+   * At a Combine / Assembler only the garment stream counts. The other ports
+   * hold PARTS (a label, a sleeve pair), and a rack of 2,000 labels waiting to
+   * be attached is stock, not a queue: counting it made every label station
+   * read as the line's bottleneck.
+   */
+  function waitingCount(b: BlockState): number {
+    let waiting = b.queue.length;
+    if (b.syncPorts.length > 0) {
+      waiting += b.queueByInputPort.get(b.syncPorts[0])?.length ?? 0;
+    } else if (b.queueByInputPort.size > 0) {
+      for (const q of b.queueByInputPort.values()) waiting += q.length;
+    }
+    return waiting;
+  }
+
   /**
    * Draw a per-agent cycle time for a Service / Delay / Hold / Conveyor /
    * MoveTo block. Uses the authored `cycleDist` when set, otherwise the
@@ -1479,10 +1675,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function advanceAreas(b: BlockState, now: number): void {
     const dt = now - b.lastAccumAt;
     if (dt > 0) {
-      let waiting = b.queue.length;
-      if (b.queueByInputPort.size > 0) {
-        for (const q of b.queueByInputPort.values()) waiting += q.length;
-      }
+      const waiting = waitingCount(b);
       const blocked = b.blocked.length;
       const busy = Math.max(0, b.inService - blocked);
       b.areaLq += waiting * dt;
@@ -1514,13 +1707,81 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
    * new agent arrives at a Service or (b) a serviceEnd frees a unit.
    */
   function tryStartService(b: BlockState, now: number): boolean {
-    if (b.kind !== 'Service') return false;
+    if (!isServer(b)) return false;
+    // A station covered by an on-demand operator does not get to decide for
+    // itself. Whoever the operator should serve next is settled across ALL of
+    // their stations — so this must run even when THIS station has nothing
+    // queued: it is called right after a release, and the operator just freed
+    // here may be wanted somewhere else.
+    const opRes = opResByWs.get(b.ws.id);
+    if (opRes) return dispatchOperator(opRes, now, b.ws.id);
+    return startService(b, now);
+  }
+
+  /** Work is waiting here and a server is free — only a resource is missing. */
+  function readyToStart(b: BlockState): boolean {
+    return isServer(b) && b.queue.length > 0 && b.inService < b.servers;
+  }
+
+  /**
+   * Hand an on-demand operator to the station that should have them next,
+   * repeating while they have heads free. Returns whether `forWsId` was one of
+   * the stations started, which is what `tryStartService` owes its caller.
+   *
+   * The choice is the AnyLogic one: lowest priority number first, and within a
+   * priority the piece that has been waiting longest. That second rule is what
+   * stops an operator camping on the station they happen to be standing at —
+   * without it, the station that just finished would always win the re-seize
+   * and the other would starve behind a growing pile.
+   *
+   * Strict priority is non-pre-emptive and unforgiving: if the preferred
+   * station never runs dry, the other is never served. That is the correct
+   * reading of "finish the primary work first", and it is why a saturated
+   * primary station with a helper duty attached stalls the line.
+   */
+  function dispatchOperator(res: OperatorResource, now: number, forWsId: string): boolean {
+    let startedFor = false;
+    // A station can be ready and still fail to start (the LINE pool is empty).
+    // Skip it for the rest of this pass rather than spin on it.
+    const skip = new Set<string>();
+    let guard = res.capacity * res.stations.length + res.stations.length + 1;
+    while (res.busy < res.capacity && guard-- > 0) {
+      let best: BlockState | null = null;
+      let bestPriority = Infinity;
+      let bestSince = Infinity;
+      for (const st of res.stations) {
+        if (skip.has(st.wsId)) continue;
+        const sb = blocks.get(st.wsId);
+        if (!sb || !readyToStart(sb)) continue;
+        // The buffer is kept in arrival order, so the head is the oldest.
+        const since = sb.queue[0].queuedAt ?? now;
+        if (st.priority < bestPriority || (st.priority === bestPriority && since < bestSince)) {
+          best = sb;
+          bestPriority = st.priority;
+          bestSince = since;
+        }
+      }
+      if (!best) break;
+      if (startService(best, now)) {
+        if (best.ws.id === forWsId) startedFor = true;
+      } else {
+        skip.add(best.ws.id);
+      }
+    }
+    return startedFor;
+  }
+
+  /** Seize what the station needs and put its next piece into service. Does no
+   *  operator arbitration — `tryStartService` is the entry point for that. */
+  function startService(b: BlockState, now: number): boolean {
     if (b.queue.length === 0) return false;
     // Per-station server cap: cannot exceed the configured `servers` count
     // even when the dept's pool has spare units. Matches "one machine =
     // one server" semantics — without this, the pool acts as a shared
     // pool of mobile operators that float between stations.
     if (b.inService >= b.servers) return false;
+    const opRes = opResByWs.get(b.ws.id);
+    if (opRes && opRes.busy >= opRes.capacity) return false;
     // Rotation cells are accounted for via shareFactor (1/cellSize) so
     // long-run KPIs are stable. The visual rotation pointer is advanced
     // separately for the canvas overlay — see `rotationCells` /
@@ -1537,6 +1798,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       bumpPoolAccum(pool, now);
       pool.busy += 1;
     }
+    if (opRes) opRes.busy += 1;
     // Areas must be credited at the PRE-shift levels (one more waiting, one
     // fewer in service) before the mutations below.
     advanceAreas(b, now);
@@ -1603,9 +1865,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
    *  Mirrors every non-pool guard in `tryStartService`, so `true` means a free
    *  unit would put it to work immediately. */
   function starvedOnPool(b: BlockState): boolean {
-    if (b.kind !== 'Service') return false;
-    if (b.queue.length === 0) return false;
-    return b.inService < b.servers;
+    return readyToStart(b);
   }
 
   /** Park a station at the BACK of a pool's wait list (idempotent). Station
@@ -1662,7 +1922,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   function freeServer(b: BlockState, now: number): void {
     advanceAreas(b, now);
     b.inService = Math.max(0, b.inService - 1);
-    if (b.kind === 'Service') {
+    if (isServer(b)) {
       const pool = operatorPools.get(poolKeyFor(b.ws));
       if (pool) {
         bumpPoolAccum(pool, now);
@@ -1670,6 +1930,15 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         // The returned unit is free — wake whoever is queued on it.
         notifyPoolWaiters(pool, now);
       }
+      // Hand the on-demand operator back. Nothing is woken here: every call
+      // site follows a release with `tryStartService`, which re-dispatches the
+      // operator across all of their stations.
+      //
+      // Known limit: with a finite downstream buffer a finished piece that is
+      // BLOCKED keeps its server, and so keeps the operator standing at it. A
+      // real operator would walk to their other machine.
+      const opRes = opResByWs.get(b.ws.id);
+      if (opRes) opRes.busy = Math.max(0, opRes.busy - 1);
     }
   }
 
@@ -1718,14 +1987,25 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     // the `inService += 1` in the Delay/MoveTo/Conveyor branch, because all of
     // them mutate after this point at the same `now`.
     advanceAreas(b, now);
-    b.inflow += 1;
-    b.inflowPieces += agent.pieces;
+    // A part arriving at a Combine / Assembler is not an arrival OF A GARMENT:
+    // counting it would double the station's λ and its piece inflow. Only the
+    // garment stream (the first wired port) is billed. Rework re-entries carry
+    // a synthetic port and are garments by definition.
+    const isPart =
+      b.syncPorts.length > 0 && targetInPort !== b.syncPorts[0] && targetInPort !== '__rework__';
+    if (!isPart) {
+      b.inflow += 1;
+      b.inflowPieces += agent.pieces;
+    }
     switch (b.kind) {
       case 'Sink':
         emitFlow('sink', agent, b.ws.id);
         totalProduced += agent.pieces;
         if ((agent.reworkCount ?? 0) === 0) piecesProducedFTR += agent.pieces;
         leadTimeAccum += (now - agent.bornAt) * agent.pieces;
+        if (stopAtProduced > 0 && stop.at === null && totalProduced >= stopAtProduced) {
+          stop.at = now;
+        }
         return;
       case 'Source':
       case 'ResourcePool':
@@ -1840,10 +2120,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       case 'Combine':
       case 'Assembler': {
         // Multi-input synchronization. Buffer the agent on its arrival
-        // port, then fire only when every input port has at least one
-        // queued agent. Combine: 2 inputs → 1 merged agent. Assembler:
-        // N inputs → 1 merged agent (sums pieces). Implicit recipe in
-        // v1 is "one agent on every input port".
+        // port, then fire only when every WIRED input port has at least one
+        // queued agent. The recipe is "one agent from each", and what comes
+        // out is one garment — see `tryFireSync`.
         agent.queuedAt = now;
         agent.enteredBlockAt = now;
         const list = b.queueByInputPort.get(targetInPort) ?? [];
@@ -1891,12 +2170,10 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
    * Fire a multi-input sync block as long as every input port has at
    * least one queued agent. Pops one head from each port per fire.
    *
-   *   `emitMerged = true`  — Combine / Assembler: emit ONE agent on the
-   *                          first output port whose pieces equal the
-   *                          sum of the popped agents. The output
-   *                          agent's bornAt is the OLDEST popped bornAt
-   *                          so lead-time at the Sink reflects the
-   *                          slowest constituent.
+   *   `emitMerged = true`  — Combine / Assembler: emit ONE garment — the
+   *                          agent from the first wired port, with the
+   *                          parts from the others attached. It keeps that
+   *                          agent's piece count and birth time.
    *
    *   `emitMerged = false` — Match: emit each popped agent on the
    *                          correspondingly-positioned output port
@@ -1904,40 +2181,60 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
    */
   function tryFireSync(b: BlockState, now: number, emitMerged: boolean): void {
     const spec = getBlockSpec(b.ws);
-    if (spec.inputs.length === 0 || spec.outputs.length === 0) return;
-    // While every input port has an agent, pop one from each and fire.
-    while (spec.inputs.every((p) => (b.queueByInputPort.get(p.id)?.length ?? 0) > 0)) {
+    if (spec.outputs.length === 0) return;
+    // Combine / Assembler fire on their WIRED ports; Match keeps every port.
+    const ports = emitMerged ? b.syncPorts : spec.inputs.map((p) => p.id);
+    if (ports.length === 0) return;
+    // While every required port has an agent, pop one from each and fire.
+    while (ports.every((id) => (b.queueByInputPort.get(id)?.length ?? 0) > 0)) {
       advanceAreas(b, now);
-      const popped: Agent[] = spec.inputs.map(
-        (p) => b.queueByInputPort.get(p.id)!.shift()!,
-      );
-      // Each popped agent's port wait ends here.
-      for (const a of popped) {
-        b.waitSumMin += Math.max(0, now - (a.queuedAt ?? now));
-        b.waitStarts += 1;
-        b.sojournSumMin += Math.max(0, now - (a.enteredBlockAt ?? now));
-        b.sojournExits += 1;
-      }
-      if (emitMerged) {
-        const totalPieces = popped.reduce((s, a) => s + a.pieces, 0);
-        const oldestBornAt = popped.reduce((m, a) => Math.min(m, a.bornAt), popped[0].bornAt);
-        const topPriority = popped.reduce((m, a) => Math.min(m, a.priority), popped[0].priority);
-        const merged: Agent = {
-          id: nextAgentId++,
-          bornAt: oldestBornAt,
-          pieces: totalPieces,
-          priority: topPriority,
-        };
-        emitOnFirstOutput(b, merged, now);
-      } else {
-        // Match — emit each on its own paired output port. The library
-        // gives Match `out1` / `out2` so the i-th popped goes to the
-        // i-th output.
+      const popped: Agent[] = ports.map((id) => b.queueByInputPort.get(id)!.shift()!);
+      if (!emitMerged) {
+        // Match — each popped agent's port wait ends here, and each leaves on
+        // its own paired output (input[i] → output[i]). Pieces NOT merged.
+        for (const a of popped) {
+          b.waitSumMin += Math.max(0, now - (a.queuedAt ?? now));
+          b.waitStarts += 1;
+          b.sojournSumMin += Math.max(0, now - (a.enteredBlockAt ?? now));
+          b.sojournExits += 1;
+        }
         popped.forEach((a, i) => {
           const portId = spec.outputs[i]?.id ?? spec.outputs[0]?.id;
           if (portId) emitOnPort(b, portId, a, now);
         });
+        continue;
       }
+
+      // Combine / Assembler — ONE garment comes out.
+      //
+      // It is the garment on the first port with the parts attached, so it
+      // keeps that agent's piece count, birth time and place in the queue. The
+      // earlier rule summed the pieces of everything popped, which counted a
+      // body with two labels sewn in as three pieces at the Sink; and it took
+      // the OLDEST birth time, which let a label that had sat in stock since
+      // the morning set the garment's lead time.
+      const primary = popped[0];
+      const merged: Agent = {
+        id: nextAgentId++,
+        bornAt: primary.bornAt,
+        pieces: primary.pieces,
+        // A join is as urgent as its most urgent member.
+        priority: popped.reduce((m, a) => Math.min(m, a.priority), primary.priority),
+        reworkCount: primary.reworkCount,
+      };
+      // Everything popped ends its life here; the garment carries on under the
+      // new id. Without this the playback would leave each part sitting at the
+      // block for the rest of the run.
+      for (const a of popped) emitFlow('merge', a, b.ws.id);
+
+      // The join itself takes no time: the sewing that attaches the part is
+      // the Service that follows. What the garment waited for here was the
+      // part, and that wait is credited to this block.
+      b.waitSumMin += Math.max(0, now - (primary.queuedAt ?? now));
+      b.waitStarts += 1;
+      b.sojournSumMin += Math.max(0, now - (primary.enteredBlockAt ?? now));
+      b.sojournExits += 1;
+      emitOnFirstOutput(b, merged, now);
     }
   }
 
@@ -2225,7 +2522,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     }
     if (b.blocked.length === 0) endBlockInterval(b, now);
     if (freed) {
-      if (b.kind === 'Service') {
+      if (isServer(b)) {
         // Freed server(s) can now pull waiting agents into service.
         while (tryStartService(b, now)) {
           /* fill every freed slot */
@@ -2290,6 +2587,9 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (e.kind === 'sourceTick') {
       const src = blocks.get(e.wsId);
       if (!src) continue;
+      // A finite Source has released its whole lot: it emits nothing more and
+      // schedules nothing more, so the event calendar drains on its own.
+      if (src.maxArrivals > 0 && src.emitted >= src.maxArrivals) continue;
 
       // P2 back-pressure: reschedule without emitting when the downstream
       // entry buffer is full (unbounded default ⇒ never blocks).
@@ -2307,8 +2607,13 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         priority: src.sourcePriority,
       };
       emitFlow('spawn', agent, src.ws.id);
+      src.emitted += 1;
       emitOnPort(src, 'out', agent, now);
-      pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
+      if (src.maxArrivals <= 0 || src.emitted < src.maxArrivals) {
+        pq.push({ time: now + drawArrivalGap(src), kind: 'sourceTick', wsId: src.ws.id });
+      }
+      // The agent just released may have gone straight to a Sink.
+      if (stop.at !== null) break;
       continue;
     }
 
@@ -2316,7 +2621,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       const b = blocks.get(e.wsId);
       if (!b) continue;
       const isTimeBlock =
-        b.kind === 'Service' ||
+        isServer(b) ||
         b.kind === 'Delay' ||
         b.kind === 'MoveTo' ||
         b.kind === 'Conveyor';
@@ -2367,6 +2672,8 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
         if (b.blockedSince === null) b.blockedSince = now;
         emitFlow('block', a, b.ws.id);
       }
+      // The piece that just left may have been the one that met the target.
+      if (stop.at !== null) break;
       continue;
     }
 
@@ -2375,6 +2682,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
       const b = blocks.get(e.wsId);
       if (!b) continue;
       retryForward(b, now);
+      if (stop.at !== null) break;
       continue;
     }
 
@@ -2388,17 +2696,23 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
 
   }
 
+  // The run ends where it was stopped, if it was. Everything below — the
+  // closing flushes, every rate, every utilisation, the last sample — is
+  // measured to THIS instant, so a run stopped at its target reports the line
+  // as it stood when the last piece came off, not padded out with idle time.
+  const endMin = stop.at ?? durationMin;
+
   // ── Final pool-utilisation flush ──────────────────────────────────────────
   for (const pool of operatorPools.values()) {
-    bumpPoolAccum(pool, durationMin);
+    bumpPoolAccum(pool, endMin);
   }
 
   // ── Close any still-open blocking intervals at end-of-run ──────────────────
   // Flush the time-integrals to the shift bell first, so the final span
-  // between the last event and `durationMin` is credited.
+  // between the last event and `endMin` is credited.
   for (const b of blocks.values()) {
-    advanceAreas(b, durationMin);
-    endBlockInterval(b, durationMin);
+    advanceAreas(b, endMin);
+    endBlockInterval(b, endMin);
   }
 
   // ── Build per-block observed metrics ──────────────────────────────────────
@@ -2406,8 +2720,7 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
   let bottleneckWsId: string | null = null;
   let bottleneckQ = 0;
   for (const b of blocks.values()) {
-    const portQueueTotal = [...b.queueByInputPort.values()].reduce((s, q) => s + q.length, 0);
-    const finalQ = b.queue.length + b.inService + portQueueTotal;
+    const finalQ = waitingCount(b) + b.inService;
     if (finalQ > bottleneckQ) {
       bottleneckQ = finalQ;
       bottleneckWsId = b.ws.id;
@@ -2420,14 +2733,14 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     const totalOut = b.kind === 'Sink' ? b.inflowPieces : b.outflowPieces;
     // The observation window: post-warm-up when truncation was requested,
     // otherwise the whole run.
-    const observedMin = Math.max(1e-9, durationMin - b.warmupAt);
+    const observedMin = Math.max(1e-9, endMin - b.warmupAt);
     const observedOut = totalOut - b.warmupOutflowPieces;
     const arrivals = b.inflow - b.warmupInflow;
     const offered = arrivals + b.balked;
 
     let resourceBusy = 0;
     let poolUtilization = 0;
-    if (b.kind === 'Service') {
+    if (isServer(b)) {
       resourceBusy = b.busyMin;
       const pool = operatorPools.get(poolKeyFor(b.ws));
       poolUtilization =
@@ -2478,13 +2791,83 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
     if (obs) obs.bottleneck = true;
   }
 
+  // ── Per-operator utilisation ──────────────────────────────────────────────
+  // An operator's working time is the productive server-time of the stations
+  // they attend, weighted by how much of each station is theirs:
+  //   • on-demand, or the sole full-time operator — all of it;
+  //   • a fixed time split — their `shareFrac` of it. The station's cycle was
+  //     stretched by 1/share to stand in for their absence, so its busy time
+  //     is that much longer than the time they actually spent there;
+  //   • several operators at one station — pro rata.
+  const operatorsObserved: OperatorObserved[] = [];
+  {
+    const onDemandIds = onDemandOperatorIds(twin);
+    const rowsByOp = new Map<string, Assignment[]>();
+    const rotationStops = new Map<string, number>();
+    for (const a of twin.assignments ?? []) {
+      if (a.role === 'floater' || !blockObs.has(a.wsId)) continue;
+      const rows = rowsByOp.get(a.operatorId) ?? [];
+      rows.push(a);
+      rowsByOp.set(a.operatorId, rows);
+      if (a.role === 'rotation_member') {
+        rotationStops.set(a.operatorId, (rotationStops.get(a.operatorId) ?? 0) + 1);
+      }
+    }
+    const attendance = (a: Assignment): number => {
+      if (onDemandIds.has(a.operatorId)) return 1;
+      if (a.shareFrac != null) return Math.max(0, a.shareFrac);
+      if (a.role === 'primary') return 1;
+      if (a.role === 'helper') return 0.3;
+      return 1 / Math.max(1, rotationStops.get(a.operatorId) ?? 1);
+    };
+    const attendanceAtWs = new Map<string, number>();
+    for (const rows of rowsByOp.values()) {
+      for (const a of rows) {
+        attendanceAtWs.set(a.wsId, (attendanceAtWs.get(a.wsId) ?? 0) + attendance(a));
+      }
+    }
+    for (const o of twin.operators ?? []) {
+      const rows = rowsByOp.get(o.id);
+      if (!rows || rows.length === 0) continue;
+      const capacity = Math.max(1, Math.round(o.multiplicity ?? 1));
+      const observedMin = blockObs.get(rows[0].wsId)?.observedMin ?? endMin;
+      let busyMin = 0;
+      const stations = rows
+        .map((a) => {
+          const weight = attendance(a) / Math.max(1, attendanceAtWs.get(a.wsId) ?? 1);
+          const stationBusy = (blockObs.get(a.wsId)?.areaBusy ?? 0) * weight;
+          busyMin += stationBusy;
+          return {
+            wsId: a.wsId,
+            priority: Math.max(1, Math.round(a.priority ?? 1)),
+            busyMin: stationBusy,
+          };
+        })
+        .sort((x, y) => x.priority - y.priority);
+      const mode: OperatorObserved['mode'] = onDemandIds.has(o.id)
+        ? 'onDemand'
+        : rows.length > 1 || rows.some((a) => attendance(a) < 1)
+          ? 'timeSplit'
+          : 'dedicated';
+      operatorsObserved.push({
+        operatorId: o.id,
+        name: o.name,
+        mode,
+        capacity,
+        busyMin,
+        utilization: observedMin > 0 ? Math.min(1, busyMin / (capacity * observedMin)) : 0,
+        stations,
+      });
+    }
+  }
+
   // Lead time is piece-weighted (we summed `(now - bornAt) * pieces`),
   // so divide by total pieces to recover a piece-mean lead time.
-  // Final snapshot at end-of-run so the timeline always reaches durationMin
+  // Final snapshot at end-of-run so the timeline always reaches endMin
   // even when the last scheduled `sample` event sat slightly past the end.
   if (samplePeriodMin > 0) {
     const lastT = samples[samples.length - 1]?.time ?? -1;
-    if (lastT < durationMin) takeSample(durationMin);
+    if (lastT < endMin) takeSample(endMin);
   }
 
   // OEE-quality denominator = pieces that *finished* a path (good + scrap).
@@ -2495,14 +2878,16 @@ export function runPmlSim(opts: PmlSimOpts): PmlSimResult {
 
 
   return {
-    durationMin,
+    durationMin: endMin,
+    stoppedAtTarget: stop.at !== null && stop.at < durationMin,
+    operators: operatorsObserved,
     totalProduced,
     piecesProducedFTR,
     piecesScrapped,
     piecesLost,
     firstPassYield,
     meanLeadTimeMin: totalProduced > 0 ? leadTimeAccum / totalProduced : 0,
-    throughputPerHr: durationMin > 0 ? (totalProduced * 60) / durationMin : 0,
+    throughputPerHr: endMin > 0 ? (totalProduced * 60) / endMin : 0,
     blocks: blockObs,
     bottleneckWsId,
     warnings,

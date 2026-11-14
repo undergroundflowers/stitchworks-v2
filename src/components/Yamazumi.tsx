@@ -1,6 +1,6 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { alpha } from '../design/color-utils';
-import type { Operation } from '../domain';
+import { MACHINE_CATALOG, type MachineCategory } from '../domain/machines';
 import type { BalanceStation } from '../domain/line-balance';
 
 /**
@@ -359,7 +359,7 @@ function Bar({
   const nominalPerChannel = st.nominalMin / st.servers;
   const inflated = st.cycleMin > nominalPerChannel + 1e-9;
   const deflated = st.cycleMin < nominalPerChannel - 1e-9;
-  const fill = colorForCategory(st.op.category);
+  const fill = colorForCategory(MACHINE_CATALOG[st.op.machineCode]?.category);
   const barColor = overTakt || isBottleneck ? SW_COLORS.alarm : fill;
 
   const why: string[] = [`SMV ${st.nominalMin.toFixed(3)} min`];
@@ -556,7 +556,7 @@ function Legend({ hasTakt }: { hasTakt: boolean }) {
   );
 }
 
-const LEGEND: { cat: Operation['category']; label: string }[] = [
+const LEGEND: { cat: MachineCategory; label: string }[] = [
   { cat: 'sewing', label: 'SEW' },
   { cat: 'manual', label: 'MNL' },
   { cat: 'pressing', label: 'PRESS' },
@@ -564,7 +564,7 @@ const LEGEND: { cat: Operation['category']; label: string }[] = [
   { cat: 'fusing', label: 'FUSE' },
 ];
 
-function colorForCategory(cat: Operation['category']): string {
+function colorForCategory(cat: MachineCategory | undefined): string {
   switch (cat) {
     case 'sewing':     return SW_COLORS.brand;
     case 'manual':     return SW_COLORS.muted;
@@ -574,7 +574,6 @@ function colorForCategory(cat: Operation['category']): string {
     case 'cutting':    return SW_COLORS.fabric;
     case 'spreading':  return SW_COLORS.fabric;
     case 'embroidery': return SW_COLORS.trim;
-    case 'finishing':  return SW_COLORS.ship;
     default:           return SW_COLORS.steel;
   }
 }

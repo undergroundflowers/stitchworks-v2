@@ -65,6 +65,22 @@ function density(d: ServiceDist, x: number): number {
       const z = (x - d.mean) / d.std;
       return Math.exp(-0.5 * z * z) / (d.std * Math.SQRT2 * Math.sqrt(Math.PI));
     }
+    case 'triangularRate': {
+      // Time T = 1/X, so f_T(t) = f_X(1/t) / t². Drawn in TIME like every
+      // other row, which is why the triangle comes out lopsided: the slow end
+      // of the rate range is stretched into a long right tail.
+      if (x <= 0) return 0;
+      const a = Math.max(1e-9, Math.min(d.min, d.max));
+      const b = Math.max(a, d.min, d.max);
+      const c = Math.min(b, Math.max(a, d.mode));
+      const r = 1 / x;
+      if (r < a || r > b || b <= a) return 0;
+      const fx =
+        r <= c
+          ? c > a ? (2 * (r - a)) / ((b - a) * (c - a)) : 0
+          : b > c ? (2 * (b - r)) / ((b - a) * (b - c)) : 0;
+      return fx / (x * x);
+    }
     default:
       return 0;
   }

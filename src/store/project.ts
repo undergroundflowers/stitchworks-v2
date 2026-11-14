@@ -10,18 +10,10 @@
 
 import { create } from 'zustand';
 import { persist, createJSONStorage } from 'zustand/middleware';
-import { GARMENT_TEMPLATES, normalizeStationType, type GarmentTemplate, type Operation, type StationType } from '../domain';
+import { normalizeStationType, type GarmentTemplate, type Operation, type StationType } from '../domain';
 import { indexedDbStorage } from './storage/indexedDbStorage';
 import type { ModelTimeUnit } from '../simulation/timeUnit';
 import type { Twin } from '../domain/twin';
-
-/**
- * Garment names that should never survive a session — keyboard mashes and
- * "test" placeholders that accumulate while exploring the editor. Anything
- * starting with one of these tokens (case-insensitive) is purged on boot by
- * `purgeTestGarments`.
- */
-const TEST_GARMENT_PATTERN = /^(dvss|dsvs|asdf|test|casdcz)/i;
 
 /**
  * Schema version.
@@ -344,8 +336,8 @@ export interface ProjectState {
    *  garment from scratch and when the editor wants to commit a wholesale
    *  change. */
   setGarmentEdit: (id: string, garment: GarmentTemplate) => void;
-  /** Patch top-level garment fields (name, description, defaultBundleSize,
-   *  bestFor, totalSmv, hourlyTarget100). Auto-clones the built-in into
+  /** Patch top-level garment fields (name, description, totalSmv,
+   *  hourlyTarget100). Auto-clones the built-in into
    *  `garmentEdits` if it isn't there yet. */
   patchGarment: (
     id: string,
@@ -385,13 +377,6 @@ export interface ProjectState {
   hideGarment: (id: string) => void;
   /** Unhide a previously hidden built-in. */
   unhideGarment: (id: string) => void;
-
-  /**
-   * Sweep custom (non-built-in) garments whose names match the test-name
-   * pattern (dvss/dsvs/asdf/test/casdcz). Idempotent — safe to call on every
-   * boot. Returns the count removed.
-   */
-  purgeTestGarments: () => number;
 
   // ── Project actions ──────────────────────────────────────────────────────
   /** Wipe everything back to defaults. Caller should confirm first. */
@@ -486,7 +471,6 @@ const defaults: Omit<
   | 'resetGarment'
   | 'hideGarment'
   | 'unhideGarment'
-  | 'purgeTestGarments'
   | 'setUnit'
   | 'setTime'
 > = (() => {
@@ -746,28 +730,6 @@ export const useProject = create<ProjectState>()(
           return touch({ ...s, hiddenGarmentIds: next });
         }),
 
-      purgeTestGarments: () => {
-        let removed = 0;
-        set((s) => {
-          const next: Record<string, GarmentTemplate> = {};
-          const purgedIds: string[] = [];
-          for (const [id, g] of Object.entries(s.garmentEdits)) {
-            // Only sweep custom rows. A user who renamed a built-in to
-            // "test something" still owns that edit — leave it alone.
-            const isBuiltIn = !!GARMENT_TEMPLATES[id];
-            if (!isBuiltIn && TEST_GARMENT_PATTERN.test((g.name ?? '').trim())) {
-              purgedIds.push(id);
-              continue;
-            }
-            next[id] = g;
-          }
-          if (purgedIds.length === 0) return s;
-          removed = purgedIds.length;
-          return touch({ ...s, garmentEdits: next });
-        });
-        return removed;
-      },
-
       resetProject: () =>
         set(() => ({
           ...defaults,
@@ -794,7 +756,6 @@ export const useProject = create<ProjectState>()(
           resetGarment: get().resetGarment,
           hideGarment: get().hideGarment,
           unhideGarment: get().unhideGarment,
-          purgeTestGarments: get().purgeTestGarments,
           resetProject: get().resetProject,
           loadProject: get().loadProject,
           exportProject: get().exportProject,

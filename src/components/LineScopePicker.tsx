@@ -4,10 +4,16 @@
  * Bound to the shared `useSimScope`, so switching lines here moves the Sim
  * screen too — there is one answer to "what am I looking at" rather than one
  * per page.
+ *
+ * A dropdown, not a row of chips. The chips printed every line's full name
+ * side by side, so a four-line factory with real style names already wrapped
+ * onto a second row and pushed the page down; a dropdown is one control wide
+ * however many lines there are, and it is the same control RUN uses for the
+ * same choice.
  */
 
-import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
-import { alpha } from '../design/color-utils';
+import { SW_COLORS, SW_TYPE } from '../design/tokens';
+import { HudSelect } from './HudSelect';
 import { resolveSimScope, useSimScope } from '../store/simScope';
 import type { SewingLine } from '../domain/twin';
 
@@ -31,41 +37,30 @@ export function LineScopePicker({ lines }: LineScopePickerProps) {
     );
   }
 
-  const activeId = scope.kind === 'line' ? scope.id : null;
-
-  const chip = (active: boolean): React.CSSProperties => ({
-    ...SW_TYPE.micro,
-    padding: '5px 10px',
-    borderRadius: SW_RADIUS.sm,
-    border: `1px solid ${active ? SW_COLORS.brand : SW_COLORS.line}`,
-    background: active ? alpha(SW_COLORS.brand, 0.14) : 'transparent',
-    color: active ? SW_COLORS.brand : SW_COLORS.muted,
-    cursor: 'pointer',
-    fontFamily: SW_FONTS.mono,
-  });
+  // One string per option: 'factory', or 'line:<id>'.
+  const value = scope.kind === 'line' ? `line:${scope.id}` : 'factory';
 
   return (
-    <div style={{ display: 'flex', gap: 6, alignItems: 'center', flexWrap: 'wrap' }}>
-      <span style={{ ...SW_TYPE.overline, color: SW_COLORS.faint }}>SCOPE</span>
-      <button
-        type="button"
-        style={chip(activeId === null)}
-        onClick={() => setScope({ kind: 'factory' })}
-        title="Analyse every wired sewing line together"
-      >
-        ALL LINES
-      </button>
-      {lines.map((l) => (
-        <button
-          key={l.id}
-          type="button"
-          style={chip(activeId === l.id)}
-          onClick={() => setScope({ kind: 'line', id: l.id })}
-          title={`Analyse ${l.name} on its own`}
-        >
-          {l.name}
-        </button>
-      ))}
+    <div style={{ display: 'flex', gap: 8, alignItems: 'center', minWidth: 0 }}>
+      <span style={{ ...SW_TYPE.overline, flex: 'none', color: SW_COLORS.faint }}>SCOPE</span>
+      <HudSelect<string>
+        value={value}
+        size="sm"
+        mono
+        minWidth={320}
+        title={
+          scope.kind === 'line'
+            ? 'Analysing this sewing line on its own'
+            : 'Analysing every wired sewing line together'
+        }
+        options={[
+          { value: 'factory', label: 'ALL LINES', meta: `${lines.length} lines` },
+          ...lines.map((l) => ({ value: `line:${l.id}`, label: l.name })),
+        ]}
+        onChange={(v) =>
+          setScope(v === 'factory' ? { kind: 'factory' } : { kind: 'line', id: v.slice(5) })
+        }
+      />
     </div>
   );
 }

@@ -3,11 +3,16 @@
  * (operator saturation, bundles at station, bundle wait time, bundles waiting)
  * as time-series, sourced from the engine's `state.stationHistory`.
  *
- * Two layouts:
- *  - Strip mode  — one row per station, four small charts side-by-side. Best
- *                  for spot-checking every station at once after a sim run.
- *  - Compare mode — one metric picked from a toggle; every station stacked
- *                  with shared Y-axis. Best for ranking stations by ρ or Wq.
+ * One layout: a row per station, each a single chart with every selected
+ * observable on it. The legend is said once, at the top, and each entry in it
+ * is a switch — so the page covers everything from "all four on every
+ * station" down to "one observable down the whole line", which is what the
+ * separate Compare mode used to exist for. The scale switch finishes that
+ * job: on a shared scale, heights compare from one station to the next.
+ *
+ * A second switch picks what each point averages over: the run so far (the
+ * figure theory predicts, and the default) or its own five minutes (what the
+ * station was actually doing then).
  *
  * Sister page to /queues (QueueIndex). The user enters here from a
  * "Compare stations →" button on QueueIndex when they want time-series
@@ -20,21 +25,26 @@ import {
   Card,
   LineScopePicker,
   LineSimEmpty,
-  SectionHeader,
+  StationMetricLegend,
+  StationMetricReadout,
   StationTimeseriesChart,
-  StationTimeseriesGrid,
+  STATION_METRICS,
+  stationScaleDomain,
   ToggleGroup,
   type StationMetric,
-  MetricLabel,
+  type StationScaleId,
+  type StationSeriesBasis,
 } from '../components';
 import { SW_COLORS, SW_FONTS, SW_RADIUS } from '../design/tokens';
-import { meanOf, type QueueDiscipline, type StationView } from '../simulation';
+import type { StationView } from '../simulation';
 import { useLineSim } from '../simulation/useLineSim';
 import { useSimSession } from '../simulation/useSimSession';
 import { constraintIndex } from '../domain/queue-advisor';
-import { DRILL_PATHS } from '../lib/routes';
+import { WorkstationDetailDialog } from './WorkstationDetail';
+import { StationRecord, useStationAdvice } from './QueueIndex';
 
-type ViewMode = 'strip' | 'compare';
+/** `station`: each chart fits its own data. `shared`: one scale for the line. */
+type ScaleMode = 'station' | 'shared';
 
 export interface QueueAnalyticsPageProps {
   /** Rendered inside another surface (INSIGHTS): drop the page chrome and the
@@ -46,7 +56,7 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
   const navigate = useNavigate();
   // Real lines through the shared session; see useLineSim for what this
   // replaced.
-  const { state, lines, allLines, emptyReason, unassignedStationCount } = useLineSim();
+  const { state, lines, allLines, twin, emptyReason, unassignedStationCount } = useLineSim();
   const step = useSimSession((s) => s.step);
   const reset = useSimSession((s) => s.reset);
   const subject = lines.length === 1 ? lines[0].name : `${lines.length} sewing lines`;
@@ -54,8 +64,12 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
   // highest measured saturation, not the engine's live deepest queue.
   const bottleneckIdx = constraintIndex(state.stations);
 
-  const [view, setView] = useState<ViewMode>('strip');
-  const [metric, setMetric] = useState<StationMetric>('rho');
+  const [metrics, setMetrics] = useState<StationMetric[]>(STATION_METRICS);
+  const [scaleMode, setScaleMode] = useState<ScaleMode>('station');
+  const [basis, setBasis] = useState<StationSeriesBasis>('average');
+  // The station whose detail pop-up is open, if any.
+  const [openWsId, setOpenWsId] = useState<string | null>(null);
+  const { findings, apply } = useStationAdvice();
 
   if (emptyReason) {
     return (
@@ -149,7 +163,7 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
       </header>
       )}
 
-      <Card>
+      <div>
         <div
           style={{
             display: 'flex',
@@ -159,52 +173,70 @@ export function QueueAnalyticsPage({ embedded = false }: QueueAnalyticsPageProps
             gap: 12,
           }}
         >
-          <SectionHeader title="View" />
-          <div style={{ display: 'flex', gap: 12, alignItems: 'center' }}>
-            <ToggleGroup<ViewMode>
-              value={view}
-              options={[
-                { value: 'strip', label: 'Strip · all four metrics per station' },
-                { value: 'compare', label: 'Compare · one metric across stations' },
-              ]}
-              onChange={setView}
-            />
-            {view === 'compare' && (
-              <ToggleGroup<StationMetric>
-                value={metric}
+          <StationMetricLegend active={metrics} onChange={setMetrics} />
+          <div style={{ display: 'flex', flexWrap: 'wrap', gap: 12 }}>
+            <div title="Average: the mean since the run began. Instantaneous: the mean over each 5-minute step on its own.">
+              <ToggleGroup<StationSeriesBasis>
+                value={basis}
                 options={[
-                  { value: 'rho', label: <MetricLabel name="Saturation" quantity="rho" /> },
-                  { value: 'L', label: <MetricLabel name="At station" quantity="L" /> },
-                  { value: 'Wq', label: <MetricLabel name="Wait" quantity="Wq" /> },
-                  { value: 'Lq', label: <MetricLabel name="Waiting" quantity="Lq" /> },
+                  { value: 'average', label: 'Average' },
+                  { value: 'step', label: 'Instantaneous' },
                 ]}
-                onChange={setMetric}
+                onChange={setBasis}
               />
-            )}
+            </div>
+            <div title="Own scale fits each station. Shared scale makes heights comparable down the line.">
+              <ToggleGroup<ScaleMode>
+                value={scaleMode}
+                options={[
+                  { value: 'station', label: 'Own scale' },
+                  { value: 'shared', label: 'Shared scale' },
+                ]}
+                onChange={setScaleMode}
+              />
+            </div>
           </div>
         </div>
-      </Card>
+      </div>
 
       {state.stations.length === 0 ? (
         <Card>
           <p style={{ color: SW_COLORS.muted, fontSize: 13 }}>Warming up the simulator…</p>
         </Card>
-      ) : view === 'strip' ? (
+      ) : (
         <StripView
           stations={state.stations}
           stationHistory={state.stationHistory}
           bottleneckIdx={bottleneckIdx}
-          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId, 'timeline'))}
-        />
-      ) : (
-        <CompareView
-          stations={state.stations}
-          stationHistory={state.stationHistory}
-          bottleneckIdx={bottleneckIdx}
-          metric={metric}
-          onDrill={(wsId) => navigate(DRILL_PATHS.workstation('sewing', wsId, 'timeline'))}
+          metrics={metrics}
+          basis={basis}
+          domain={
+            scaleMode === 'shared'
+              ? stationScaleDomain(state.stations, state.stationHistory, metrics, basis)
+              : undefined
+          }
+          onDrill={setOpenWsId}
         />
       )}
+      <WorkstationDetailDialog
+        wsId={openWsId}
+        onClose={() => setOpenWsId(null)}
+        extra={(station, index) => (
+          <StationRecord
+            station={station}
+            index={index}
+            stations={state.stations}
+            findings={findings}
+            onApply={apply}
+            history={state.stationHistory[index] ?? []}
+            connectors={twin.connectors}
+            onSelect={setOpenWsId}
+          />
+        )}
+        // Previous / next follow the rows on this tab: line order.
+        order={state.stations.map((s) => s.wsId)}
+        onSelect={setOpenWsId}
+      />
     </div>
   );
 }
@@ -217,20 +249,23 @@ function StripView({
   stations,
   stationHistory,
   bottleneckIdx,
+  metrics,
+  basis,
+  domain,
   onDrill,
 }: {
   stations: StationView[];
   stationHistory: import('../simulation').StationHistoryPoint[][];
   bottleneckIdx: number;
+  metrics: StationMetric[];
+  basis: StationSeriesBasis;
+  /** Set when every chart shares one scale; omitted when each fits itself. */
+  domain?: Record<StationScaleId, number>;
   /** Receives a WORKSTATION id — two stations can share an operation. */
   onDrill: (wsId: string) => void;
 }) {
   return (
-    <Card>
-      <SectionHeader
-        title="Strip view"
-        sub="Every station as a row. Click any row's title to open its full inspector."
-      />
+    <div>
       <div style={{ display: 'flex', flexDirection: 'column', gap: 16 }}>
         {stations.map((s, i) => (
           <StationRow
@@ -238,11 +273,14 @@ function StripView({
             station={s}
             history={stationHistory[i] ?? []}
             isBottleneck={i === bottleneckIdx}
+            metrics={metrics}
+            basis={basis}
+            domain={domain}
             onDrill={() => onDrill(s.wsId)}
           />
         ))}
       </div>
-    </Card>
+    </div>
   );
 }
 
@@ -250,11 +288,17 @@ function StationRow({
   station,
   history,
   isBottleneck,
+  metrics,
+  basis,
+  domain,
   onDrill,
 }: {
   station: StationView;
   history: import('../simulation').StationHistoryPoint[];
   isBottleneck: boolean;
+  metrics: StationMetric[];
+  basis: StationSeriesBasis;
+  domain?: Record<StationScaleId, number>;
   onDrill: () => void;
 }) {
   return (
@@ -266,87 +310,57 @@ function StationRow({
         background: isBottleneck ? `${SW_COLORS.alarm}08` : SW_COLORS.paper,
       }}
     >
-      <RowHeader station={station} isBottleneck={isBottleneck} onDrill={onDrill} />
-      <div style={{ marginTop: 10 }}>
-        <StationTimeseriesGrid station={station} history={history} height={70} />
+      <RowHeader
+        station={station}
+        history={history}
+        metrics={metrics}
+        basis={basis}
+        isBottleneck={isBottleneck}
+        onDrill={onDrill}
+      />
+      <div style={{ marginTop: 8 }}>
+        <StationTimeseriesChart
+          station={station}
+          history={history}
+          metrics={metrics}
+          basis={basis}
+          domain={domain}
+          legend={false}
+          height={230}
+        />
       </div>
     </div>
   );
 }
 
-function CompareView({
-  stations,
-  stationHistory,
-  bottleneckIdx,
-  metric,
-  onDrill,
-}: {
-  stations: StationView[];
-  stationHistory: import('../simulation').StationHistoryPoint[][];
-  bottleneckIdx: number;
-  metric: StationMetric;
-  /** Receives a WORKSTATION id — two stations can share an operation. */
-  onDrill: (wsId: string) => void;
-}) {
-  return (
-    <Card>
-      <SectionHeader
-        title={`Compare view — ${METRIC_LONG_LABEL[metric]}`}
-        sub="One observable, every station, stacked. The slowest station's chart will visibly diverge from the others."
-      />
-      <div style={{ display: 'flex', flexDirection: 'column', gap: 10 }}>
-        {stations.map((s, i) => {
-          const ref = analyticalRefFor(s, metric);
-          const isBottleneck = i === bottleneckIdx;
-          return (
-            <div
-              key={s.wsId}
-              style={{
-                padding: 10,
-                border: `1px solid ${isBottleneck ? SW_COLORS.alarm : SW_COLORS.line}`,
-                borderRadius: SW_RADIUS.sm,
-                background: isBottleneck ? `${SW_COLORS.alarm}08` : SW_COLORS.paper,
-              }}
-            >
-              <RowHeader station={s} isBottleneck={isBottleneck} onDrill={() => onDrill(s.wsId)} />
-              <div style={{ marginTop: 8 }}>
-                <StationTimeseriesChart
-                  history={stationHistory[i] ?? []}
-                  metric={metric}
-                  analyticalRef={ref}
-                  height={60}
-                />
-              </div>
-            </div>
-          );
-        })}
-      </div>
-    </Card>
-  );
-}
-
 function RowHeader({
   station,
+  history,
+  metrics,
+  basis,
   isBottleneck,
   onDrill,
 }: {
   station: StationView;
+  history: import('../simulation').StationHistoryPoint[];
+  metrics: StationMetric[];
+  basis: StationSeriesBasis;
   isBottleneck: boolean;
   onDrill: () => void;
 }) {
-  const serviceMin = meanOf(station.serviceDist);
-  const stitchRatePerHr = serviceMin > 0 ? 60 / serviceMin : 0;
-  const operatorWord = station.serversTotal === 1 ? 'operator' : 'operators';
   return (
     <div
       style={{
-        display: 'flex',
-        justifyContent: 'space-between',
-        alignItems: 'center',
-        gap: 8,
+        // Name · figures · (empty). Equal outer columns hold the figures at
+        // the centre of the row; a long name takes what it needs and pushes
+        // them aside rather than running underneath.
+        display: 'grid',
+        gridTemplateColumns: 'minmax(max-content, 1fr) auto minmax(0, 1fr)',
+        alignItems: 'baseline',
+        columnGap: 16,
       }}
     >
-      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap' }}>
+      <div style={{ display: 'flex', alignItems: 'baseline', gap: 10, flexWrap: 'wrap', minWidth: 0 }}>
         <button
           type="button"
           onClick={onDrill}
@@ -368,61 +382,27 @@ function RowHeader({
         >
           {station.opName}
         </button>
-        <span style={{ fontFamily: SW_FONTS.mono, fontSize: 11, color: SW_COLORS.muted }}>
-          {station.serversTotal} {operatorWord} · {stitchRatePerHr.toFixed(1)}/hr ·{' '}
-          {disciplineToFloorLabel(station.notation.discipline)} · {station.notation.label}
-        </span>
+        {isBottleneck && (
+          <span
+            style={{
+              display: 'inline-block',
+              padding: '2px 8px',
+              borderRadius: 4,
+              fontSize: 10,
+              fontWeight: 700,
+              letterSpacing: '0.3px',
+              background: `${SW_COLORS.alarm}20`,
+              color: SW_COLORS.alarm,
+              fontFamily: SW_FONTS.mono,
+            }}
+          >
+            SLOWEST STATION
+          </span>
+        )}
       </div>
-      {isBottleneck && (
-        <span
-          style={{
-            display: 'inline-block',
-            padding: '2px 8px',
-            borderRadius: 4,
-            fontSize: 10,
-            fontWeight: 700,
-            letterSpacing: '0.3px',
-            background: `${SW_COLORS.alarm}20`,
-            color: SW_COLORS.alarm,
-            fontFamily: SW_FONTS.mono,
-          }}
-        >
-          SLOWEST STATION
-        </span>
-      )}
+      <StationMetricReadout station={station} history={history} metrics={metrics} basis={basis} />
     </div>
   );
-}
-
-// ─────────────────────────────────────────────────────────────────────────
-//  Helpers
-// ─────────────────────────────────────────────────────────────────────────
-
-// Plain strings — these land in chart titles and `title` attributes, which
-// cannot host a React node, so the symbol is spelled out inline here.
-const METRIC_LONG_LABEL: Record<StationMetric, string> = {
-  rho: 'Operator saturation (ρ)',
-  L: 'Bundles at station (L)',
-  Wq: 'Bundle wait time (Wq), min',
-  Lq: 'Bundles waiting (Lq)',
-};
-
-function analyticalRefFor(station: StationView, metric: StationMetric): number {
-  switch (metric) {
-    case 'rho': return station.analytical.rho;
-    case 'L':   return station.analytical.L;
-    case 'Lq':  return station.analytical.Lq;
-    case 'Wq':  return station.analytical.Wq * 60; // queueing.ts returns hours
-  }
-}
-
-function disciplineToFloorLabel(d: QueueDiscipline): string {
-  switch (d) {
-    case 'FCFS': return 'FIFO cart';
-    case 'SIRO': return 'Random pick';
-    case 'Priority': return 'Rush first';
-    default: return d;
-  }
 }
 
 // Function (not a const) so tokens are read at render time — the vibe system

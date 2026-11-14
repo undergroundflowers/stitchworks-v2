@@ -30,10 +30,9 @@
  */
 
 import * as XLSX from 'xlsx';
-import type { GarmentTemplate, GarmentClass } from '../domain/garments';
-import type { Operation, OperationCategory } from '../domain/operations';
+import type { GarmentTemplate } from '../domain/garments';
+import type { Operation } from '../domain/operations';
 import type { MachineCode } from '../domain/machines';
-import type { SkillId } from '../domain/workers';
 
 export interface ImportedGarment {
   garment: GarmentTemplate;
@@ -150,33 +149,6 @@ const MACHINE_PATTERNS: { pattern: RegExp; code: MachineCode }[] = [
   { pattern: /\b(manual|hand|helper|mnl)\b/i, code: 'MNL' },
 ];
 
-const MACHINE_CATEGORY_TO_OP_CATEGORY: Record<MachineCode, OperationCategory> = {
-  SNL: 'sewing', DNL: 'sewing', '4OL': 'sewing', '5OL': 'sewing',
-  FL: 'sewing', FB: 'sewing', KS: 'sewing',
-  BH: 'sewing', BS: 'sewing', BT: 'sewing',
-  EMB: 'embroidery',
-  CUT: 'cutting', CAD: 'cutting',
-  SPR: 'spreading',
-  FUSE: 'fusing',
-  PRESS: 'pressing', STEAM: 'pressing',
-  INSP: 'inspection',
-  MNL: 'manual',
-};
-
-const MACHINE_TO_SKILL: Record<MachineCode, SkillId> = {
-  SNL: 'stitching', DNL: 'stitching',
-  '4OL': 'overlock', '5OL': 'overlock',
-  FL: 'flatlock', FB: 'feed_of_arm', KS: 'kansai',
-  BH: 'buttonhole', BS: 'button_sew', BT: 'bartack',
-  EMB: 'embroidery',
-  CUT: 'cutting_manual', CAD: 'cutting_cad',
-  SPR: 'spreading',
-  FUSE: 'fusing',
-  PRESS: 'pressing', STEAM: 'pressing',
-  INSP: 'inspection',
-  MNL: 'bundling',
-};
-
 // ── Public API ────────────────────────────────────────────────────────────
 /**
  * Parse an .xlsx / .xls file (or its ArrayBuffer) and produce a draft
@@ -269,16 +241,12 @@ export function parseRows(rows: unknown[][], fileName: string, sheetName: string
       continue;
     }
     const machineCode = resolveMachineCode(parsed.machine ?? '', warnings, parsed.name ?? `op ${ops.length + 1}`);
-    const category = MACHINE_CATEGORY_TO_OP_CATEGORY[machineCode];
-    const skill = MACHINE_TO_SKILL[machineCode];
     const op: Operation = {
       id: `imp-${slug(parsed.code ?? `${ops.length + 1}`)}-${ops.length + 1}`,
       code: parsed.code,
       name: parsed.name,
       smv: round(parsed.smv ?? 0, 4),
       machineCode,
-      skill,
-      category,
       notes: composeNotes(parsed),
     };
     // Carry the OB's "Planned W/S" hint onto the Operation so downstream
@@ -305,13 +273,10 @@ export function parseRows(rows: unknown[][], fileName: string, sheetName: string
   const garment: GarmentTemplate = {
     id: `imp-${slug(name)}-${Date.now().toString(36)}`,
     name,
-    class: guessGarmentClass(source.style, source.description),
     description: composeGarmentDescription(source),
     operations: ops,
-    defaultBundleSize: 20,
     totalSmv,
     hourlyTarget100: source.declaredHourlyTarget ?? hourly100,
-    bestFor: source.customer ? `Imported from ${source.customer} spec sheet` : `Imported garment`,
   };
 
   // If the declared SMV is meaningfully different from the sum, warn the
@@ -477,11 +442,3 @@ function composeGarmentDescription(s: ImportedGarment['source']): string {
   return bits.join(' · ');
 }
 
-function guessGarmentClass(style?: string, description?: string): GarmentClass {
-  const t = `${style ?? ''} ${description ?? ''}`.toLowerCase();
-  if (/short|trouser|pant|jean|legging|skirt|bottom/.test(t)) return 'bottom';
-  if (/jacket|coat|outer|hood|sweat/.test(t)) return 'outerwear';
-  if (/dress|gown|frock/.test(t)) return 'dress';
-  if (/bag|cap|hat|scarf|belt|accessor/.test(t)) return 'accessory';
-  return 'top';
-}

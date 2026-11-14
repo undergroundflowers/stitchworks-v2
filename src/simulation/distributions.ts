@@ -11,6 +11,17 @@
  *   - lognormal   → G  (general)           — Gaussian on log-scale — StatFit's LOGN
  *   - weibull     → G  (general)           — reliability / lead-time tails — WEIB
  *   - beta        → G  (general)           — bounded on [shift, shift+scale] — BETA
+ *   - triangularRate → G (general)         — 1 / TRIA of an output RATE; see below
+ *
+ * `triangularRate` is the one kind whose parameters are not times. A factory
+ * that records "this operator turns out between 1 and 3 pieces a minute, most
+ * often 2" has measured a RATE, and the service time is its reciprocal:
+ * S = 1 / X with X ~ Triangular(min, mode, max) in pieces per minute. That is
+ * not the same distribution as a triangular on the times 1/max … 1/min — the
+ * reciprocal of a triangle is skewed — and the difference is not small: for
+ * (1, 2, 3) the true mean time is 0.523 min against 0.611 for the triangle
+ * drawn on the reciprocals. Rahman et al. (WSC 2023) publish their T-shirt
+ * line this way, which is what the kind was added to reproduce.
  *
  * `shift` (optional, default 0) is the additive offset that appears in the
  * stochastic-ALB literature as "k + DIST(…)". It models a deterministic
@@ -31,7 +42,53 @@ export type ServiceDist =
   | { kind: 'triangular'; min: number; mode: number; max: number; shift?: number }
   | { kind: 'lognormal'; mu: number; sigma: number; shift?: number }
   | { kind: 'weibull'; scale: number; shape: number; shift?: number }
-  | { kind: 'beta'; alpha: number; betaParam: number; min?: number; scale?: number; shift?: number };
+  | { kind: 'beta'; alpha: number; betaParam: number; min?: number; scale?: number; shift?: number }
+  /** Service time = 1 / X, X ~ Triangular(min, mode, max) in PIECES PER MINUTE. */
+  | { kind: 'triangularRate'; min: number; mode: number; max: number };
+
+/**
+ * Canonical (a ≤ c ≤ b) rate parameters for a `triangularRate`.
+ *
+ * Authored values are taken as given but never trusted: min and max are put in
+ * order and the mode is clamped between them, so a row typed as (2, 3, 5) —
+ * mode outside the range, which is how one row of the Rahman table is printed —
+ * runs as (2, 3, 3) instead of producing NaN. `a` is floored above zero because
+ * a rate of 0 is an infinite service time.
+ */
+function rateTriParams(d: { min: number; mode: number; max: number }): {
+  a: number;
+  c: number;
+  b: number;
+} {
+  const a = Math.max(1e-9, Math.min(d.min, d.max));
+  const b = Math.max(a, d.min, d.max);
+  const c = Math.min(b, Math.max(a, d.mode));
+  return { a, c, b };
+}
+
+/**
+ * E[X^-n] for X ~ Triangular(a, c, b), n = 1 or 2, in closed form.
+ *
+ * Each half of the triangle integrates to a log term:
+ *   n = 1:  ∫(x−a)/x dx = (c−a) − a·ln(c/a)      ∫(b−x)/x dx = b·ln(b/c) − (b−c)
+ *   n = 2:  ∫(x−a)/x² dx = ln(c/a) + a/c − 1     ∫(b−x)/x² dx = b/c − 1 − ln(b/c)
+ * A half with zero width (mode sitting on min or max) contributes nothing.
+ */
+function rateTriInverseMoment(d: { min: number; mode: number; max: number }, n: 1 | 2): number {
+  const { a, c, b } = rateTriParams(d);
+  const eps = 1e-9 * b;
+  if (b - a <= eps) return 1 / Math.pow(a, n);
+  let m = 0;
+  if (c - a > eps) {
+    const left = n === 1 ? (c - a) - a * Math.log(c / a) : Math.log(c / a) + a / c - 1;
+    m += (2 / ((b - a) * (c - a))) * left;
+  }
+  if (b - c > eps) {
+    const right = n === 1 ? b * Math.log(b / c) - (b - c) : b / c - 1 - Math.log(b / c);
+    m += (2 / ((b - a) * (b - c))) * right;
+  }
+  return m;
+}
 
 /** Kendall service-time code derived from the distribution kind. */
 export type ServiceCode = 'M' | 'D' | 'Ek' | 'G';
@@ -117,6 +174,18 @@ export function sample(d: ServiceDist, rng: () => number): number {
       const b01 = sum > 0 ? x / sum : 0.5;
       return Math.max(MIN, shift + min + scale * b01);
     }
+    case 'triangularRate': {
+      // Draw the RATE by inverse-CDF, then invert it. One uniform per sample,
+      // the same as a plain triangular, so swapping the two does not shift the
+      // random stream of everything drawn after it.
+      const { a, c, b } = rateTriParams(d);
+      const u = rng();
+      const fc = b > a ? (c - a) / (b - a) : 0.5;
+      const x = u < fc
+        ? a + Math.sqrt(u * (b - a) * (c - a))
+        : b - Math.sqrt((1 - u) * (b - a) * (b - c));
+      return Math.max(MIN, 1 / Math.max(1e-9, x));
+    }
   }
 }
 
@@ -174,6 +243,8 @@ export function scaleServiceDist(d: ServiceDist, factor: number): ServiceDist {
     case 'lognormal': return { ...d, mu: d.mu + Math.log(f), shift: (d.shift ?? 0) * f };
     case 'weibull':   return { ...d, scale: d.scale * f, shift: (d.shift ?? 0) * f };
     case 'beta':      return { ...d, min: (d.min ?? 0) * f, scale: (d.scale ?? 1) * f, shift: (d.shift ?? 0) * f };
+    // Stretching every TIME by f is dividing every RATE by f.
+    case 'triangularRate': return { ...d, min: d.min / f, mode: d.mode / f, max: d.max / f };
   }
 }
 
@@ -199,6 +270,10 @@ export function meanOf(d: ServiceDist): number {
       const b01 = total > 0 ? d.alpha / total : 0.5;
       return (d.shift ?? 0) + (d.min ?? 0) + (d.scale ?? 1) * b01;
     }
+    case 'triangularRate':
+      // E[1/X] — NOT 1/E[X]. Jensen: the mean time is longer than the
+      // reciprocal of the mean rate.
+      return rateTriInverseMoment(d, 1);
   }
 }
 
@@ -246,6 +321,10 @@ export function varOf(d: ServiceDist): number {
         : 0;
       const range = d.scale ?? 1;
       return range * range * v01;
+    }
+    case 'triangularRate': {
+      const m1 = rateTriInverseMoment(d, 1);
+      return Math.max(0, rateTriInverseMoment(d, 2) - m1 * m1);
     }
   }
 }
@@ -297,6 +376,7 @@ export function kendallServiceCode(d: ServiceDist): ServiceCode {
     case 'lognormal':
     case 'weibull':
     case 'beta':
+    case 'triangularRate':
       return 'G';
   }
 }
@@ -319,6 +399,28 @@ export function describeDist(d: ServiceDist): string {
       return `${prefix}WEIB(scale=${d.scale.toFixed(3)}, shape=${d.shape.toFixed(2)})`;
     case 'beta':
       return `${prefix}BETA(α=${d.alpha.toFixed(2)}, β=${d.betaParam.toFixed(2)})`;
+    case 'triangularRate': {
+      const { a, c, b } = rateTriParams(d);
+      return `1 / TRIA(${a.toFixed(2)}, ${c.toFixed(2)}, ${b.toFixed(2)}) pcs/min`;
+    }
+  }
+}
+
+/**
+ * The distribution's family and spread, WITHOUT its mean: `Uniform ±15%`,
+ * `Erlang-3`, `Normal σ=0.20`. For a table that already has a service-rate
+ * column, where repeating the mean would say μ twice. The families with no
+ * single "mean" parameter (triangular, lognormal, Weibull, beta) have nothing
+ * to leave out, so they print in full.
+ */
+export function describeDistShape(d: ServiceDist): string {
+  switch (d.kind) {
+    case 'exp': return 'Exponential';
+    case 'det': return 'Deterministic';
+    case 'uniform': return `Uniform ±${(d.variance * 100).toFixed(0)}%`;
+    case 'erlang': return `Erlang-${Math.max(1, Math.floor(d.k))}`;
+    case 'normal': return `Normal σ=${d.std.toFixed(2)}`;
+    default: return describeDist(d);
   }
 }
 
@@ -545,5 +647,7 @@ export function scaleDist(d: ServiceDist, factor: number): ServiceDist {
         scale: (d.scale ?? 1) * f,
         shift: (d.shift ?? 0) * f,
       };
+    case 'triangularRate':
+      return { kind: 'triangularRate', min: d.min / f, mode: d.mode / f, max: d.max / f };
   }
 }

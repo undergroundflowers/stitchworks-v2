@@ -24,6 +24,7 @@
 import { useEffect, useMemo } from 'react';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { useGarments } from '../store/garments';
+import { useProject } from '../store/project';
 import { resolveSimScope, useSimScope, type SimScope } from '../store/simScope';
 import type { SewingLine, Twin } from '../domain/twin';
 import { getBlockKind } from '../domain/pml';
@@ -74,9 +75,14 @@ export function useLineSim(): UseLineSimResult {
   useEffect(() => {
     if (scope !== savedScope) setScope(scope);
   }, [scope, savedScope, setScope]);
-  const durationMin = useSimScope((s) => s.durationMin);
+  // The run is one shift long, and the shift's length is the project's — the
+  // same figure the Sim screen's TIME SETUP edits. It used to be read from a
+  // second, app-wide setting that no screen could change, so every analysis
+  // page ran 480 minutes whatever the shift was set to.
+  const durationMin = useProject((s) => s.time.shiftDurationMin);
   const seed = useSimScope((s) => s.seed);
   const warmupMin = useSimScope((s) => s.warmupMin);
+  const stopAtPieces = useSimScope((s) => s.stopAtPieces);
   const garments = useGarments();
   // Every line carries its own `garmentId`, which `buildSimSpec` prefers.
   // This is only the floor under a line that somehow has none.
@@ -92,8 +98,9 @@ export function useLineSim(): UseLineSimResult {
         durationMin,
         seed,
         warmupMin,
+        stopAtPieces,
       }),
-    [twin, scope, garments.byId, fallbackGarmentId, durationMin, seed, warmupMin],
+    [twin, scope, garments.byId, fallbackGarmentId, durationMin, seed, warmupMin, stopAtPieces],
   );
 
   const key = useMemo(() => (spec.lines.length > 0 ? simSpecKey(spec) : ''), [spec]);

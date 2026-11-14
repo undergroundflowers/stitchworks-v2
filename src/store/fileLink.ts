@@ -32,6 +32,7 @@ import { create } from 'zustand';
 import { openDB, type IDBPDatabase } from 'idb';
 import { useProject } from './project';
 import { useTwin } from './twin';
+import { bumpFactoryEpoch } from './factoryEpoch';
 
 // ---------------------------------------------------------------------------
 // File System Access API — not in TypeScript's DOM lib yet.
@@ -375,6 +376,9 @@ export function withoutDirtyTracking<T>(fn: () => T): T {
     return fn();
   } finally {
     suppress -= 1;
+    // Every caller of this is a whole-factory replacement, which is exactly
+    // the moment the kept-alive surfaces have to let go of their view state.
+    if (suppress === 0) bumpFactoryEpoch();
   }
 }
 

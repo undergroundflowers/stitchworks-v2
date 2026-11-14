@@ -23,19 +23,14 @@ function customGarment(id: string, smv: number): GarmentTemplate {
     name: `Operation ${n}`,
     smv,
     machineCode: 'SNL',
-    skill: 'stitching',
-    category: 'sewing',
   }));
   return {
     id,
     name: id,
-    class: 'shirt' as GarmentTemplate['class'],
     description: '',
     operations: ops,
-    defaultBundleSize: 1,
     totalSmv: smv * ops.length,
     hourlyTarget100: Math.round(60 / smv),
-    bestFor: '',
   };
 }
 

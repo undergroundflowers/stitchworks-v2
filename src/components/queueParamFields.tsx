@@ -34,6 +34,10 @@ export type DistParams = {
   variance: number;
   k: number;
   std: number;
+  /** `triangularRate` only — output rates in pieces per minute. */
+  min: number;
+  mode: number;
+  max: number;
 };
 
 /** Patch emitted when the user edits any queueing field. */
@@ -50,6 +54,8 @@ export const DIST_OPTIONS: { value: DistKind; label: string }[] = [
   { value: 'uniform', label: 'Uniform (G)' },
   { value: 'erlang', label: 'Erlang (Eₖ)' },
   { value: 'normal', label: 'Normal (G)' },
+  // Authored as an output RATE (pieces a minute), run as its reciprocal.
+  { value: 'triangularRate', label: 'Tri. rate (G)' },
 ];
 
 export const DISCIPLINE_OPTIONS: { value: QueueDiscipline; label: string }[] = [
@@ -177,6 +183,39 @@ export function DistParamInputs({
           step={0.05}
           editable={editable}
           onChange={(v) => onChange({ std: v })}
+        />,
+      );
+      break;
+    case 'triangularRate':
+      // Three RATES, slowest to fastest. Plain-text labels on purpose: there is
+      // no textbook symbol for "pieces a minute on a bad day".
+      cols.push(
+        <NumberField
+          key="lo"
+          label="Slowest /min"
+          value={dist.min}
+          min={0.01}
+          step={0.1}
+          editable={editable}
+          onChange={(v) => onChange({ min: v })}
+        />,
+        <NumberField
+          key="mode"
+          label="Usual /min"
+          value={dist.mode}
+          min={0.01}
+          step={0.1}
+          editable={editable}
+          onChange={(v) => onChange({ mode: v })}
+        />,
+        <NumberField
+          key="hi"
+          label="Fastest /min"
+          value={dist.max}
+          min={0.01}
+          step={0.1}
+          editable={editable}
+          onChange={(v) => onChange({ max: v })}
         />,
       );
       break;
@@ -362,6 +401,11 @@ export function morphDist(current: ServiceDist, kind: DistKind, smv: number): Se
     case 'uniform': return { kind: 'uniform', mean: m, variance: 0.15 };
     case 'erlang':  return { kind: 'erlang', k: 2, mean: m };
     case 'normal':  return { kind: 'normal', mean: m, std: m * 0.2 };
+    // Centre the usual rate on the mean being carried over, ±25 % either side.
+    // The resulting mean TIME is a little above `m` (Jensen), which is the
+    // honest consequence of describing the same station as a rate.
+    case 'triangularRate':
+      return { kind: 'triangularRate', min: 0.75 / m, mode: 1 / m, max: 1.25 / m };
     default: throw new Error(`morphDist: unsupported kind ${kind}`);
   }
 }
@@ -373,6 +417,13 @@ export function patchDist(d: ServiceDist, p: Partial<DistParams>): ServiceDist {
     case 'uniform': return { kind: 'uniform', mean: p.mean ?? d.mean, variance: p.variance ?? d.variance };
     case 'erlang':  return { kind: 'erlang', k: p.k ?? d.k, mean: p.mean ?? d.mean };
     case 'normal':  return { kind: 'normal', mean: p.mean ?? d.mean, std: p.std ?? d.std };
+    case 'triangularRate':
+      return {
+        kind: 'triangularRate',
+        min: p.min ?? d.min,
+        mode: p.mode ?? d.mode,
+        max: p.max ?? d.max,
+      };
     default: throw new Error(`patchDist: unsupported kind ${d.kind}`);
   }
 }

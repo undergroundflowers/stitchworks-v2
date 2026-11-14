@@ -362,7 +362,8 @@ function resolveDeepLinkInitialState(searchParams: URLSearchParams): {
 } {
   const scenarioId = searchParams.get('scenario');
   const lineId = searchParams.get('line');
-  if (!scenarioId && !lineId) return { selected: null, lineDeepLink: null };
+  const wsId = searchParams.get('ws');
+  if (!scenarioId && !lineId && !wsId) return { selected: null, lineDeepLink: null };
 
   const store = useTwin.getState();
 
@@ -393,8 +394,14 @@ function resolveDeepLinkInitialState(searchParams: URLSearchParams): {
   const line = lineId && twinForLine
     ? (twinForLine.lines ?? []).find((l) => l.id === lineId) ?? null
     : null;
+  // `?ws=<id>` opens the Builder with that station selected, so its Inspector
+  // is already showing — the "Edit in Build" link on a read-only INSIGHTS page.
+  // Resolved against whichever twin is active AFTER any scenario switch above;
+  // an id that is not on it selects nothing rather than a stale station.
+  const activeTwin = selectActiveTwin(useTwin.getState());
+  const ws = wsId ? activeTwin.workstations.find((w) => w.id === wsId) : undefined;
   return {
-    selected: null,
+    selected: ws ? { kind: 'ws', id: ws.id } : null,
     lineDeepLink: line?.id ?? null,
   };
 }
@@ -605,10 +612,11 @@ export function BuilderPage() {
     // Builder doesn't re-fire activation. Auto-hide the flash chip after 4s.
     const scenarioId = searchParams.get('scenario');
     const lineId = searchParams.get('line');
-    if (scenarioId || lineId) {
+    if (scenarioId || lineId || searchParams.has('ws')) {
       const next = new URLSearchParams(searchParams);
       next.delete('scenario');
       next.delete('line');
+      next.delete('ws');
       setSearchParams(next, { replace: true });
     }
     if (!initialSelection.lineDeepLink) return;
@@ -3313,6 +3321,12 @@ function CanvasSVG(props: CanvasSVGProps) {
           const sharedPct = sharedAsgn
             ? Math.round((sharedAsgn.shareFrac ?? 1) * 100)
             : null;
+          // An on-demand operator has no fixed share to print: where their
+          // time goes is decided by the run, so the pill names the mode.
+          const sharedOnDemand =
+            !!sharedAsgn &&
+            (twin.operators ?? []).find((o) => o.id === sharedAsgn.operatorId)?.shareMode ===
+              'onDemand';
           // Count operators primarily assigned to this workstation. This is
           // the c (server count) the queue analysis will use, so showing it
           // on every tile keeps the Builder visually honest with the report.
@@ -3338,6 +3352,7 @@ function CanvasSVG(props: CanvasSVGProps) {
                 placing={props.drop.kind !== 'none'}
                 projection={projection}
                 sharedPct={sharedPct}
+                sharedOnDemand={sharedOnDemand}
                 operatorCount={operatorCount}
                 operatorNames={operatorNames}
                 opMeta={opMetaFor(w, garmentsById)}
@@ -3877,6 +3892,7 @@ function WorkstationSprite({
   placing,
   projection,
   sharedPct = null,
+  sharedOnDemand = false,
   operatorCount = 0,
   operatorNames = [],
   opMeta = { code: '—', name: '' },
@@ -3899,6 +3915,9 @@ function WorkstationSprite({
    *  them out — adding a pill on every rotation station would just
    *  clutter the canvas. */
   sharedPct?: number | null;
+  /** The shared operator serves on demand, so the pill names the mode
+   *  instead of quoting a percentage the run does not use. */
+  sharedOnDemand?: boolean;
   /** Operators assigned to this workstation (= c, the server count the
    *  queue analysis uses). Drives the always-on operator chip below
    *  the sprite so the Builder makes the c-count visible without the
@@ -4135,9 +4154,9 @@ function WorkstationSprite({
       {sharedPct !== null && (
         <g transform="translate(0, -44)" style={{ pointerEvents: 'none' }}>
           <rect
-            x={-22}
+            x={sharedOnDemand ? -37 : -22}
             y={-9}
-            width={44}
+            width={sharedOnDemand ? 74 : 44}
             height={14}
             rx={3}
             fill={SW_COLORS.brand}
@@ -4153,7 +4172,7 @@ function WorkstationSprite({
             fill="#fff"
             style={{ letterSpacing: '0.05em' }}
           >
-            {`⇄ ${sharedPct}%`}
+            {sharedOnDemand ? '⇄ ON DEMAND' : `⇄ ${sharedPct}%`}
           </text>
         </g>
       )}
@@ -5742,11 +5761,14 @@ function WorkstationAssignmentsView({
   operators,
   assignments,
   connectors,
+  stations,
 }: {
   ws: Workstation;
   operators: Operator[];
   assignments: Assignment[];
   connectors: Connector[];
+  /** Every workstation in the factory — the pool the share picker draws from. */
+  stations: Workstation[];
 }) {
   const rows = assignments.filter((a) => a.wsId === ws.id);
   const operatorsById = new Map(operators.map((o) => [o.id, o]));
@@ -5772,6 +5794,30 @@ function WorkstationAssignmentsView({
     (myPrimary.shareFrac ?? 1) === 1 &&
     !!nextPrimary &&
     nextPrimary.operatorId !== myPrimary.operatorId;
+
+  // Is this station's operator covering other stations too, and if so, how is
+  // their time dealt out? `onDemand` means the run SEIZES them, so the fixed
+  // share below it — and the cycle penalty that goes with a fixed share — do
+  // not apply.
+  const myOperator = myPrimary ? operatorsById.get(myPrimary.operatorId) : undefined;
+  const coveredByMine = myPrimary
+    ? assignments.filter(
+        (a) => a.operatorId === myPrimary.operatorId && a.role !== 'rotation_member',
+      )
+    : [];
+  const isShared = coveredByMine.length > 1;
+  const onDemand = isShared && myOperator?.shareMode === 'onDemand';
+
+  // Any other station on this line that has its own operator can be taken on.
+  // "Next station" is only the commonest case: a floater covering two machines
+  // at opposite ends of the line is the same gesture.
+  const shareTargets = myPrimary
+    ? stations.filter((other) => {
+        if (other.id === ws.id || other.lineId !== ws.lineId) return false;
+        const theirs = assignments.find((a) => a.wsId === other.id && a.role === 'primary');
+        return !!theirs && theirs.operatorId !== myPrimary.operatorId;
+      })
+    : [];
 
   // Summarise the assignment mix in one line — "6 rotators", "primary + 2 helpers",
   // "shared 50/50", etc. — so the user reads the staffing model before they
@@ -5837,7 +5883,7 @@ function WorkstationAssignmentsView({
           {summary}
         </div>
       </div>
-      {stationShareFrac < 1 && (
+      {stationShareFrac < 1 && !onDemand && (
         <div
           title={`This station shares its operator with ${Math.round(cycleMultiplier) - 1} other station${Math.round(cycleMultiplier) - 1 === 1 ? '' : 's'}. The simulation engine multiplies this station's cycle time by ${cycleMultiplier.toFixed(2)}× because the operator is only present ${Math.round(stationShareFrac * 100)}% of the shift.`}
           style={{
@@ -5926,11 +5972,96 @@ function WorkstationAssignmentsView({
                     textAlign: 'right',
                   }}
                 >
-                  {sharePct !== null ? `${sharePct}%` : '—'}
+                  {operatorsById.get(a.operatorId)?.shareMode === 'onDemand' && coveredByMine.length > 1 && a.operatorId === myPrimary?.operatorId
+                    ? `P${a.priority ?? 1}`
+                    : sharePct !== null ? `${sharePct}%` : '—'}
                 </span>
               </div>
             );
           })}
+        </div>
+      )}
+      {isShared && myPrimary && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+            <div style={sectionLabel}>Shared operator works</div>
+            <HelpDot label="Fixed split or on demand?">
+              <strong>Fixed split</strong> slows each station by its share.{' '}
+              <strong>On demand</strong> sends the operator wherever work waits.
+            </HelpDot>
+          </div>
+          <HudSelect
+            value={onDemand ? 'onDemand' : 'timeSplit'}
+            onChange={(v) =>
+              useTwin
+                .getState()
+                .setOperatorShareMode(myPrimary.operatorId, v === 'onDemand' ? 'onDemand' : 'timeSplit')
+            }
+            variant="light"
+            size="sm"
+            width="100%"
+            options={[
+              { value: 'timeSplit', label: 'Fixed split of the shift' },
+              { value: 'onDemand', label: 'On demand, where work waits' },
+            ]}
+          />
+          {onDemand && (
+            <div style={{ marginTop: 8 }}>
+              <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+                <div style={sectionLabel}>Serve order here</div>
+                <HelpDot label="What is serve order?">
+                  1 is served first. Equal numbers: the piece that has waited
+                  longest wins.
+                </HelpDot>
+              </div>
+              <NumberInput
+                aria-label="Serve order of this station for its shared operator"
+                min={1}
+                max={9}
+                step={1}
+                value={myPrimary.priority ?? 1}
+                onChange={(v) => {
+                  if (v !== undefined) useTwin.getState().setAssignmentPriority(myPrimary.id, v);
+                }}
+                style={{
+                  width: '100%',
+                  height: 30,
+                  padding: '0 10px',
+                  fontFamily: SW_FONTS.mono,
+                  fontSize: 12,
+                  fontWeight: 700,
+                  border: `1px solid ${SW_COLORS.line}`,
+                  borderRadius: 4,
+                  background: SW_COLORS.paper,
+                  color: SW_COLORS.ink,
+                }}
+              />
+            </div>
+          )}
+        </div>
+      )}
+      {myPrimary && shareTargets.length > 0 && (
+        <div style={{ marginTop: 8 }}>
+          <div style={{ display: 'flex', alignItems: 'center', gap: 5, marginBottom: 4 }}>
+            <div style={sectionLabel}>Also cover</div>
+            <HelpDot label="What does Also cover do?">
+              This operator takes over the chosen station too. Its own operator
+              leaves the line.
+            </HelpDot>
+          </div>
+          <HudSelect
+            value=""
+            onChange={(v) => {
+              if (v) useTwin.getState().shareOperatorsBetweenStations(ws.id, v);
+            }}
+            variant="light"
+            size="sm"
+            width="100%"
+            options={[
+              { value: '', label: 'Choose a station…' },
+              ...shareTargets.map((other) => ({ value: other.id, label: other.name })),
+            ]}
+          />
         </div>
       )}
       {canShareWithNext && nextEdge && myPrimary && (
@@ -6710,6 +6841,7 @@ function InspectorBody(props: InspectorProps) {
           operators={props.twin.operators ?? []}
           assignments={props.twin.assignments ?? []}
           connectors={props.twin.connectors ?? []}
+          stations={props.twin.workstations ?? []}
         />
       </LensSection>
       )}

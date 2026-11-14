@@ -31,13 +31,12 @@ const LAYOUT_ROWS: unknown[][] = [
 ];
 
 function op(id: string, name: string, smv: number): Operation {
-  return { id, code: id, name, smv, machineCode: 'SNL', skill: 'stitching', category: 'sewing' };
+  return { id, code: id, name, smv, machineCode: 'SNL' };
 }
 
 const BULLETIN: GarmentTemplate = {
   id: 'ob-test',
   name: 'Style 4401 shirt',
-  class: 'shirt' as GarmentTemplate['class'],
   description: '',
   operations: [
     op('a', 'Collar run stitch', 0.5),
@@ -47,10 +46,8 @@ const BULLETIN: GarmentTemplate = {
     op('e', 'Sleeve attach round', 1.4),
     op('f', 'Button attach *9', 0.7),
   ],
-  defaultBundleSize: 20,
   totalSmv: 3.8,
   hourlyTarget100: 0,
-  bestFor: '',
 };
 
 const parsed = parseLayoutRows(LAYOUT_ROWS, 'test.xlsx', 'layout');

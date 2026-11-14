@@ -48,9 +48,16 @@ export interface UseMultiPmlSimResult extends Omit<UseSimResult, 'state'> {
 
 export function useMultiPmlSim(
   lineTwins: PmlLineInput[],
-  opts?: { durationMin?: number; seed?: number; recordFlow?: boolean; warmupMin?: number },
+  opts?: {
+    durationMin?: number;
+    seed?: number;
+    recordFlow?: boolean;
+    warmupMin?: number;
+    stopAtPieces?: number;
+  },
 ): UseMultiPmlSimResult {
   const scopeWarmup = useSimScope((s) => s.warmupMin);
+  const scopeStopAt = useSimScope((s) => s.stopAtPieces);
   // Effective catalog (built-ins + project edits) so the engine's op-level
   // resolvers see what the user authored, not the frozen built-ins.
   const garmentsById = useGarments().byId;
@@ -58,6 +65,7 @@ export function useMultiPmlSim(
   const seed = opts?.seed ?? DEFAULT_SEED;
   const recordFlow = opts?.recordFlow ?? false;
   const warmupMin = opts?.warmupMin ?? scopeWarmup;
+  const stopAtPieces = opts?.stopAtPieces ?? scopeStopAt;
 
   const spec = useMemo<SimSpec>(
     () => ({
@@ -73,8 +81,9 @@ export function useMultiPmlSim(
       samplePeriodMin: 1,
       recordFlow,
       warmupMin: Math.max(0, Math.min(warmupMin, durationMin - 1)),
+      stopAtPieces,
     }),
-    [lineTwins, garmentsById, durationMin, seed, recordFlow, warmupMin],
+    [lineTwins, garmentsById, durationMin, seed, recordFlow, warmupMin, stopAtPieces],
   );
 
   // Empty input ⇒ no key, no session, no interference. LiveSim renders this

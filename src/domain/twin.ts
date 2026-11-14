@@ -363,6 +363,23 @@ export interface Operator {
    *  (e.g. "5 trainee overlockers"). Useful when modelling a TSS cell
    *  without naming every person. */
   multiplicity?: number;
+  /**
+   * How this operator's time reaches the stations they cover, when they cover
+   * more than one.
+   *
+   *   • `timeSplit` (the default, and what every older file means) — a fixed
+   *     share of the shift at each station, `Assignment.shareFrac`. The run
+   *     slows each station by 1/share and never moves the person.
+   *   • `onDemand` — the operator is a resource. A station must have them to
+   *     start a piece, and at each finish they go to whichever of their
+   *     stations has work, by `Assignment.priority` and then by the piece that
+   *     has waited longest. `shareFrac` is ignored; the split is an OUTPUT.
+   *
+   * The two differ most where it matters: a fixed 50/50 split wastes the half
+   * a lightly loaded station does not need, while on-demand lends it to the
+   * busier one.
+   */
+  shareMode?: 'timeSplit' | 'onDemand';
   notes?: string;
 }
 
@@ -406,6 +423,13 @@ export interface Assignment {
    *  the engine cycles the operator through stations in increasing
    *  `rotationOrder`. */
   rotationOrder?: number;
+  /**
+   * Which of an on-demand operator's stations is served first when more than
+   * one has work waiting. 1 = first. Missing ⇒ 1, so every station ties and
+   * the piece that has waited longest wins. Ignored unless the operator's
+   * `shareMode` is `onDemand`.
+   */
+  priority?: number;
   notes?: string;
 }
 

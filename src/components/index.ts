@@ -5,6 +5,7 @@ export { Stat } from './Stat';
 export { Tag } from './Tag';
 export { SectionHeader } from './SectionHeader';
 export { ViewTitle } from './ViewTitle';
+export { PageTitleBar, type PageTitleBarProps } from './PageTitleBar';
 export { EmptyState } from './EmptyState';
 export { Logo } from './Logo';
 export { Progress } from './Progress';
@@ -31,10 +32,16 @@ export {
 export { WipSparkline, type WipSparklineProps } from './WipSparkline';
 export {
   StationTimeseriesChart,
-  StationTimeseriesGrid,
+  StationMetricLegend,
+  StationMetricReadout,
+  stationScaleDomain,
+  STATION_METRICS,
   type StationTimeseriesChartProps,
-  type StationTimeseriesGridProps,
+  type StationMetricLegendProps,
+  type StationMetricReadoutProps,
   type StationMetric,
+  type StationScaleId,
+  type StationSeriesBasis,
 } from './StationTimeseriesChart';
 export { StageOverlay } from './StageOverlay';
 export { StationGlyph } from './StationGlyph';
@@ -43,7 +50,7 @@ export { StationTypeDialog, type StationTypeDialogProps } from './StationTypeDia
 export { ZoomHud } from './ZoomHud';
 export { CanvasLegend, LegendRow } from './CanvasLegend';
 export { CanvasGrid } from './CanvasGrid';
-export { DataTable, type DataTableColumn, type DataTableProps, type DataTableRowStyle } from './DataTable';
+export { DataTable, readStoredSort, sortRows, type DataTableColumn, type DataTableProps, type DataTableRowStyle } from './DataTable';
 export { PmlBlockFace, PML_FACE_SIZE, type PmlBlockFaceProps } from './PmlBlockFace';
 export { ViewSwitch } from './ViewSwitch';
 export { useCanvasCamera, type CanvasCameraApi } from './useCanvasCamera';

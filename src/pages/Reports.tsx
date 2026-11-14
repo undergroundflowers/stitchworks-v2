@@ -1,5 +1,5 @@
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
-import { Card, Button, SectionHeader, ToggleGroup, HideableBox, HudSelect, LineBalancePanel, LineScopePicker, LineSimEmpty, Tag } from '../components';
+import { Card, Button, SectionHeader, HideableBox, HudSelect, LineBalancePanel, LineSimEmpty, Tag } from '../components';
 import { useEffect, useMemo, useState } from 'react';
 import { useLocation, useNavigate } from 'react-router-dom';
 import {
@@ -26,7 +26,6 @@ import {
 import { useProject, useGarments } from '../store';
 import { useTwin, selectActiveTwin } from '../store/twin';
 import { resolveSimScope, useSimScope } from '../store/simScope';
-import { lineSystemBadge } from '../domain/twin';
 import { useLineSim } from '../simulation/useLineSim';
 import { liveAggregate } from '../simulation/live-aggregate';
 
@@ -298,9 +297,8 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
         }
         right={
           <div style={{ display: 'flex', gap: 8, alignItems: 'center', flexWrap: 'wrap' }}>
-            {/* Bound to the shared scope, so picking a line here also moves the
-                Sim screen and the queueing pages. */}
-            <LineScopePicker lines={reportsTwin.lines ?? []} />
+            {/* No line picker here: Reports is only ever shown inside INSIGHTS,
+                whose toolbar already has the one that scopes every tab. */}
             <Button variant="primary" size="sm" icon="✦"
               onClick={() => {
                 // Append device wall-clock so the user can recognise this
@@ -318,69 +316,24 @@ export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
             >
               Save scenario
             </Button>
-            <ToggleGroup value={period} onChange={setPeriod} options={[
-              { value:'SHIFT', label:'Shift' },
-              { value:'DAY',   label:'Day' },
-              { value:'WEEK',  label:'Week' },
-              { value:'MONTH', label:'Month' },
-            ]}/>
+            {/* The period the figures are scaled to. A dropdown: it is set once
+                and left, so it does not need four buttons' worth of bar. */}
+            <HudSelect<'SHIFT' | 'DAY' | 'WEEK' | 'MONTH'>
+              value={period}
+              onChange={setPeriod}
+              size="sm"
+              minWidth={120}
+              title="Scale the figures to one shift, a day, a week or a month"
+              options={[
+                { value: 'SHIFT', label: 'Shift' },
+                { value: 'DAY', label: 'Day' },
+                { value: 'WEEK', label: 'Week' },
+                { value: 'MONTH', label: 'Month' },
+              ]}
+            />
           </div>
         }
       />
-
-      {/* ── Active systems strip ─────────────────────────────────────────
-          One chip per sewing line on the active twin, showing the
-          production system and its single most-characteristic policy knob
-          (bundle size for PBS, rotator count for modular, takt for
-          synchro). The user sees at a glance which systems are driving
-          the numbers below — useful when a single twin runs PBS + TSS in
-          parallel and the KPIs blend the two. */}
-      {(reportsTwin.lines ?? []).length > 0 && (
-        <div
-          style={{
-            display: 'flex',
-            flexWrap: 'wrap',
-            gap: 8,
-            margin: '12px 0 4px',
-            alignItems: 'center',
-          }}
-        >
-          <span
-            style={{
-              ...SW_TYPE.overline,
-              color: SW_COLORS.muted,
-              letterSpacing: '1.5px',
-            }}
-          >
-            Lines
-          </span>
-          {(reportsTwin.lines ?? []).map((l) => (
-            <span
-              key={l.id}
-              title={`${l.name} — ${lineSystemBadge(l, reportsTwin)}`}
-              style={{
-                display: 'inline-flex',
-                alignItems: 'center',
-                gap: 6,
-                padding: '4px 9px',
-                borderRadius: 4,
-                border: `1px solid ${SW_COLORS.line}`,
-                background: SW_COLORS.paper,
-                fontFamily: SW_FONTS.mono,
-                fontSize: 10,
-                fontWeight: 700,
-                color: SW_COLORS.ink,
-                letterSpacing: '0.05em',
-              }}
-            >
-              <span style={{ color: SW_COLORS.brand }}>◆</span>
-              <span>{lineSystemBadge(l, reportsTwin)}</span>
-              <span style={{ color: SW_COLORS.muted, fontWeight: 600 }}>·</span>
-              <span style={{ color: SW_COLORS.muted }}>{l.name}</span>
-            </span>
-          ))}
-        </div>
-      )}
 
       {/* ── In-page tabs ─────────────────────────────────────────────────
           Reports is the umbrella. Performance gives the headline KPIs,

@@ -9,19 +9,7 @@
  */
 
 import type { MachineCode } from './machines';
-import type { SkillId } from './workers';
 import type { ServiceDist, QueueDiscipline } from '../simulation';
-
-export type OperationCategory =
-  | 'sewing'
-  | 'manual'
-  | 'cutting'
-  | 'spreading'
-  | 'pressing'
-  | 'fusing'
-  | 'inspection'
-  | 'embroidery'
-  | 'finishing';
 
 export interface Operation {
   /** Unique within a project. Industry codes (e.g. "OP-04") are stored in `code`. */
@@ -34,9 +22,6 @@ export interface Operation {
   smv: number;
   /** Required machine code from MACHINE_CATALOG. Use 'MNL' for manual. */
   machineCode: MachineCode;
-  /** The skill the assigned operator must have. */
-  skill: SkillId;
-  category: OperationCategory;
   /** Operation ids that must complete before this one starts. */
   precedes?: string[];
   follows?: string[];

@@ -1,12 +1,9 @@
 import { useState, type CSSProperties } from 'react';
 import { SW_COLORS, SW_FONTS, SW_RADIUS, SW_TYPE } from '../design/tokens';
 import { Button } from './Button';
-import { HudSelect } from './HudSelect';
-import { NumberInput } from './NumberInput';
-import type { GarmentTemplate, GarmentClass } from '../domain/garments';
-import type { Operation, OperationCategory } from '../domain/operations';
+import type { GarmentTemplate } from '../domain/garments';
+import type { Operation } from '../domain/operations';
 import type { MachineCode } from '../domain/machines';
-import type { SkillId } from '../domain/workers';
 
 /**
  * Create a custom garment template from a quick form plus an operations
@@ -20,33 +17,11 @@ import type { SkillId } from '../domain/workers';
  * which already owns garments, could host it directly.
  */
 
-const GARMENT_CLASS_OPTIONS: GarmentClass[] = ['top', 'bottom', 'dress', 'outerwear', 'accessory'];
-
 const MACHINE_OPTIONS: MachineCode[] = [
   'SNL', 'DNL', '4OL', '5OL', 'FL', 'FB', 'KS',
   'BH', 'BS', 'BT', 'EMB',
   'CUT', 'CAD', 'SPR', 'FUSE', 'PRESS', 'STEAM', 'INSP', 'MNL',
 ];
-
-const MACHINE_TO_SKILL: Record<MachineCode, SkillId> = {
-  SNL: 'stitching', DNL: 'stitching',
-  '4OL': 'overlock', '5OL': 'overlock',
-  FL: 'flatlock', FB: 'feed_of_arm', KS: 'kansai',
-  BH: 'buttonhole', BS: 'button_sew', BT: 'bartack', EMB: 'embroidery',
-  CUT: 'cutting_manual', CAD: 'cutting_cad', SPR: 'spreading',
-  FUSE: 'fusing', PRESS: 'pressing', STEAM: 'pressing', INSP: 'inspection',
-  MNL: 'bundling',
-};
-
-const MACHINE_TO_CATEGORY: Record<MachineCode, OperationCategory> = {
-  SNL: 'sewing', DNL: 'sewing', '4OL': 'sewing', '5OL': 'sewing',
-  FL: 'sewing', FB: 'sewing', KS: 'sewing',
-  BH: 'sewing', BS: 'sewing', BT: 'sewing',
-  EMB: 'embroidery',
-  CUT: 'cutting', CAD: 'cutting', SPR: 'spreading',
-  FUSE: 'fusing', PRESS: 'pressing', STEAM: 'pressing',
-  INSP: 'inspection', MNL: 'manual',
-};
 
 /** Parse the operations textarea. Accepts `Name | SMV | Machine` per line.
  *  Trailing whitespace and blank lines are skipped. Missing SMV falls back to
@@ -75,8 +50,6 @@ function parseOpsText(text: string, slug: string): Operation[] {
         name,
         smv: Math.round(smv * 1000) / 1000,
         machineCode,
-        skill: MACHINE_TO_SKILL[machineCode],
-        category: MACHINE_TO_CATEGORY[machineCode],
       };
     });
 }
@@ -109,10 +82,7 @@ export interface NewGarmentTemplateDialogProps {
 
 export function NewGarmentTemplateDialog({ onCancel, onCreate }: NewGarmentTemplateDialogProps) {
   const [name, setName] = useState('');
-  const [klass, setKlass] = useState<GarmentClass>('top');
   const [description, setDescription] = useState('');
-  const [bestFor, setBestFor] = useState('');
-  const [bundleSize, setBundleSize] = useState(30);
   const [opsText, setOpsText] = useState(OPS_PLACEHOLDER);
 
   const trimmedName = name.trim();
@@ -127,14 +97,11 @@ export function NewGarmentTemplateDialog({ onCancel, onCreate }: NewGarmentTempl
     const garment: GarmentTemplate = {
       id,
       name: trimmedName,
-      class: klass,
       description: description.trim() || `${trimmedName} — custom bulletin.`,
       operations: parsedOps,
-      defaultBundleSize: Math.max(1, Math.min(200, Math.round(bundleSize) || 30)),
       totalSmv,
       hourlyTarget100:
         parsedOps.length > 0 ? Math.round(60 / (totalSmv / parsedOps.length)) : 0,
-      bestFor: bestFor.trim() || 'Custom orders.',
     };
     onCreate(garment);
   }
@@ -206,37 +173,14 @@ export function NewGarmentTemplateDialog({ onCancel, onCreate }: NewGarmentTempl
         </div>
 
         <div style={{ padding: '16px 18px', display: 'grid', gridTemplateColumns: '1fr 1fr', gap: 12, overflowY: 'auto' }}>
-          <label style={{ gridColumn: '1 / 2' }}>
+          <label style={{ gridColumn: '1 / 3' }}>
             <div style={labelStyle}>NAME</div>
             <input autoFocus value={name} onChange={(e) => setName(e.target.value)} placeholder="e.g. Henley L/S" style={inputStyle} />
-          </label>
-          <label style={{ gridColumn: '2 / 3' }}>
-            <div style={labelStyle}>CLASS</div>
-            <HudSelect
-              value={klass}
-              onChange={(v) => setKlass(v as GarmentClass)}
-              variant="light"
-              width="100%"
-              options={GARMENT_CLASS_OPTIONS.map((c) => ({ value: c, label: c }))}
-            />
           </label>
 
           <label style={{ gridColumn: '1 / 3' }}>
             <div style={labelStyle}>DESCRIPTION</div>
             <input value={description} onChange={(e) => setDescription(e.target.value)} placeholder="Short description — what's this garment?" style={inputStyle} />
-          </label>
-
-          <label style={{ gridColumn: '1 / 2' }}>
-            <div style={labelStyle}>BEST FOR</div>
-            <input value={bestFor} onChange={(e) => setBestFor(e.target.value)} placeholder="When to pick this template" style={inputStyle} />
-          </label>
-          <label style={{ gridColumn: '2 / 3' }}>
-            <div style={labelStyle}>DEFAULT BUNDLE</div>
-            <NumberInput
-              value={bundleSize} min={1} max={200}
-              onChange={(v) => setBundleSize(v ?? 0)}
-              style={{ ...inputStyle, fontFamily: SW_FONTS.mono, fontWeight: 700 }}
-            />
           </label>
 
           <label style={{ gridColumn: '1 / 3' }}>

@@ -159,3 +159,57 @@ describe('warm-up truncation discards the transient', () => {
     expect(Math.abs(b.lambdaOfferedPerHr - a.lambdaOfferedPerHr)).toBeLessThan(2);
   });
 });
+
+describe('per-step history values are exact means of their own step', () => {
+  // The charts can plot either the running average (`inSystem`, …) or the mean
+  // over each step (`inSystemStep`, …). The two are views of one integral, so
+  // the steps, weighted by their own lengths, must add back up to the running
+  // average at every point. If they ever stop doing so, one of the two charts
+  // is drawing something the engine did not measure.
+  const { twin, serviceId } = poolTwin({ poolUnits: 4, serviceMeanMin: 1, lambdaPerHr: 50 });
+  const result = runPmlSim({ twin, durationMin: 480, seed: 7, samplePeriodMin: 1 });
+  const view = buildPmlTwinView(twin);
+  const last = result.samples[result.samples.length - 1];
+  const state = pmlSampleToSimState(view, last, result, result.samples);
+  const idx = state.stations.findIndex((s) => s.wsId === serviceId);
+  const history = state.stationHistory[idx];
+
+  it('each step starts where the previous point ended', () => {
+    expect(history.length).toBeGreaterThan(50);
+    expect(history[0].stepFrom).toBe(0);
+    for (let i = 1; i < history.length; i++) {
+      expect(history[i].stepFrom).toBe(history[i - 1].time);
+    }
+  });
+
+  it('time-weighted steps rebuild the running averages of ρ, L and Lq', () => {
+    let busy = 0;
+    let areaL = 0;
+    let areaLq = 0;
+    for (const h of history) {
+      const dt = h.time - h.stepFrom;
+      busy += h.utilizationStep * dt;
+      areaL += h.inSystemStep * dt;
+      areaLq += h.queueLenStep * dt;
+      if (h.time <= 0) continue;
+      expect(busy / h.time).toBeCloseTo(h.utilization, 6);
+      expect(areaL / h.time).toBeCloseTo(h.inSystem, 6);
+      expect(areaLq / h.time).toBeCloseTo(h.queueLen, 6);
+    }
+  });
+
+  it('a step can be busier than the run — the average hides that', () => {
+    // On a 1-server station the busy share of a step is bounded by [0, 1] and
+    // is NOT pinned near the run's ρ: this is what "instantaneous" shows.
+    const steps = history.map((h) => h.utilizationStep);
+    expect(Math.min(...steps)).toBeGreaterThanOrEqual(0);
+    expect(Math.max(...steps)).toBeLessThanOrEqual(1 + 1e-9);
+    expect(Math.max(...steps) - Math.min(...steps)).toBeGreaterThan(0.2);
+  });
+
+  it('reports no wait, not a zero wait, for a step nothing started in', () => {
+    for (const h of history) {
+      expect(Number.isNaN(h.meanWqMinStep) || h.meanWqMinStep >= 0).toBe(true);
+    }
+  });
+});

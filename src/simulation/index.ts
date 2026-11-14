@@ -97,6 +97,7 @@ export {
   cvOf,
   kendallServiceCode,
   describeDist,
+  describeDistShape,
   defaultDist,
   scaleDist,
   type ServiceDist,

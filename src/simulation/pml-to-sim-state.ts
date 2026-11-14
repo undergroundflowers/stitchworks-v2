@@ -45,6 +45,7 @@ import type {
   StationView,
 } from './sim-state';
 import {
+  buildShareFactorMap,
   disciplineFor,
   serversFor,
   systemCapacityFor,
@@ -157,17 +158,13 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
   // Rotation members participate in the sum because each rotating operator
   // contributes their time-fraction of presence; the cell-wide capacity
   // = total operators / total rotation stations.
-  const shareFactorByWs = new Map<string, number>();
-  const wsSums = new Map<string, number>();
-  for (const a of twin.assignments ?? []) {
-    const sf = a.shareFrac ?? (a.role === 'primary' ? 1 : a.role === 'helper' ? 0.3 : 0);
-    if (sf <= 0) continue;
-    wsSums.set(a.wsId, (wsSums.get(a.wsId) ?? 0) + sf);
-  }
-  for (const [wsId, total] of wsSums) {
-    const capped = Math.min(1, total);
-    if (capped < 1) shareFactorByWs.set(wsId, capped);
-  }
+  //
+  // Taken from the engine rather than recomputed here. This used to be a
+  // second copy of the same loop, and the two had to be changed together: an
+  // on-demand operator slows nothing in the run, so a copy that still divided
+  // by their nominal share would have doubled the station's SMV in every KPI
+  // built from it.
+  const shareFactorByWs = buildShareFactorMap(twin);
 
   /** Stations whose authored discipline the engine can't honour — collected
    *  so the UI can badge them instead of silently implying SIRO/Priority was
@@ -297,7 +294,6 @@ export function buildPmlTwinView(twin: Twin, garment?: GarmentTemplate): PmlTwin
     garment: garment ?? ({
       id: 'pml-twin',
       name: twin.name,
-      defaultBundleSize: 1,
       operations: [],
     } as unknown as GarmentTemplate),
     garmentPinned: !!garment,
@@ -444,11 +440,18 @@ export function historyPointFrom(view: PmlTwinView, sample: PmlSimSample): Histo
  * Every time-average is computed by DIFFERENCING the cumulative integrals
  * against `warmupSample`, so the plotted curve is the post-transient estimate
  * when a warm-up is in play and the whole-run estimate when it isn't.
+ *
+ * The `*Step` fields are the same differencing against `prevSample` — the
+ * sample behind the previous point of the series — which makes them the mean
+ * over that one step. Omit it for the first point: the step then runs from 0.
+ * They ignore the warm-up on purpose: a step is a fact about its own stretch
+ * of the run, whichever side of the boundary it falls on.
  */
 export function stationHistoryPointFrom(
   st: StationStatic,
   sample: PmlSimSample,
   warmupSampleIn?: PmlSimSample,
+  prevSample?: PmlSimSample,
 ): StationHistoryPoint {
   const snap = sample.blocks[st.wsId];
   // Same guard as `pmlSampleToSimState`: no post-warm-up window exists until
@@ -459,6 +462,12 @@ export function stationHistoryPointFrom(
   const base = warmupSample?.blocks[st.wsId];
   const t0 = warmupSample?.time ?? 0;
   const win = Math.max(1e-9, sample.time - t0);
+  // A `prevSample` at or after this one (a zero-length step, or a caller that
+  // scrubbed backwards) carries no interval; measure from the start instead.
+  const prev = prevSample && prevSample.time < sample.time ? prevSample : undefined;
+  const prevSnap = prev?.blocks[st.wsId];
+  const stepFrom = prev?.time ?? 0;
+  const stepWin = Math.max(1e-9, sample.time - stepFrom);
   if (!snap) {
     return {
       time: sample.time,
@@ -468,6 +477,11 @@ export function stationHistoryPointFrom(
       meanWqMin: 0,
       inSystemNow: 0,
       queueLenNow: 0,
+      stepFrom,
+      utilizationStep: 0,
+      inSystemStep: 0,
+      queueLenStep: 0,
+      meanWqMinStep: NaN,
     };
   }
   const dBusy = snap.areaBusy - (base?.areaBusy ?? 0);
@@ -484,7 +498,21 @@ export function stationHistoryPointFrom(
     meanWqMin: dWaitN > 0 ? dWaitSum / dWaitN : 0,
     inSystemNow: snap.queueLen + snap.busy,
     queueLenNow: snap.queueLen,
+    stepFrom,
+    utilizationStep: (snap.areaBusy - (prevSnap?.areaBusy ?? 0)) / (c * stepWin),
+    inSystemStep: (snap.areaL - (prevSnap?.areaL ?? 0)) / stepWin,
+    queueLenStep: (snap.areaLq - (prevSnap?.areaLq ?? 0)) / stepWin,
+    meanWqMinStep: stepWaitMean(snap, prevSnap),
   };
+}
+
+/** Mean wait of the bundles that started service between two snapshots. */
+function stepWaitMean(
+  snap: { waitSumMin: number; waitStarts: number },
+  prev: { waitSumMin: number; waitStarts: number } | undefined,
+): number {
+  const n = snap.waitStarts - (prev?.waitStarts ?? 0);
+  return n > 0 ? (snap.waitSumMin - (prev?.waitSumMin ?? 0)) / n : NaN;
 }
 
 /** Derive an event feed from what changed between two samples. */
@@ -632,13 +660,15 @@ export function pmlSampleToSimState(
   const history: HistoryPoint[] = [];
   const stationHistory: StationHistoryPoint[][] = view.stations.map(() => []);
   let lastHistTime = -Infinity;
+  let lastHistSample: PmlSimSample | undefined;
   for (const s of priorSamples) {
     if (s.time - lastHistTime < 5 && s.time !== t) continue;
     lastHistTime = s.time;
     history.push(historyPointFrom(view, s));
     view.stations.forEach((st, i) => {
-      stationHistory[i].push(stationHistoryPointFrom(st, s, warm));
+      stationHistory[i].push(stationHistoryPointFrom(st, s, warm, lastHistSample));
     });
+    lastHistSample = s;
   }
 
   // Line-level utilisation, weighted by servers rather than an unweighted mean

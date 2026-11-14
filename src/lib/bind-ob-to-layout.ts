@@ -150,8 +150,6 @@ export function bindObToLayout(
       name: src.map((o) => o.name.trim()).join(' + ') + (shared > 1 ? ` (1/${shared})` : ''),
       smv,
       machineCode: first.machineCode,
-      skill: first.skill,
-      category: first.category,
       notes: `Bulletin ${src.map((o) => o.code ?? o.name.trim()).join(', ')}` + (shared > 1 ? ` · shared by ${shared} stations` : ''),
       // The layout decides how many stations an operation gets. The bulletin's
       // planned-work-station hint would otherwise double-count a shared op.
@@ -167,16 +165,13 @@ export function bindObToLayout(
   const garment: GarmentTemplate = {
     id: garmentId,
     name: `${ob.name} · ${lineLabel}`,
-    class: ob.class,
     description:
       `${ob.name} placed on the ${lineLabel} layout, one operation per station. ` +
       `${operations.length} of ${stations.length} stations matched a bulletin operation; ` +
       `${unplacedOps.length} bulletin operation${unplacedOps.length === 1 ? ' has' : 's have'} no station.`,
     operations,
-    defaultBundleSize: ob.defaultBundleSize,
     totalSmv,
     hourlyTarget100: slowest > 0 ? Math.round(60 / slowest) : 0,
-    bestFor: 'A line built from an imported layout',
   };
 
   return {

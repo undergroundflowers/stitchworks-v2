@@ -64,6 +64,10 @@ export interface SimRunSlot {
   strideHistory: HistoryPoint[];
   /** Parallel to `view.stations`. Same append-only contract. */
   strideStationHistory: StationHistoryPoint[][];
+  /** Parallel to `strideHistory`: the frame index each stride point was taken
+   *  at. A point's per-step values are differenced against the sample behind
+   *  the point before it, and this is how that sample is found again. */
+  strideFrames: number[];
   /**
    * What consumers read: the stride points plus a point for the exact playhead
    * frame, so the plotted line reaches the clock and the KPI tiles quote the
@@ -152,6 +156,7 @@ function runSlot(line: SimSpecLine, spec: SimSpec): SimRunSlot {
         seed: spec.seed,
         samplePeriodMin: spec.samplePeriodMin,
         recordFlow: spec.recordFlow,
+        stopAtProduced: spec.stopAtPieces,
       });
     } catch (err) {
       // The engine throws on a genuinely broken graph (no Source, no Sink).
@@ -175,6 +180,7 @@ function runSlot(line: SimSpecLine, spec: SimSpec): SimRunSlot {
     warmupSample,
     strideHistory: [],
     strideStationHistory: view.stations.map(() => []),
+    strideFrames: [],
     history: [],
     stationHistory: view.stations.map(() => []),
     state: emptyPmlSimState(),
@@ -208,12 +214,19 @@ function advanceSlot(slot: SimRunSlot, target: number): void {
       const s = samples[f];
       if (s.time - cursor < HISTORY_STRIDE_MIN) continue;
       cursor = s.time;
+      // The sample behind the previous stride point: each new point's `*Step`
+      // values are differenced against it.
+      const prev =
+        slot.strideFrames.length > 0
+          ? samples[slot.strideFrames[slot.strideFrames.length - 1]]
+          : undefined;
       slot.strideHistory.push(historyPointFrom(slot.view, s));
       for (let i = 0; i < slot.view.stations.length; i++) {
         slot.strideStationHistory[i].push(
-          stationHistoryPointFrom(slot.view.stations[i], s, slot.warmupSample ?? undefined),
+          stationHistoryPointFrom(slot.view.stations[i], s, slot.warmupSample ?? undefined, prev),
         );
       }
+      slot.strideFrames.push(f);
     }
   } else {
     // Scrubbed backwards: drop points past the new playhead. Every point is a
@@ -222,6 +235,7 @@ function advanceSlot(slot: SimRunSlot, target: number): void {
     let keep = slot.strideHistory.length;
     while (keep > 0 && slot.strideHistory[keep - 1].time > cutTime) keep--;
     slot.strideHistory.length = keep;
+    slot.strideFrames.length = keep;
     for (const h of slot.strideStationHistory) h.length = keep;
   }
   slot.builtThrough = idx;
@@ -244,10 +258,20 @@ function advanceSlot(slot: SimRunSlot, target: number): void {
     slot.strideHistory[slot.strideHistory.length - 1].time < playSample.time;
 
   if (tipNeeded) {
+    // The playhead closes a PARTIAL step, from the last stride point to now.
+    const tipPrev =
+      slot.strideFrames.length > 0
+        ? samples[slot.strideFrames[slot.strideFrames.length - 1]]
+        : undefined;
     slot.history = [...slot.strideHistory, historyPointFrom(slot.view, playSample)];
     slot.stationHistory = slot.strideStationHistory.map((h, i) => [
       ...h,
-      stationHistoryPointFrom(slot.view.stations[i], playSample, slot.warmupSample ?? undefined),
+      stationHistoryPointFrom(
+        slot.view.stations[i],
+        playSample,
+        slot.warmupSample ?? undefined,
+        tipPrev,
+      ),
     ]);
   } else {
     slot.history = slot.strideHistory.slice();
